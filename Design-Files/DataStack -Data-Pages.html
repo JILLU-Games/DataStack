@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DataStack — Data</title>
+<style>
+  :root {
+    --bg:#0a0a0b;--surface:#111113;--surface-2:#17171a;--surface-3:#1d1d21;
+    --border:#232326;--border-strong:#2e2e33;
+    --text:#e8e8ea;--text-muted:#85858c;--text-faint:#5a5a62;
+    --accent:#a3e635;--accent-soft:rgba(163,230,53,0.08);--accent-text:#a3e635;
+    --danger:#f87171;
+    --font:"Segoe UI","Segoe UI Web",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
+    --mono:"Consolas","SF Mono","Courier New",monospace;
+    --radius:0;
+  }
+  [data-theme="light"] {
+    --bg:#fafafa;--surface:#fff;--surface-2:#f4f4f5;--surface-3:#ececed;
+    --border:#e2e2e5;--border-strong:#d0d0d3;
+    --text:#111113;--text-muted:#5a5a62;--text-faint:#85858c;
+    --accent:#65a30d;--accent-soft:rgba(101,163,13,0.08);--accent-text:#4d7c0f;
+    --danger:#dc2626;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:var(--bg);color:var(--text);font-family:var(--font);
+    font-size:13px;line-height:1.5;font-weight:400;-webkit-font-smoothing:antialiased}
+  a{color:inherit;text-decoration:none}
+  button,input,select{font-family:inherit;font-size:inherit;color:inherit}
+  button{cursor:pointer}
+  .icon{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.5;
+    stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
+  .icon-sm{width:14px;height:14px}
+
+  /* Layout */
+  .admin{display:grid;grid-template-columns:208px 1fr;min-height:100vh}
+  .sidebar{background:var(--surface);border-right:1px solid var(--border);
+    display:flex;flex-direction:column;height:100vh;position:sticky;top:0;z-index:40}
+  .sidebar-head{height:56px;padding:0 16px;display:flex;align-items:center;
+    justify-content:space-between;border-bottom:1px solid var(--border);flex-shrink:0}
+  .brand{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500}
+  .brand-mark{width:14px;height:14px;background:var(--accent);display:grid;place-items:center}
+  .brand-mark::after{content:"";width:5px;height:5px;background:var(--bg)}
+  .brand-tag{font-size:9px;padding:1px 5px;margin-left:6px;
+    border:1px solid var(--border-strong);color:var(--text-faint);letter-spacing:.5px}
+  .sidebar-nav{flex:1;overflow-y:auto;padding:12px 0}
+  .nav-section{padding:0 12px;margin-bottom:16px}
+  .nav-label{font-size:10px;text-transform:uppercase;letter-spacing:.8px;
+    color:var(--text-faint);padding:4px 8px 6px;display:flex;align-items:center;
+    justify-content:space-between}
+  .nav-label .count{background:var(--surface-2);color:var(--text-muted);padding:0 5px;
+    font-size:9px;letter-spacing:0}
+  .nav-item{display:flex;align-items:center;gap:10px;padding:7px 8px;height:32px;
+    font-size:12.5px;color:var(--text-muted);border-left:2px solid transparent;
+    transition:background .12s,color .12s;user-select:none}
+  .nav-item:hover{background:var(--surface-2);color:var(--text)}
+  .nav-item.active{background:var(--surface-2);color:var(--text);
+    border-left-color:var(--accent)}
+  .nav-item.active .icon{color:var(--accent)}
+  .sidebar-foot{border-top:1px solid var(--border);padding:10px 12px;
+    display:flex;align-items:center;gap:8px}
+  .avatar{width:26px;height:26px;background:var(--surface-3);
+    border:1px solid var(--border-strong);display:grid;place-items:center;
+    font-size:11px;font-weight:500;color:var(--text);flex-shrink:0}
+  .user-meta{flex:1;min-width:0}
+  .user-name{font-size:12px;font-weight:500;color:var(--text);white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis}
+  .user-role{font-size:10px;color:var(--text-faint);text-transform:uppercase;
+    letter-spacing:.5px}
+  .icon-btn{width:28px;height:28px;background:transparent;border:1px solid var(--border);
+    display:grid;place-items:center;color:var(--text-muted);transition:background .12s}
+  .icon-btn:hover{background:var(--surface-2);color:var(--text)}
+
+  /* Main */
+  .admin-main{display:flex;flex-direction:column;min-width:0}
+  .topbar{height:56px;padding:0 24px;background:var(--surface);
+    border-bottom:1px solid var(--border);display:flex;align-items:center;
+    justify-content:space-between;gap:16px;position:sticky;top:0;z-index:30}
+  .topbar-left{display:flex;align-items:center;gap:12px;min-width:0}
+  .menu-btn{display:none}
+  .breadcrumb{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-faint)}
+  .breadcrumb .sep{color:var(--border-strong)}
+  .breadcrumb .current{color:var(--text)}
+  .topbar-right{display:flex;align-items:center;gap:8px}
+  .live-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 9px;
+    border:1px solid var(--border-strong);font-size:10px;letter-spacing:.5px;
+    text-transform:uppercase;color:var(--text-muted)}
+  .live-dot{width:5px;height:5px;background:var(--accent);animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  .theme-toggle{width:28px;height:28px;background:transparent;border:1px solid var(--border);
+    display:grid;place-items:center;color:var(--text-muted)}
+  .theme-toggle:hover{background:var(--surface-2)}
+
+  /* Content */
+  .content{padding:24px;max-width:1240px;width:100%}
+  .page-head{display:flex;align-items:center;justify-content:space-between;
+    gap:16px;margin-bottom:16px;flex-wrap:wrap}
+  .page-title{font-size:17px;font-weight:500;letter-spacing:-.2px}
+  .page-sub{font-size:12px;color:var(--text-muted);margin-top:2px}
+  .page-actions{display:flex;gap:8px}
+
+  .btn{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;height:30px;
+    font-size:12px;font-weight:400;border:1px solid var(--border-strong);
+    background:transparent;color:var(--text);transition:background .12s,border-color .12s}
+  .btn:hover{background:var(--surface-2)}
+  .btn-primary{background:var(--text);color:var(--bg);border-color:var(--text)}
+  .btn-primary:hover{background:#d0d0d3;border-color:#d0d0d3}
+  .btn-icon{padding:0;width:30px;height:30px;justify-content:center}
+  .btn-sm{padding:4px 9px;height:26px;font-size:11px}
+
+  /* Filter bar */
+  .filterbar{background:var(--surface);border:1px solid var(--border);
+    margin-bottom:12px}
+  .filter-row{display:grid;
+    grid-template-columns:180px 1fr 1fr 1.4fr auto;gap:1px;
+    background:var(--border)}
+  .field{background:var(--surface);padding:8px 12px;min-width:0}
+  .field-label{font-size:9.5px;text-transform:uppercase;letter-spacing:.6px;
+    color:var(--text-faint);margin-bottom:3px}
+  .field-input{width:100%;background:transparent;border:none;outline:none;
+    font-size:12.5px;color:var(--text);padding:0;height:20px}
+  .field-input::placeholder{color:var(--text-faint)}
+  .field-select{width:100%;background:transparent;border:none;outline:none;
+    font-size:12.5px;color:var(--text);padding:0;height:20px;
+    appearance:none;cursor:pointer;
+    background-image:linear-gradient(45deg,transparent 50%,var(--text-muted) 50%),
+      linear-gradient(135deg,var(--text-muted) 50%,transparent 50%);
+    background-position:calc(100% - 8px) 9px,calc(100% - 4px) 9px;
+    background-size:4px 4px;background-repeat:no-repeat}
+  .field-search{position:relative}
+  .field-search .icon{position:absolute;right:12px;top:26px;color:var(--text-faint)}
+  .filter-actions{background:var(--surface);padding:8px 12px;display:flex;
+    align-items:flex-end;gap:6px}
+
+  /* Table */
+  .panel{background:var(--surface);border:1px solid var(--border);
+    display:flex;flex-direction:column}
+  .panel-head{display:flex;align-items:center;justify-content:space-between;
+    padding:10px 14px;border-bottom:1px solid var(--border);gap:12px}
+  .panel-title{font-size:12px;font-weight:500;display:flex;align-items:center;gap:8px}
+  .panel-meta{font-size:11px;color:var(--text-faint)}
+  .panel-meta strong{color:var(--text);font-weight:500}
+  .panel-link{font-size:11px;color:var(--text-muted)}
+  .panel-link:hover{color:var(--text)}
+
+  .table{width:100%;border-collapse:collapse;font-size:12px}
+  .table thead th{text-align:left;padding:8px 14px;font-size:10px;
+    text-transform:uppercase;letter-spacing:.6px;color:var(--text-faint);
+    font-weight:400;background:var(--surface-2);border-bottom:1px solid var(--border);
+    white-space:nowrap}
+  .table thead th.right{text-align:right}
+  .table tbody td{padding:8px 14px;border-bottom:1px solid rgba(35,35,38,.6);
+    color:var(--text-muted);vertical-align:middle}
+  [data-theme="light"] .table tbody td{border-bottom-color:var(--border)}
+  .table tbody tr:last-child td{border-bottom:none}
+  .table tbody tr:hover td{background:var(--surface-2)}
+  .table td.mono{font-family:var(--mono);font-size:11.5px}
+  .table td.client{color:var(--accent-text);font-weight:400}
+  .table td.payload{color:var(--text);max-width:420px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono);
+    font-size:11.5px}
+  .table td.right{text-align:right}
+  .table td.id{color:var(--text-faint);font-family:var(--mono);font-size:11px}
+  .status-badge{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;
+    color:var(--text-muted)}
+  .status-badge .dot{width:5px;height:5px;background:var(--accent)}
+  .status-badge.warn .dot{background:#fbbf24}
+  .status-badge.err .dot{background:var(--danger)}
+
+  /* Pagination */
+  .pagination{display:flex;align-items:center;justify-content:space-between;
+    padding:10px 14px;border-top:1px solid var(--border);background:var(--surface)}
+  .pagination-info{font-size:11.5px;color:var(--text-muted)}
+  .pagination-info strong{color:var(--text);font-weight:500}
+  .pagination-controls{display:flex;align-items:center;gap:4px}
+  .page-btn{min-width:26px;height:26px;padding:0 8px;border:1px solid var(--border);
+    background:transparent;color:var(--text-muted);font-size:11.5px;
+    display:grid;place-items:center;transition:background .12s}
+  .page-btn:hover{background:var(--surface-2);color:var(--text)}
+  .page-btn.active{background:var(--surface-2);color:var(--text);
+    border-color:var(--border-strong)}
+  .page-btn.disabled{opacity:.4;cursor:not-allowed}
+
+  /* Empty / hint */
+  .hint{font-size:11px;color:var(--text-faint);margin-top:8px}
+
+  /* Mobile */
+  .overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:35}
+  .overlay.open{display:block}
+  @media (max-width:1024px){
+    .admin{grid-template-columns:1fr}
+    .sidebar{position:fixed;top:0;left:0;width:220px;transform:translateX(-100%);
+      transition:transform .2s ease-out}
+    .sidebar.open{transform:translateX(0)}
+    .menu-btn{display:grid}
+    .filter-row{grid-template-columns:1fr 1fr}
+  }
+  @media (max-width:640px){
+    .content{padding:16px}
+    .topbar{padding:0 16px}
+    .filter-row{grid-template-columns:1fr}
+    .live-chip{display:none}
+    .breadcrumb .sep,.breadcrumb .root{display:none}
+    .table td.id,.table td:nth-child(3){display:none}
+    .table thead th:nth-child(3){display:none}
+    .table td.payload{max-width:180px}
+    .panel-meta{display:none}
+  }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="i-grid" viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="4.5" height="4.5"/><rect x="9" y="2.5" width="4.5" height="4.5"/><rect x="2.5" y="9" width="4.5" height="4.5"/><rect x="9" y="9" width="4.5" height="4.5"/></symbol>
+  <symbol id="i-db" viewBox="0 0 16 16"><ellipse cx="8" cy="4" rx="5.5" ry="2"/><path d="M2.5 4v8c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2V4"/><path d="M2.5 8c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2"/></symbol>
+  <symbol id="i-users" viewBox="0 0 16 16"><circle cx="6" cy="6" r="2.5"/><path d="M1.5 13.5c0-2.2 2-3.5 4.5-3.5s4.5 1.3 4.5 3.5"/><path d="M11 3.5a2.5 2.5 0 0 1 0 5"/><path d="M12.5 10c1.4.4 2.5 1.4 2.5 3.5"/></symbol>
+  <symbol id="i-download" viewBox="0 0 16 16"><path d="M8 2v8"/><path d="M4.5 6.5 8 10l3.5-3.5"/><path d="M2.5 13.5h11"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.5 3.5l1.4 1.4M11.1 11.1l1.4 1.4M3.5 12.5l1.4-1.4M11.1 4.9l1.4-1.4"/></symbol>
+  <symbol id="i-list" viewBox="0 0 16 16"><path d="M3 4h10M3 8h10M3 12h7"/></symbol>
+  <symbol id="i-book" viewBox="0 0 16 16"><path d="M3 2.5h7.5c1 0 1.5.5 1.5 1.5v10H4.5c-1 0-1.5-.5-1.5-1.5V2.5Z"/><path d="M3 12.5c0-1 .5-1.5 1.5-1.5H12"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 16 16"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.5 3.5l1 1M11.5 11.5l1 1M3.5 12.5l1-1M11.5 4.5l1-1"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 16 16"><path d="M13.5 10A6 6 0 1 1 6 2.5c-.3 0-.5 0-.7.1a5.5 5.5 0 0 0 8.2 7.4Z"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3.5H10"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 16 16"><path d="M4 11V7a4 4 0 0 1 8 0v4l1 1.5H3L4 11Z"/><path d="M6.5 13.5a1.5 1.5 0 0 0 3 0"/></symbol>
+  <symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></symbol>
+  <symbol id="i-chev-l" viewBox="0 0 16 16"><path d="M10 4l-4 4 4 4"/></symbol>
+  <symbol id="i-chev-r" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></symbol>
+  <symbol id="i-clear" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></symbol>
+</svg>
+
+<div class="admin">
+
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-head">
+      <a href="/" class="brand"><span class="brand-mark"></span>DataStack<span class="brand-tag">CONSOLE</span></a>
+    </div>
+    <nav class="sidebar-nav">
+      <div class="nav-section">
+        <div class="nav-label">Main</div>
+        <a href="/vcon/dashboard" class="nav-item"><svg class="icon"><use href="#i-grid"/></svg>Dashboard</a>
+        <a href="/vcon/data" class="nav-item active"><svg class="icon"><use href="#i-db"/></svg>Data</a>
+        <a href="/vcon/clients" class="nav-item"><svg class="icon"><use href="#i-users"/></svg>Clients</a>
+        <a href="/vcon/export" class="nav-item"><svg class="icon"><use href="#i-download"/></svg>Export</a>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">System <span class="count">3</span></div>
+        <a href="/vcon/logs" class="nav-item"><svg class="icon"><use href="#i-list"/></svg>Logs</a>
+        <a href="/vcon/settings" class="nav-item"><svg class="icon"><use href="#i-settings"/></svg>Settings</a>
+        <a href="/docs" class="nav-item"><svg class="icon"><use href="#i-book"/></svg>Docs</a>
+      </div>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="avatar">A</div>
+      <div class="user-meta">
+        <div class="user-name">Admin</div>
+        <div class="user-role">Owner</div>
+      </div>
+      <button class="icon-btn" title="Settings"><svg class="icon icon-sm"><use href="#i-settings"/></svg></button>
+    </div>
+  </aside>
+
+  <div class="overlay" id="overlay" onclick="toggleSidebar()"></div>
+
+  <main class="admin-main">
+    <header class="topbar">
+      <div class="topbar-left">
+        <button class="icon-btn menu-btn" onclick="toggleSidebar()"><svg class="icon icon-sm"><use href="#i-menu"/></svg></button>
+        <div class="breadcrumb">
+          <span class="root">Console</span>
+          <span class="sep">/</span>
+          <span class="current">Data</span>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <span class="live-chip"><span class="live-dot"></span>Live · 1,284 ev/min</span>
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+          <svg class="icon icon-sm" id="theme-icon"><use href="#i-sun"/></svg>
+        </button>
+        <button class="icon-btn" title="Notifications"><svg class="icon icon-sm"><use href="#i-bell"/></svg></button>
+      </div>
+    </header>
+
+    <div class="content">
+
+      <div class="page-head">
+        <div>
+          <h1 class="page-title">Data</h1>
+          <div class="page-sub">Collected events across all clients</div>
+        </div>
+        <div class="page-actions">
+          <button class="btn btn-icon" title="Refresh"><svg class="icon icon-sm"><use href="#i-refresh"/></svg></button>
+          <a href="/vcon/export" class="btn btn-primary">
+            <svg class="icon icon-sm"><use href="#i-download"/></svg>
+            Export CSV
+          </a>
+        </div>
+      </div>
+
+      <!-- Filter bar -->
+      <div class="filterbar">
+        <div class="filter-row">
+          <div class="field">
+            <div class="field-label">Client</div>
+            <select class="field-select">
+              <option>All clients</option>
+              <option>py-client-01</option>
+              <option>py-client-02</option>
+              <option>py-client-03</option>
+            </select>
+          </div>
+          <div class="field">
+            <div class="field-label">From</div>
+            <input type="date" class="field-input" value="2026-10-23">
+          </div>
+          <div class="field">
+            <div class="field-label">To</div>
+            <input type="date" class="field-input" value="2026-10-23">
+          </div>
+          <div class="field field-search">
+            <div class="field-label">Search payload</div>
+            <input type="text" class="field-input" placeholder="e.g. sensor, user_id">
+            <svg class="icon icon-sm"><use href="#i-search"/></svg>
+          </div>
+          <div class="filter-actions">
+            <button class="btn btn-sm"><svg class="icon icon-sm"><use href="#i-clear"/></svg>Reset</button>
+            <button class="btn btn-sm btn-primary">Apply</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Table -->
+      <div class="panel">
+        <div class="panel-head">
+          <div class="panel-title"><svg class="icon icon-sm"><use href="#i-db"/></svg>Events</div>
+          <div class="panel-meta"><strong>42,891</strong> results · page 1 of 429</div>
+        </div>
+
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Client</th>
+              <th>Event ID</th>
+              <th>Payload</th>
+              <th>Size</th>
+              <th class="right">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="mono">14:28:01</td>
+              <td class="client">py-client-01</td>
+              <td class="id">evt_8f3a…c21</td>
+              <td class="payload">{ sensor: "temp", value: 22.4 }</td>
+              <td class="mono">42 B</td>
+              <td class="right"><span class="status-badge"><span class="dot"></span>ok</span></td>
+            </tr>
+            <tr>
+              <td class="mono">14:28:01</td>
+              <td class="client">py-client-02</td>
+              <td class="id">evt_9b1e…44a</td>
+              <td class="payload">{ user: "u_8291", action: "click" }</td>
+              <td class="mono">38 B</td>
+              <td class="right"><span class="status-badge"><span class="dot"></span>ok</span></td>
+            </tr>
+            <tr>
+              <td class="mono">14:28:02</td>
+              <td class="client">py-client-01</td>
+              <td class="id">evt_2c7f…88e</td>
+              <td class="payload">{ sensor: "humidity", value: 61 }</td>
+              <td class="mono">40 B</td>
+              <td class="right"><span class="status-badge"><span class="dot"></span>ok</span></td>
+            </tr>
+            <tr>
+              <td class="mono">14:28:02</td>
+              <td class="client">py-client-03</td>
+              <td class="id">evt_5d0a…1fb</td>
+              <td class="payload">{ order_id: "A-2041", status: "shipped" }</td>
+              <td class="mono">44 B</td>
+              <td class="right"><span class="status-badge"><span class="dot"></span>ok</span></td>
+            </tr>
+            <tr>
+              <td class="mono">14:28:03</td>
+              <td class="client">py-client-02</td>
+              <td class="id">evt_7e2d…09c</td>
+              <td class="payload">{ user: "u_1840", action: "view" }</td>
+              <td class="mono">36 B</td>
+              <td class="right"><span class="status-badge warn"><span class="dot"></span>retry</span></td>
+            </tr>
+            <tr>
+              <td class="mono">14:28:03</td>
+              <td class="client">py-client-01</td>
+              <td class="id">evt_1a9b…72d</td>
+              <td class="payload">{ sensor: "temp", value: 22.6 }</td>
+              <td class="mono">42 B</td>
+              <td class="right"><span class="status-badge"><span class="dot"></span>ok</span></td>
+            </tr>
+            <tr>
+              <td class="mono">14:28:04</td>
+              <td class="client">py-client-04</td>
+              <td class="id">evt_3c4e…b81</td>
+              <td class="payload">{ device: "d_01", battery: 87 }</td>
+              <td class="mono">40 B</td>
+              <td class="right"><span class="status-badge"><span class="dot"></span>ok</span></td>
+            </tr>
+            <tr>
+              <td class="mono">14:28:04</td>
+              <td class="client">py-client-02</td>
+              <td class="id">evt_6f7a…d94</td>
+              <td class="payload">{ user: "u_9903", action: "purchase" }</td>
+              <td class="mono">42 B</td>
+              <td class="right"><span class="status-badge"><span class="dot"></span>ok</span></td>
+            </tr>
+            <tr>
+              <td class="mono">14:28:05</td>
+              <td class="client">py-client-03</td>
+              <td class="id">evt_0b2c…55f</td>
+              <td class="payload">{ order_id: "A-2042", status: "pending" }</td>
+              <td class="mono">46 B</td>
+              <td class="right"><span class="status-badge"><span class="dot"></span>ok</span></td>
+            </tr>
+            <tr>
+              <td class="mono">14:28:05</td>
+              <td class="client">py-client-04</td>
+              <td class="id">evt_8d1c…2a3</td>
+              <td class="payload">{ device: "d_02", battery: 92 }</td>
+              <td class="mono">40 B</td>
+              <td class="right"><span class="status-badge err"><span class="dot"></span>failed</span></td>
+            </tr>
+            <tr>
+              <td class="mono">14:28:06</td>
+              <td class="client">py-client-01</td>
+              <td class="id">evt_4e9f…7d0</td>
+              <td class="payload">{ sensor: "temp", value: 22.7 }</td>
+              <td class="mono">42 B</td>
+              <td class="right"><span class="status-badge"><span class="dot"></span>ok</span></td>
+            </tr>
+            <tr>
+              <td class="mono">14:28:06</td>
+              <td class="client">py-client-02</td>
+              <td class="id">evt_5c3b…11e</td>
+              <td class="payload">{ user: "u_3312", action: "signup" }</td>
+              <td class="mono">40 B</td>
+              <td class="right"><span class="status-badge"><span class="dot"></span>ok</span></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="pagination">
+          <div class="pagination-info">Showing <strong>1–12</strong> of <strong>42,891</strong> events</div>
+          <div class="pagination-controls">
+            <button class="page-btn disabled" title="Previous"><svg class="icon icon-sm"><use href="#i-chev-l"/></svg></button>
+            <button class="page-btn active">1</button>
+            <button class="page-btn">2</button>
+            <button class="page-btn">3</button>
+            <button class="page-btn">…</button>
+            <button class="page-btn">429</button>
+            <button class="page-btn" title="Next"><svg class="icon icon-sm"><use href="#i-chev-r"/></svg></button>
+          </div>
+        </div>
+      </div>
+
+      <div class="hint">Data is served from compact CSV files · live updates stream in over WebSocket</div>
+
+    </div>
+  </main>
+</div>
+
+<script>
+  function toggleSidebar(){
+    document.getElementById('sidebar').classList.toggle('open');
+    document.getElementById('overlay').classList.toggle('open');
+  }
+  function toggleTheme(){
+    const html=document.documentElement, icon=document.getElementById('theme-icon');
+    const isDark=html.getAttribute('data-theme')==='dark';
+    html.setAttribute('data-theme',isDark?'light':'dark');
+    icon.innerHTML='<use href="'+(isDark?'#i-moon':'#i-sun')+'"/>';
+  }
+</script>
+</body>
+</html>

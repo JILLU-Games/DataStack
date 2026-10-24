@@ -1,4 +1,4 @@
-import jwt from 'jsonwebtoken';
+import jwt from "jsonwebtoken";
 
 export interface ClientTokenPayload {
   clientId: string;
@@ -8,7 +8,7 @@ export interface ClientTokenPayload {
   exp?: number;
 }
 
-const DEFAULT_SECRET = process.env.DATASTACK_JWT_SECRET || 'datastack-universal-secret-key-2026';
+const DEFAULT_SECRET = process.env.DATASTACK_JWT_SECRET || "";
 
 export class AuthService {
   private static secret: string = DEFAULT_SECRET;
@@ -26,7 +26,16 @@ export class AuthService {
   /**
    * Generates a signed JWT for client SDK authentication.
    */
-  public static generateClientToken(payload: { clientId: string; name?: string; rateLimit?: number }, expiresIn = '30d'): string {
+  public static generateClientToken(
+    payload: { clientId: string; name?: string; rateLimit?: number },
+    expiresIn = "30d",
+  ): string {
+    if (!this.secret) {
+      throw new Error(
+        "DATASTACK_JWT_SECRET must be configured before generating client tokens.",
+      );
+    }
+
     return jwt.sign(
       {
         clientId: payload.clientId,
@@ -34,20 +43,30 @@ export class AuthService {
         rateLimit: payload.rateLimit || 100,
       },
       this.secret,
-      { expiresIn: expiresIn as jwt.SignOptions['expiresIn'] }
+      { expiresIn: expiresIn as jwt.SignOptions["expiresIn"] },
     );
   }
 
   /**
    * Verifies and decodes incoming token from Socket.IO handshake.
    */
-  public static verifyClientToken(token: string): { valid: boolean; payload?: ClientTokenPayload; error?: string } {
+  public static verifyClientToken(token: string): {
+    valid: boolean;
+    payload?: ClientTokenPayload;
+    error?: string;
+  } {
+    if (!this.secret) {
+      return { valid: false, error: "DATASTACK_JWT_SECRET is not configured." };
+    }
+
     try {
-      const cleanToken = token.startsWith('Bearer ') ? token.slice(7).trim() : token.trim();
+      const cleanToken = token.startsWith("Bearer ")
+        ? token.slice(7).trim()
+        : token.trim();
       const decoded = jwt.verify(cleanToken, this.secret) as ClientTokenPayload;
       return { valid: true, payload: decoded };
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Invalid token';
+      const message = err instanceof Error ? err.message : "Invalid token";
       return { valid: false, error: message };
     }
   }

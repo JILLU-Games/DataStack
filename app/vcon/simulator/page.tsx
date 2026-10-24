@@ -1,11 +1,10 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { Select, Textarea } from '@/components/ui/Input';
-import { Icon } from '@/components/ui/Icon';
 import { useToast } from '@/components/ui/Toast';
+import { useEffect, useState } from 'react';
 
 export default function SimulatorPage() {
   const { success, error } = useToast();
@@ -112,7 +111,7 @@ export default function SimulatorPage() {
     <div className="flex flex-col gap-4 max-w-[960px]">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[var(--border)] pb-2">
-        <h1 className="text-[14px] font-semibold text-[var(--text)] tracking-tight">
+        <h1 className="text-[22px] font-semibold text-[var(--text)]">
           Simulator
         </h1>
 
@@ -137,11 +136,11 @@ export default function SimulatorPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
         {/* Editor Card */}
         <Card compact className="flex flex-col gap-2 p-2 bg-[var(--bg-elevated)]">
           <CardHeader className="p-0 pb-1 mb-0 border-b-0">
-            <CardTitle className="text-[11px]">Payload Configuration</CardTitle>
+            <CardTitle>Payload Configuration</CardTitle>
           </CardHeader>
           <CardContent className="p-0 flex flex-col gap-2">
             <Select
@@ -164,13 +163,13 @@ export default function SimulatorPage() {
         </Card>
 
         {/* Response Inspector */}
-        <Card compact className="flex flex-col gap-1.5 p-2 bg-[var(--bg-elevated)] font-mono text-[10px]">
+        <Card compact className="flex flex-col gap-3 bg-[var(--bg-elevated)] font-mono text-[12px]">
           <CardHeader className="p-0 pb-1 mb-0 border-b-0">
-            <CardTitle className="text-[11px]">Pipeline Response</CardTitle>
+            <CardTitle>Pipeline Response</CardTitle>
           </CardHeader>
           <CardContent className="p-0 flex flex-col gap-1">
             {lastResponse ? (
-              <pre className="p-2.5 bg-[var(--bg-main)] border border-[var(--border)] text-[var(--text)] overflow-x-auto max-h-[240px]">
+              <pre className="p-4 bg-[var(--bg-main)] border border-[var(--border)] text-[12px] text-[var(--text)] overflow-x-auto max-h-[320px]">
                 {JSON.stringify(lastResponse, null, 2)}
               </pre>
             ) : (

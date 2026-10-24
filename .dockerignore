@@ -1,0 +1,13 @@
+.git
+.next
+node_modules
+coverage
+notes
+**/notes
+storage/data
+.env*
+.mcp.json
+.vscode
+Design-Files
+*.log
+tsconfig.tsbuildinfo

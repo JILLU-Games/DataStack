@@ -1,5 +1,5 @@
-import { SDKManager } from '../sdk/sdkManager';
-import { SettingsManager } from '../adminSettings/settingsManager';
+import { SettingsManager } from "../adminSettings/settingsManager";
+import { SDKManager } from "../sdk/sdkManager";
 
 /**
  * Database Module (PostgreSQL + Prisma abstraction)
@@ -11,18 +11,18 @@ export class DatabaseEngine {
 
   public static async getHealth() {
     return {
-      status: 'healthy',
-      type: 'PostgreSQL + Prisma Schema Managed',
-      database: 'datastack_db',
-      role: 'Metadata & SDK Registrations Only',
-      collectedDataStorage: 'Strictly CSV (/storage/data)',
+      status: "healthy",
+      type: "PostgreSQL + Prisma Schema Managed",
+      database: "datastack_db",
+      role: "Metadata & SDK Registrations Only",
+      collectedDataStorage: "Strictly CSV (/storage/data)",
     };
   }
 
   public static async syncState() {
     return {
       clientsCount: SDKManager.listClients().length,
-      settings: SettingsManager.getSettings(),
+      settings: SettingsManager.getPublicSettings(),
     };
   }
 }

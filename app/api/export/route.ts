@@ -1,76 +1,162 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { CSVStorageManager } from '@/core/Storage/csvStorage';
-import fs from 'fs';
-import path from 'path';
+import {
+  CSVStorageManager,
+  type StorageFileMeta,
+} from "@/core/Storage/csvStorage";
+import { parse } from "csv-parse";
+import { NextRequest, NextResponse } from "next/server";
+import { createReadStream } from "node:fs";
 
-export async function GET(req: NextRequest) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const clientId = searchParams.get('clientId');
-    const filename = searchParams.get('filename');
+type ExportFormat = "csv" | "json";
+type CsvRecord = Record<string, string>;
+type StreamChunk = string | Uint8Array;
 
-    // Single specific file export
-    if (clientId && filename) {
-      const content = CSVStorageManager.getFileContent(clientId, filename);
-      if (!content) {
-        return NextResponse.json({ error: 'CSV file not found' }, { status: 404 });
-      }
+function toByteStream(chunks: AsyncIterable<StreamChunk>) {
+  const iterator = chunks[Symbol.asyncIterator]();
+  const encoder = new TextEncoder();
 
-      return new NextResponse(content, {
-        status: 200,
-        headers: {
-          'Content-Type': 'text/csv; charset=utf-8',
-          'Content-Disposition': `attachment; filename="${filename}"`,
-        },
-      });
-    }
-
-    // Stream aggregate or list files
-    const allFiles = CSVStorageManager.listAllFiles();
-    const filtered = clientId && clientId !== 'all'
-      ? allFiles.filter((f) => f.clientId === clientId)
-      : allFiles;
-
-    if (filtered.length === 0) {
-      const emptyCsv = 'clientId,eventId,timestamp,payload\n';
-      return new NextResponse(emptyCsv, {
-        status: 200,
-        headers: {
-          'Content-Type': 'text/csv; charset=utf-8',
-          'Content-Disposition': `attachment; filename="datastack_export_${Date.now()}.csv"`,
-        },
-      });
-    }
-
-    // Combine matching files with a single header
-    let combined = 'clientId,eventId,timestamp,payload\n';
-    for (const f of filtered) {
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
       try {
-        const raw = fs.readFileSync(f.filePath, 'utf8');
-        const lines = raw.split('\n');
-        // skip header on subsequent lines
-        const dataLines = lines.slice(1).filter((l) => l.trim().length > 0);
-        if (dataLines.length > 0) {
-          combined += dataLines.join('\n') + '\n';
+        const result = await iterator.next();
+        if (result.done) {
+          controller.close();
+        } else {
+          controller.enqueue(
+            typeof result.value === "string"
+              ? encoder.encode(result.value)
+              : result.value,
+          );
         }
-      } catch {
-        // continue
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+    async cancel() {
+      await iterator.return?.();
+    },
+  });
+}
+
+async function* readFileRecords(
+  file: StorageFileMeta,
+): AsyncGenerator<CsvRecord> {
+  const parser = createReadStream(file.filePath).pipe(
+    parse({ columns: true, skip_empty_lines: true, bom: true }),
+  );
+
+  try {
+    for await (const record of parser as AsyncIterable<CsvRecord>) {
+      yield record;
+    }
+  } catch {
+    parser.destroy();
+  }
+}
+
+function makeExportStream(
+  files: StorageFileMeta[],
+  format: ExportFormat,
+  includeHeader: boolean,
+) {
+  const fields = ["clientId", "eventId", "timestamp", "payload"];
+  const chunks = (async function* () {
+    let isFirst = true;
+
+    if (format === "json") {
+      yield "[";
+    } else if (includeHeader) {
+      yield `${fields.join(",")}\n`;
+    }
+
+    for (const file of files) {
+      for await (const record of readFileRecords(file)) {
+        if (format === "json") {
+          const payload = record.payload ?? "";
+          let parsedPayload: unknown = payload;
+          try {
+            parsedPayload = JSON.parse(payload);
+          } catch {
+            // Keep non-JSON payloads as strings.
+          }
+          yield `${isFirst ? "" : ","}${JSON.stringify({ ...record, payload: parsedPayload })}`;
+        } else {
+          const line = fields
+            .map((field) => `"${(record[field] ?? "").replaceAll('"', '""')}"`)
+            .join(",");
+          yield `${line}\n`;
+        }
+        isFirst = false;
       }
     }
 
-    const exportFileName = clientId && clientId !== 'all'
-      ? `${clientId}_export_${new Date().toISOString().split('T')[0]}.csv`
-      : `datastack_universal_export_${new Date().toISOString().split('T')[0]}.csv`;
+    if (format === "json") yield "]";
+  })();
 
-    return new NextResponse(combined, {
+  return toByteStream(chunks);
+}
+
+function streamFile(file: StorageFileMeta) {
+  async function* chunks() {
+    for await (const chunk of createReadStream(file.filePath)) {
+      yield new Uint8Array(chunk);
+    }
+  }
+
+  return toByteStream(chunks());
+}
+
+export async function GET(request: NextRequest) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const clientId = searchParams.get("clientId") || "all";
+    const filename = searchParams.get("filename");
+    const from = searchParams.get("from") || "";
+    const to = searchParams.get("to") || "";
+    const format: ExportFormat =
+      searchParams.get("format") === "json" ? "json" : "csv";
+    const includeHeader = searchParams.get("includeHeader") !== "false";
+
+    let files = CSVStorageManager.listAllFiles();
+    if (clientId !== "all")
+      files = files.filter((file) => file.clientId === clientId);
+
+    if (filename) {
+      const file = files.find((candidate) => candidate.filename === filename);
+      if (!file)
+        return NextResponse.json(
+          { error: "CSV file not found" },
+          { status: 404 },
+        );
+      return new NextResponse(streamFile(file), {
+        status: 200,
+        headers: {
+          "Content-Type": "text/csv; charset=utf-8",
+          "Content-Disposition": `attachment; filename="${file.filename}"`,
+        },
+      });
+    }
+
+    files = files.filter(
+      (file) => (!from || file.date >= from) && (!to || file.date <= to),
+    );
+    const datePart = new Date().toISOString().slice(0, 10);
+    const safeClientId = clientId.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const baseName =
+      clientId === "all" ? "datastack_export" : `${safeClientId}_export`;
+
+    return new NextResponse(makeExportStream(files, format, includeHeader), {
       status: 200,
       headers: {
-        'Content-Type': 'text/csv; charset=utf-8',
-        'Content-Disposition': `attachment; filename="${exportFileName}"`,
+        "Content-Type":
+          format === "json"
+            ? "application/json; charset=utf-8"
+            : "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename="${baseName}_${datePart}.${format}"`,
+        "Cache-Control": "no-store",
       },
     });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Export failed';
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Export failed";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

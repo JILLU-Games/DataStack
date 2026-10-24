@@ -1,7 +1,6 @@
-import React from 'react';
-import Link from 'next/link';
 import { MainLayout } from '@/components/layout/MainLayout';
 import { Button } from '@/components/ui/Button';
+import Link from 'next/link';
 
 export default function NotFound() {
   return (
@@ -15,11 +14,6 @@ export default function NotFound() {
           <Link href="/">
             <Button variant="secondary" size="sm">
               Return Home
-            </Button>
-          </Link>
-          <Link href="/vcon/dashboard">
-            <Button variant="primary" size="sm">
-              Admin Console
             </Button>
           </Link>
         </div>

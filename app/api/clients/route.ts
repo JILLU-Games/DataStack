@@ -1,12 +1,15 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { SDKManager } from '@/core/sdk/sdkManager';
+import { SDKManager } from "@/core/sdk/sdkManager";
+import { NextRequest, NextResponse } from "next/server";
 
 export async function GET() {
   try {
-    const clients = SDKManager.listClients();
+    const clients = SDKManager.listClients().map(
+      ({ secret, token, ...client }) => client,
+    );
     return NextResponse.json({ clients, count: clients.length });
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Failed to list clients';
+    const message =
+      err instanceof Error ? err.message : "Failed to list clients";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
@@ -18,8 +21,8 @@ export async function POST(req: NextRequest) {
 
     if (!clientId || !name) {
       return NextResponse.json(
-        { error: 'clientId and name are required' },
-        { status: 400 }
+        { error: "clientId and name are required" },
+        { status: 400 },
       );
     }
 
@@ -27,7 +30,7 @@ export async function POST(req: NextRequest) {
     if (existing) {
       return NextResponse.json(
         { error: `Client '${clientId}' already exists` },
-        { status: 409 }
+        { status: 409 },
       );
     }
 
@@ -39,7 +42,8 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ client: newClient }, { status: 201 });
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Client creation failed';
+    const message =
+      err instanceof Error ? err.message : "Client creation failed";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

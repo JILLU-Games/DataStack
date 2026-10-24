@@ -1,7 +1,7 @@
 'use client';
 
-import React, { createContext, useContext, useState, useCallback } from 'react';
 import { cn } from '@/lib/utils';
+import React, { createContext, useCallback, useContext, useState } from 'react';
 import { Icon } from './Icon';
 
 export type ToastType = 'success' | 'error' | 'warning' | 'info';
@@ -53,7 +53,7 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   return (
     <ToastContext.Provider value={{ toast: addToast, success, error, warning, info }}>
       {children}
-      <div className="fixed bottom-4 right-4 z-[9999] flex flex-col gap-2 max-w-[340px] pointer-events-none">
+      <div className="fixed bottom-4 left-4 right-4 sm:left-auto sm:right-6 sm:bottom-6 z-[9999] flex flex-col gap-2 max-w-[420px] pointer-events-none">
         {toasts.map((t) => {
           const typeBorder = {
             success: 'border-l-[3px] border-l-[var(--success)]',
@@ -80,17 +80,17 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             <div
               key={t.id}
               className={cn(
-                'pointer-events-auto flex items-start gap-2.5 p-3 bg-[var(--bg-elevated)] border border-[var(--border-strong)] text-[var(--text)] text-[12px] transition-all',
+                'pointer-events-auto flex items-start gap-3 p-4 bg-[var(--bg-elevated)] border border-[var(--border-strong)] text-[var(--text)] text-[13px] transition-all',
                 typeBorder
               )}
             >
               <div className="mt-0.5 shrink-0">
-                <Icon name={typeIcon} size={14} color={iconColor} />
+                <Icon name={typeIcon} size={17} color={iconColor} />
               </div>
               <div className="flex-1 min-w-0">
                 <div className="font-medium text-[var(--text)] leading-tight">{t.title}</div>
                 {t.message && (
-                  <div className="text-[11px] text-[var(--text-muted)] mt-0.5 leading-normal break-words">
+                  <div className="text-[12px] text-[var(--text-muted)] mt-1 leading-normal break-words">
                     {t.message}
                   </div>
                 )}

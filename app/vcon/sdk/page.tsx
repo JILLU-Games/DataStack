@@ -1,11 +1,10 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { Select } from '@/components/ui/Input';
-import { Icon } from '@/components/ui/Icon';
 import { useToast } from '@/components/ui/Toast';
+import { useEffect, useState } from 'react';
 
 export default function SdkGuidePage() {
   const { success } = useToast();
@@ -73,7 +72,7 @@ if client.connect():
     <div className="flex flex-col gap-4 max-w-[960px]">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[var(--border)] pb-2">
-        <h1 className="text-[14px] font-semibold text-[var(--text)] tracking-tight">
+        <h1 className="text-[22px] font-semibold text-[var(--text)]">
           Python SDK
         </h1>
 
@@ -89,8 +88,8 @@ if client.connect():
       </div>
 
       {/* Installation Step */}
-      <Card compact className="flex flex-col gap-1.5 font-mono text-[10.5px]">
-        <div className="p-2 bg-[var(--bg-main)] border border-[var(--border)] flex items-center justify-between">
+      <Card compact className="flex flex-col gap-3 font-mono text-[13px]">
+        <div className="p-3 bg-[var(--bg-main)] border border-[var(--border)] flex items-center justify-between">
           <span className="text-[var(--accent)]">pip install ./sdk-python</span>
           <Button
             size="xs"
@@ -105,7 +104,7 @@ if client.connect():
       <Card compact className="flex flex-col gap-2">
         <CardHeader className="p-0 pb-1 mb-0 border-b-0">
           <div className="flex flex-wrap items-center justify-between gap-2 w-full">
-            <CardTitle className="text-[11.5px]">Client Code Example</CardTitle>
+            <CardTitle>Client Code Example</CardTitle>
             {clients.length > 0 && (
               <div className="w-[180px]">
                 <Select
@@ -126,7 +125,7 @@ if client.connect():
 
         <CardContent className="p-0 flex flex-col gap-1">
           <div className="relative">
-            <pre className="p-2.5 bg-[var(--bg-main)] border border-[var(--border)] text-[var(--text)] text-[10.5px] font-mono overflow-x-auto leading-relaxed">
+            <pre className="p-4 bg-[var(--bg-main)] border border-[var(--border)] text-[var(--text)] text-[12px] font-mono overflow-x-auto leading-relaxed">
               {pythonSnippet}
             </pre>
           </div>

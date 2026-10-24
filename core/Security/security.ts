@@ -1,16 +1,26 @@
 export interface ValidationResult {
   allowed: boolean;
   reason?: string;
-  code?: 'RATE_LIMIT_EXCEEDED' | 'PAYLOAD_TOO_LARGE' | 'DUPLICATE_EVENT' | 'MALFORMED_PAYLOAD';
+  code?:
+    | "RATE_LIMIT_EXCEEDED"
+    | "PAYLOAD_TOO_LARGE"
+    | "DUPLICATE_EVENT"
+    | "MALFORMED_PAYLOAD";
 }
 
 export class SecurityEngine {
+  public static maxEventsPerSec = 100;
+  public static enableIdempotency = true;
+
   // Idempotency cache: key -> timestamp (expires after TTL)
   private static idempotencySet = new Map<string, number>();
   private static readonly IDEMPOTENCY_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
   // Rate limiter: clientId -> { count, windowStart }
-  private static rateLimitMap = new Map<string, { count: number; windowStart: number }>();
+  private static rateLimitMap = new Map<
+    string,
+    { count: number; windowStart: number }
+  >();
 
   // Default Max payload size (100KB)
   public static maxPayloadSizeBytes = 100 * 1024;
@@ -49,7 +59,10 @@ export class SecurityEngine {
    * Rate Limit Check:
    * Enforces max events per second per client.
    */
-  public static checkRateLimit(clientId: string, maxEventsPerSec = 100): boolean {
+  public static checkRateLimit(
+    clientId: string,
+    maxEventsPerSec = this.maxEventsPerSec,
+  ): boolean {
     const now = Date.now();
     const current = this.rateLimitMap.get(clientId);
 
@@ -74,33 +87,40 @@ export class SecurityEngine {
     clientId: string,
     eventId: string,
     payload: unknown,
-    clientMaxRate = 100
+    clientMaxRate = 100,
   ): ValidationResult {
     // 1. Check idempotency
-    const isUnique = this.checkIdempotency(clientId, eventId);
+    const isUnique =
+      !this.enableIdempotency || this.checkIdempotency(clientId, eventId);
     if (!isUnique) {
-      return { allowed: false, reason: 'Duplicate event dropped silently', code: 'DUPLICATE_EVENT' };
+      return {
+        allowed: false,
+        reason: "Duplicate event dropped silently",
+        code: "DUPLICATE_EVENT",
+      };
     }
 
     // 2. Check rate limit
-    const withinLimit = this.checkRateLimit(clientId, clientMaxRate);
+    const effectiveRateLimit = Math.min(clientMaxRate, this.maxEventsPerSec);
+    const withinLimit = this.checkRateLimit(clientId, effectiveRateLimit);
     if (!withinLimit) {
       return {
         allowed: false,
         reason: `Rate limit of ${clientMaxRate} events/sec exceeded for client ${clientId}`,
-        code: 'RATE_LIMIT_EXCEEDED',
+        code: "RATE_LIMIT_EXCEEDED",
       };
     }
 
     // 3. Check payload size
-    const payloadStr = typeof payload === 'string' ? payload : JSON.stringify(payload);
-    const byteLength = Buffer.byteLength(payloadStr, 'utf8');
+    const payloadStr =
+      typeof payload === "string" ? payload : JSON.stringify(payload);
+    const byteLength = Buffer.byteLength(payloadStr, "utf8");
 
     if (byteLength > this.maxPayloadSizeBytes) {
       return {
         allowed: false,
         reason: `Payload size (${(byteLength / 1024).toFixed(1)} KB) exceeds limit of ${this.maxPayloadSizeBytes / 1024} KB`,
-        code: 'PAYLOAD_TOO_LARGE',
+        code: "PAYLOAD_TOO_LARGE",
       };
     }
 

@@ -1,5 +1,5 @@
-import React from 'react';
 import { cn } from '@/lib/utils';
+import React from 'react';
 import { Icon } from './Icon';
 
 export interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
@@ -18,7 +18,7 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(
         {label && (
           <label
             htmlFor={inputId}
-            className="text-[10.5px] font-semibold text-[var(--text-muted)] uppercase tracking-wider"
+            className="text-[12px] font-medium text-[var(--text-muted)]"
           >
             {label}
           </label>
@@ -34,7 +34,7 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(
             ref={ref}
             className={cn(
               'w-full bg-[var(--bg-main)] text-[var(--text)] border border-[var(--border-strong)] placeholder:text-[var(--text-dim)] transition-colors focus:outline-none focus:border-[var(--accent)] disabled:opacity-50 disabled:cursor-not-allowed',
-              compact ? 'h-[28px] px-2 text-[11px]' : 'h-[32px] px-2.5 text-[12px]',
+              compact ? 'h-9 px-3 text-[13px]' : 'h-10 px-3.5 text-[14px]',
               icon && 'pl-8',
               error && 'border-[var(--danger)]',
               className
@@ -42,7 +42,7 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(
             {...props}
           />
         </div>
-        {error && <span className="text-[10.5px] text-[var(--danger)]">{error}</span>}
+        {error && <span className="text-[12px] text-[var(--danger)]">{error}</span>}
       </div>
     );
   }
@@ -64,7 +64,7 @@ export const Textarea = React.forwardRef<HTMLTextAreaElement, TextareaProps>(
         {label && (
           <label
             htmlFor={textareaId}
-            className="text-[10.5px] font-semibold text-[var(--text-muted)] uppercase tracking-wider"
+            className="text-[12px] font-medium text-[var(--text-muted)]"
           >
             {label}
           </label>
@@ -73,13 +73,13 @@ export const Textarea = React.forwardRef<HTMLTextAreaElement, TextareaProps>(
           id={textareaId}
           ref={ref}
           className={cn(
-            'w-full bg-[var(--bg-main)] text-[var(--text)] border border-[var(--border-strong)] p-2.5 text-[12px] placeholder:text-[var(--text-dim)] focus:outline-none focus:border-[var(--accent)] min-h-[64px] resize-y font-mono',
+            'w-full bg-[var(--bg-main)] text-[var(--text)] border border-[var(--border-strong)] p-3.5 text-[14px] placeholder:text-[var(--text-dim)] focus:outline-none focus:border-[var(--accent)] min-h-[96px] resize-y font-mono',
             error && 'border-[var(--danger)]',
             className
           )}
           {...props}
         />
-        {error && <span className="text-[10.5px] text-[var(--danger)]">{error}</span>}
+        {error && <span className="text-[12px] text-[var(--danger)]">{error}</span>}
       </div>
     );
   }
@@ -103,7 +103,7 @@ export const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
         {label && (
           <label
             htmlFor={selectId}
-            className="text-[10.5px] font-semibold text-[var(--text-muted)] uppercase tracking-wider"
+            className="text-[12px] font-medium text-[var(--text-muted)]"
           >
             {label}
           </label>
@@ -113,7 +113,7 @@ export const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
           ref={ref}
           className={cn(
             'w-full bg-[var(--bg-main)] text-[var(--text)] border border-[var(--border-strong)] focus:outline-none focus:border-[var(--accent)] cursor-pointer',
-            compact ? 'h-[28px] px-1.5 text-[11px]' : 'h-[32px] px-2 text-[11.5px]',
+            compact ? 'h-9 px-2.5 text-[13px]' : 'h-10 px-3 text-[14px]',
             error && 'border-[var(--danger)]',
             className
           )}
@@ -127,7 +127,7 @@ export const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
               ))
             : children}
         </select>
-        {error && <span className="text-[10.5px] text-[var(--danger)]">{error}</span>}
+        {error && <span className="text-[12px] text-[var(--danger)]">{error}</span>}
       </div>
     );
   }

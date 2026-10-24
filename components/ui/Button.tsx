@@ -1,5 +1,5 @@
-import React from 'react';
 import { cn } from '@/lib/utils';
+import React from 'react';
 import { Icon } from './Icon';
 
 export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -30,7 +30,7 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
 
     const variantStyles = {
       primary:
-        'bg-[var(--accent)] text-[var(--text-on-accent)] hover:bg-[var(--accent-hover)] border-[var(--accent)]',
+        'bg-[var(--text)] text-[var(--bg)] hover:opacity-90 border-[var(--text)]',
       secondary:
         'bg-[var(--bg-elevated)] text-[var(--text)] border-[var(--border-strong)] hover:bg-[var(--bg-hover)]',
       ghost:
@@ -42,10 +42,10 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
     };
 
     const sizeStyles = {
-      default: 'h-[32px] px-[14px] text-[12.5px] gap-[7px]',
-      sm: 'h-[27px] px-[10px] text-[11.5px] gap-[5px]',
-      xs: 'h-[24px] px-[7px] text-[10.5px] gap-[4px]',
-      icon: 'w-[30px] h-[30px] p-0',
+      default: 'min-h-10 px-4 text-[13.5px] gap-2',
+      sm: 'h-9 px-3 text-[12.5px] gap-1.5',
+      xs: 'h-8 px-2.5 text-[12px] gap-1.5',
+      icon: 'w-9 h-9 p-0',
     };
 
     return (

@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # Next.js Frontend & Admin Console (Port 3000)
   web:
@@ -9,13 +7,26 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NODE_ENV=production
-      - DATASTACK_JWT_SECRET=datastack-universal-secret-key-2026
-      - DATABASE_URL=postgresql://datastack:securepass@postgres:5432/datastack_db
+      NODE_ENV: production
+      PORT: "3000"
+      DATASTACK_JWT_SECRET: "${DATASTACK_JWT_SECRET:?Set DATASTACK_JWT_SECRET in .env}"
+      DATASTACK_ADMIN_EMAIL: "${DATASTACK_ADMIN_EMAIL:?Set DATASTACK_ADMIN_EMAIL in .env}"
+      DATASTACK_ADMIN_PASSWORD: "${DATASTACK_ADMIN_PASSWORD:?Set DATASTACK_ADMIN_PASSWORD in .env}"
+      DATASTACK_ADMIN_SESSION_SECRET: "${DATASTACK_ADMIN_SESSION_SECRET:?Set DATASTACK_ADMIN_SESSION_SECRET in .env}"
+      DATABASE_URL: "${DATABASE_URL:?Set DATABASE_URL in .env}"
     restart: unless-stopped
-    depends_on:
-      - redis
-      - postgres
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   # Express + Socket.IO Ingestion Engine (Port 4000)
   ingestion:
@@ -25,35 +36,51 @@ services:
     ports:
       - "4000:4000"
     volumes:
-      - ../storage:/app/storage
+      - datastack-data:/app/storage
     environment:
-      - NODE_ENV=production
-      - PORT_SOCKET=4000
-      - DATASTACK_JWT_SECRET=datastack-universal-secret-key-2026
-      - REDIS_URL=redis://redis:6379
+      NODE_ENV: production
+      PORT_SOCKET: "4000"
+      DATASTACK_JWT_SECRET: "${DATASTACK_JWT_SECRET:?Set DATASTACK_JWT_SECRET in .env}"
     restart: unless-stopped
-    depends_on:
-      - redis
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4000/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
-  # Redis In-Memory Buffer Broker
+  # Reserved for the planned shared buffer integration; not consumed by the current runtime.
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
-  # PostgreSQL for Admin Metadata Only (NOT collected data)
+  # Reserved for the planned metadata integration; not consumed by the current runtime.
   postgres:
     image: postgres:16-alpine
     environment:
-      - POSTGRES_USER=datastack
-      - POSTGRES_PASSWORD=securepass
-      - POSTGRES_DB=datastack_db
+      POSTGRES_USER: datastack
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}"
+      POSTGRES_DB: datastack_db
     volumes:
       - pgdata:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U datastack -d datastack_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
+  datastack-data:
   pgdata:

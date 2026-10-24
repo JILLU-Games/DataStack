@@ -1,7 +1,12 @@
-const jwt = require('jsonwebtoken');
+const jwt = require("jsonwebtoken");
 
 function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
-  const jwtSecret = options.jwtSecret || process.env.DATASTACK_JWT_SECRET || 'datastack-universal-secret-key-2026';
+  const jwtSecret = options.jwtSecret || process.env.DATASTACK_JWT_SECRET;
+  if (!jwtSecret) {
+    throw new Error(
+      "DATASTACK_JWT_SECRET must be configured before starting the socket server.",
+    );
+  }
   const idempotencyMap = new Map();
   const rateLimitMap = new Map();
 
@@ -13,11 +18,13 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
       socket.handshake.query?.token;
 
     if (!authHeader) {
-      return next(new Error('AUTH_REQUIRED: Handshake missing JWT'));
+      return next(new Error("AUTH_REQUIRED: Handshake missing JWT"));
     }
 
     try {
-      const cleanToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
+      const cleanToken = authHeader.startsWith("Bearer ")
+        ? authHeader.slice(7)
+        : authHeader;
       const decoded = jwt.verify(cleanToken, jwtSecret);
       socket.data.clientId = decoded.clientId;
       socket.data.rateLimit = decoded.rateLimit || 100;
@@ -27,21 +34,24 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
     }
   });
 
-  io.on('connection', (socket) => {
+  io.on("connection", (socket) => {
     const clientId = socket.data.clientId;
     const rateLimit = socket.data.rateLimit;
     socket.join(`client:${clientId}`);
 
     // Single event
-    socket.on('sync_data', (payload, callback) => {
+    socket.on("sync_data", (payload, callback) => {
       try {
-        const eventId = payload.eventId || `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+        const eventId =
+          payload.eventId ||
+          `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         const timestamp = payload.timestamp || new Date().toISOString();
 
         // Idempotency
         const key = `${clientId}:${eventId}`;
         if (idempotencyMap.has(key)) {
-          if (callback) callback({ success: true, eventId, note: 'DUPLICATE_DROPPED' });
+          if (callback)
+            callback({ success: true, eventId, note: "DUPLICATE_DROPPED" });
           return;
         }
         idempotencyMap.set(key, Date.now());
@@ -52,7 +62,8 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
         if (!rl || now - rl.start >= 1000) {
           rateLimitMap.set(clientId, { count: 1, start: now });
         } else if (rl.count >= rateLimit) {
-          if (callback) callback({ success: false, error: 'RATE_LIMIT_EXCEEDED' });
+          if (callback)
+            callback({ success: false, error: "RATE_LIMIT_EXCEEDED" });
           return;
         } else {
           rl.count += 1;
@@ -62,7 +73,10 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
           clientId,
           eventId,
           timestamp,
-          payload: typeof payload.data === 'string' ? payload.data : JSON.stringify(payload.data),
+          payload:
+            typeof payload.data === "string"
+              ? payload.data
+              : JSON.stringify(payload.data),
         };
 
         bufferQueue.push(event);
@@ -74,22 +88,27 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
     });
 
     // Batch event
-    socket.on('batch_sync', (batch, callback) => {
+    socket.on("batch_sync", (batch, callback) => {
       if (!Array.isArray(batch)) {
-        if (callback) callback({ success: false, error: 'Expected array' });
+        if (callback) callback({ success: false, error: "Expected array" });
         return;
       }
 
       let count = 0;
       for (const item of batch) {
-        const eventId = item.eventId || `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+        const eventId =
+          item.eventId ||
+          `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         const timestamp = item.timestamp || new Date().toISOString();
 
         bufferQueue.push({
           clientId,
           eventId,
           timestamp,
-          payload: typeof item.data === 'string' ? item.data : JSON.stringify(item.data),
+          payload:
+            typeof item.data === "string"
+              ? item.data
+              : JSON.stringify(item.data),
         });
         count++;
       }
