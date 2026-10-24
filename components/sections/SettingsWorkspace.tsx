@@ -58,7 +58,12 @@ export function SettingsWorkspace() {
 
   useEffect(() => {
     setBaseUrl(window.location.origin);
-    setWebSocketUrl(`${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.hostname}:4000`);
+    const isLocalDev = window.location.port === '3000';
+    const socketProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const socketHost = isLocalDev
+      ? `${window.location.hostname}:4000`
+      : window.location.host;
+    setWebSocketUrl(`${socketProtocol}://${socketHost}`);
 
     Promise.all([
       fetch('/api/settings').then(async (response) => {

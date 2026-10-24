@@ -48,17 +48,16 @@ npm run server
 
 ## Production Containers
 
-Docker Compose builds the standalone Next.js web image and the separate Socket.IO ingestion image. Docker Engine with the Compose plugin is required.
+## Coolify Deployment
 
-1. Copy `.env.example` to `.env` and set unique values for `DATASTACK_JWT_SECRET`, `DATASTACK_ADMIN_SESSION_SECRET`, `DATASTACK_ADMIN_EMAIL`, `DATASTACK_ADMIN_PASSWORD`, `DATABASE_URL`, and `POSTGRES_PASSWORD`. Keep `.env` private and out of source control.
-   `DATABASE_URL` must use the `postgres` service host and a password matching `POSTGRES_PASSWORD`.
-2. From the repository root, validate and start the stack:
+The repository includes a Docker Compose stack for a Coolify Git-based Docker Compose application. Coolify must be installed on a VPS with a domain and HTTPS configured.
 
-```powershell
-docker compose --env-file .env -f docker/docker-compose.yml config
-docker compose --env-file .env -f docker/docker-compose.yml up --build -d
-```
+1. In Coolify, add a Docker Compose application from `https://gitlab.com/ivibtools/datastack.git`, branch `main`.
+2. Set Base Directory to `/` and Docker Compose Location to `docker/docker-compose.yml`.
+3. Add the required variables in the Coolify application's Environment Variables: `DATASTACK_JWT_SECRET`, `DATASTACK_ADMIN_SESSION_SECRET`, `DATASTACK_ADMIN_EMAIL`, `DATASTACK_ADMIN_PASSWORD`, `DATABASE_URL`, and `POSTGRES_PASSWORD`. Use unique secrets; `DATABASE_URL` must use host `postgres`, database `datastack_db`, user `datastack`, and a password matching `POSTGRES_PASSWORD`.
+4. In Domains, add the public HTTPS domain to service `proxy` on internal port `80`. Do not expose `web`, `ingestion`, Redis, or PostgreSQL directly. Coolify supplies proxy labels for the selected service.
+5. Deploy and check service health and runtime logs in Coolify.
 
-The web console is published on port 3000 and the ingestion service on port 4000. Redis and PostgreSQL are private to the Compose network. CSV files written by the ingestion container persist in the `datastack-data` named volume; PostgreSQL metadata persists in `pgdata`.
+The proxy sends `/` to Next.js and `/socket.io/` to the Socket.IO service over the private Compose network. The Settings page uses the current origin for a deployed WebSocket URL; local development on port 3000 still displays port 4000.
 
-The current web process still has a separate in-memory buffer and container-local storage view. Redis and Prisma/PostgreSQL are not yet used by application code, and the web process does not yet read the ingestion volume. Cross-process event visibility and shared storage are Phase P4 work; metadata persistence is Phase P5 work. Do not treat this Compose stack as production-ready until those phases and runtime checks are complete.
+The `datastack-data` named volume persists CSVs written by ingestion. The web process does not yet read that volume; Redis and Prisma/PostgreSQL are not yet used by application code. Cross-process event visibility/shared storage remains Phase P4 work and metadata persistence remains Phase P5 work. Coolify deployment does not resolve those production-readiness gaps, and this stack has not yet been built or deployed on a Coolify VPS from this environment.
