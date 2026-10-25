@@ -1,9 +1,10 @@
 'use client';
 
+import { Button } from '@/components/ui/Button';
 import { Icon } from '@/components/ui/Icon';
 import { cn } from '@/lib/utils';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import React, { useEffect, useState } from 'react';
 
 interface SidebarProps {
@@ -16,6 +17,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onClose,
 }) => {
   const pathname = usePathname();
+  const router = useRouter();
+  const [isSigningOut, setIsSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState('');
 
   const navigation = [
     {
@@ -55,6 +59,23 @@ export const Sidebar: React.FC<SidebarProps> = ({
   useEffect(() => {
     if (activeGroup) setOpenGroup(activeGroup);
   }, [activeGroup]);
+
+  const signOut = async () => {
+    setIsSigningOut(true);
+    setSignOutError('');
+    try {
+      const response = await fetch('/api/auth/logout', { method: 'POST' });
+      if (!response.ok) throw new Error('Unable to sign out. Please try again.');
+      router.replace('/vcon/login');
+      router.refresh();
+    } catch (error) {
+      setSignOutError(
+        error instanceof Error ? error.message : 'Unable to sign out. Please try again.',
+      );
+    } finally {
+      setIsSigningOut(false);
+    }
+  };
 
   return (
     <>
@@ -168,6 +189,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <span>Auth Handshake</span>
             <span className="text-[var(--text-muted)]">JWT</span>
           </div>
+          {pathname !== '/vcon/setup' && (
+            <>
+              {signOutError && (
+                <p role="alert" className="text-[var(--danger)]">{signOutError}</p>
+              )}
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                icon="LogOut"
+                loading={isSigningOut}
+                disabled={isSigningOut}
+                onClick={signOut}
+                className="mt-1 w-full justify-start px-2 text-[11px]"
+              >
+                Sign out
+              </Button>
+            </>
+          )}
         </div>
       </aside>
     </>
