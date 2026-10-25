@@ -1,5 +1,9 @@
 import { createAdminSessionToken } from "@/core/auth/adminSession";
-import { verifyAdminCredentials } from "@/core/auth/adminUsers";
+import {
+  clearAdminLoginAttempts,
+  consumeAdminLoginAttempt,
+  verifyAdminCredentials,
+} from "@/core/auth/adminUsers";
 import { NextRequest, NextResponse } from "next/server";
 import { createHash, timingSafeEqual } from "node:crypto";
 
@@ -37,6 +41,27 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    let throttleDecision;
+    try {
+      throttleDecision = await consumeAdminLoginAttempt(email, sessionSecret);
+    } catch {
+      return NextResponse.json(
+        { error: "Admin authentication is temporarily unavailable." },
+        { status: 503 },
+      );
+    }
+    if (!throttleDecision.allowed) {
+      return NextResponse.json(
+        { error: "Too many sign-in attempts. Try again later." },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": String(throttleDecision.retryAfterSeconds),
+          },
+        },
+      );
+    }
+
     let authenticated = false;
     if (process.env.NODE_ENV !== "production" && !process.env.DATABASE_URL) {
       const adminEmail = process.env.DATASTACK_ADMIN_EMAIL;
@@ -62,6 +87,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { error: "Invalid email or password." },
         { status: 401 },
+      );
+    }
+
+    try {
+      await clearAdminLoginAttempts(email, sessionSecret);
+    } catch {
+      return NextResponse.json(
+        { error: "Admin authentication is temporarily unavailable." },
+        { status: 503 },
       );
     }
 
