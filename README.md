@@ -53,7 +53,7 @@ npm run server
 The repository includes a Docker Compose stack for a Coolify Git-based Docker Compose application. Coolify must be installed on a VPS with a domain and HTTPS configured.
 
 1. In Coolify, add a Docker Compose application from `https://gitlab.com/ivibtools/datastack.git`, branch `main`.
-2. Set Base Directory to `/` and Docker Compose Location to `docker/docker-compose.yml`.
+2. Set Base Directory to `/docker` and Docker Compose Location to `/docker/docker-compose.yml`. Confirm Coolify resolves the Compose file to the repository's `docker/docker-compose.yml`; do not change the Compose file path when changing the Base Directory.
 3. Set `DATASTACK_ADMIN_EMAIL` in the application's Environment Variables. Coolify auto-generates the database name/password, JWT/session secrets, and one-time setup key from the `SERVICE_*` variables in Compose. `DATABASE_URL` is assembled internally from the generated database name/password. Do not override generated database identity values after first deployment.
 4. In Domains, add the public HTTPS domain to service `proxy` on internal port `80`. Do not expose `web`, `ingestion`, Redis, or PostgreSQL directly. Coolify supplies proxy labels for the selected service.
 5. Deploy and check service health and runtime logs in Coolify.
