@@ -2,6 +2,7 @@ import { verifyAdminSessionToken } from "@/core/auth/adminSession";
 import { NextRequest, NextResponse } from "next/server";
 
 const SESSION_COOKIE = "datastack_admin_session";
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 function isProtectedApi(pathname: string, method: string) {
   if (pathname === "/api/auth/login") return false;
@@ -9,6 +10,30 @@ function isProtectedApi(pathname: string, method: string) {
   if (pathname === "/api/auth/setup" && method === "POST") return false;
   if (pathname === "/api/events" && method === "POST") return false;
   return pathname.startsWith("/api/");
+}
+
+function isSameOriginRequest(request: NextRequest) {
+  const originHeader = request.headers.get("origin");
+  const requestHost = request.headers.get("host");
+  if (!originHeader || !requestHost) return false;
+
+  try {
+    const origin = new URL(originHeader);
+    const forwardedProtocol = request.headers
+      .get("x-forwarded-proto")
+      ?.split(",")[0]
+      .trim()
+      .toLowerCase();
+    const requestProtocol =
+      forwardedProtocol || request.nextUrl.protocol.replace(/:$/, "");
+
+    return (
+      origin.host.toLowerCase() === requestHost.toLowerCase() &&
+      origin.protocol === `${requestProtocol}:`
+    );
+  } catch {
+    return false;
+  }
 }
 
 export async function middleware(request: NextRequest) {
@@ -20,9 +45,20 @@ export async function middleware(request: NextRequest) {
     !isLoginPage &&
     !isSetupPage;
   const isAdminApi = isProtectedApi(pathname, request.method);
+  const isStateChangingApi =
+    pathname.startsWith("/api/") &&
+    !SAFE_METHODS.has(request.method) &&
+    pathname !== "/api/events";
 
   if (isSetupPage) return NextResponse.next();
   if (!isConsolePage && !isAdminApi && !isLoginPage) return NextResponse.next();
+
+  if (isStateChangingApi && !isSameOriginRequest(request)) {
+    return NextResponse.json(
+      { error: "Cross-origin request rejected." },
+      { status: 403 },
+    );
+  }
 
   const sessionSecret = process.env.DATASTACK_ADMIN_SESSION_SECRET;
   const token = request.cookies.get(SESSION_COOKIE)?.value;
