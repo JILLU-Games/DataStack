@@ -1,4 +1,5 @@
 import { createAdminSessionToken } from "@/core/auth/adminSession";
+import { verifyAdminCredentials } from "@/core/auth/adminUsers";
 import { NextRequest, NextResponse } from "next/server";
 import { createHash, timingSafeEqual } from "node:crypto";
 
@@ -13,20 +14,12 @@ function constantTimeEqual(left: string, right: string) {
 }
 
 export async function POST(request: NextRequest) {
-  const adminEmail = process.env.DATASTACK_ADMIN_EMAIL;
-  const adminPassword = process.env.DATASTACK_ADMIN_PASSWORD;
   const sessionSecret = process.env.DATASTACK_ADMIN_SESSION_SECRET;
 
-  if (
-    !adminEmail ||
-    !adminPassword ||
-    !sessionSecret ||
-    sessionSecret.length < 32
-  ) {
+  if (!sessionSecret || sessionSecret.length < 32) {
     return NextResponse.json(
       {
-        error:
-          "Admin login is not configured. Set the required server environment variables.",
+        error: "Admin authentication is not configured.",
       },
       { status: 503 },
     );
@@ -37,11 +30,35 @@ export async function POST(request: NextRequest) {
     const email =
       typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
     const password = typeof body.password === "string" ? body.password : "";
+    if (!email || password.length === 0 || password.length > 1024) {
+      return NextResponse.json(
+        { error: "Invalid email or password." },
+        { status: 401 },
+      );
+    }
 
-    if (
-      !constantTimeEqual(email, adminEmail.trim().toLowerCase()) ||
-      !constantTimeEqual(password, adminPassword)
-    ) {
+    let authenticated = false;
+    if (process.env.NODE_ENV !== "production" && !process.env.DATABASE_URL) {
+      const adminEmail = process.env.DATASTACK_ADMIN_EMAIL;
+      const adminPassword = process.env.DATASTACK_ADMIN_PASSWORD;
+      authenticated = Boolean(
+        adminEmail &&
+        adminPassword &&
+        constantTimeEqual(email, adminEmail.trim().toLowerCase()) &&
+        constantTimeEqual(password, adminPassword),
+      );
+    } else {
+      try {
+        authenticated = await verifyAdminCredentials(email, password);
+      } catch {
+        return NextResponse.json(
+          { error: "Admin authentication is temporarily unavailable." },
+          { status: 503 },
+        );
+      }
+    }
+
+    if (!authenticated) {
       return NextResponse.json(
         { error: "Invalid email or password." },
         { status: 401 },

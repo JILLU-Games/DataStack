@@ -1,5 +1,15 @@
 import { AdminLogin } from '@/components/sections/AdminLogin';
+import { isAdminSetupComplete } from '@/core/auth/adminUsers';
+import { redirect } from 'next/navigation';
 
-export default function LoginPage() {
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+export default async function LoginPage() {
+  if (process.env.NODE_ENV === 'production' && process.env.DATABASE_URL) {
+    const isConfigured = await isAdminSetupComplete().catch(() => false);
+    if (!isConfigured) redirect('/vcon/setup');
+  }
+
   return <AdminLogin />;
 }

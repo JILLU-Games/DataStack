@@ -41,6 +41,16 @@ model ApiKey {
   @@map("api_keys")
 }
 
+model AdminUser {
+  id           Int      @id @default(1) @db.SmallInt
+  email        String   @unique
+  passwordSalt Bytes    @map("password_salt")
+  passwordHash Bytes    @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("admin_users")
+}
+
 model AdminSettings {
   id                    String   @id @default("default")
   serverPort            Int      @default(4000)

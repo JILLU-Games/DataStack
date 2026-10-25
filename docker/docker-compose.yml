@@ -11,9 +11,9 @@ services:
       PORT: "3000"
       DATASTACK_JWT_SECRET: "${SERVICE_REALBASE64_64_JWT:?Coolify must generate SERVICE_REALBASE64_64_JWT}"
       DATASTACK_ADMIN_EMAIL: "${DATASTACK_ADMIN_EMAIL:?Set DATASTACK_ADMIN_EMAIL in .env}"
-      DATASTACK_ADMIN_PASSWORD: "${SERVICE_PASSWORDWITHSYMBOLS_64_ADMIN:?Coolify must generate SERVICE_PASSWORDWITHSYMBOLS_64_ADMIN}"
       DATASTACK_ADMIN_SESSION_SECRET: "${SERVICE_REALBASE64_64_ADMINSESSION:?Coolify must generate SERVICE_REALBASE64_64_ADMINSESSION}"
-      DATABASE_URL: "postgresql://datastack:${SERVICE_PASSWORD_64_POSTGRES:?Coolify must generate SERVICE_PASSWORD_64_POSTGRES}@postgres:5432/datastack_db"
+      DATASTACK_ADMIN_SETUP_KEY: "${SERVICE_REALBASE64_64_ADMININSTALL:?Coolify must generate SERVICE_REALBASE64_64_ADMININSTALL}"
+      DATABASE_URL: "postgresql://datastack:${SERVICE_PASSWORD_64_POSTGRES:?Coolify must generate SERVICE_PASSWORD_64_POSTGRES}@postgres:5432/${SERVICE_HEX_32_DATABASENAME:?Coolify must generate SERVICE_HEX_32_DATABASENAME}"
     restart: unless-stopped
     healthcheck:
       test:
@@ -91,12 +91,12 @@ services:
     environment:
       POSTGRES_USER: datastack
       POSTGRES_PASSWORD: "${SERVICE_PASSWORD_64_POSTGRES:?Coolify must generate SERVICE_PASSWORD_64_POSTGRES}"
-      POSTGRES_DB: datastack_db
+      POSTGRES_DB: "${SERVICE_HEX_32_DATABASENAME:?Coolify must generate SERVICE_HEX_32_DATABASENAME}"
     volumes:
       - pgdata:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U datastack -d datastack_db"]
+      test: ["CMD-SHELL", 'pg_isready -U datastack -d "$$POSTGRES_DB"']
       interval: 10s
       timeout: 5s
       retries: 5

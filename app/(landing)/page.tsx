@@ -3,8 +3,17 @@ import { Features } from '@/components/sections/Features';
 import { Hero } from '@/components/sections/Hero';
 import { LandingAbout } from '@/components/sections/LandingAbout';
 import { SdkSection } from '@/components/sections/SdkSection';
+import { isAdminSetupComplete } from '@/core/auth/adminUsers';
+import { redirect } from 'next/navigation';
 
-export default function LandingPage() {
+export const dynamic = 'force-dynamic';
+
+export default async function LandingPage() {
+  if (process.env.NODE_ENV === 'production' && process.env.DATABASE_URL) {
+    const isConfigured = await isAdminSetupComplete().catch(() => false);
+    if (!isConfigured) redirect('/vcon/setup');
+  }
+
   return (
     <MainLayout>
       <Hero />

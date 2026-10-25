@@ -5,6 +5,8 @@ const SESSION_COOKIE = "datastack_admin_session";
 
 function isProtectedApi(pathname: string, method: string) {
   if (pathname === "/api/auth/login") return false;
+  if (pathname === "/api/auth/setup/status" && method === "GET") return false;
+  if (pathname === "/api/auth/setup" && method === "POST") return false;
   if (pathname === "/api/events" && method === "POST") return false;
   return pathname.startsWith("/api/");
 }
@@ -12,10 +14,14 @@ function isProtectedApi(pathname: string, method: string) {
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const isLoginPage = pathname === "/vcon/login";
+  const isSetupPage = pathname === "/vcon/setup";
   const isConsolePage =
-    (pathname === "/vcon" || pathname.startsWith("/vcon/")) && !isLoginPage;
+    (pathname === "/vcon" || pathname.startsWith("/vcon/")) &&
+    !isLoginPage &&
+    !isSetupPage;
   const isAdminApi = isProtectedApi(pathname, request.method);
 
+  if (isSetupPage) return NextResponse.next();
   if (!isConsolePage && !isAdminApi && !isLoginPage) return NextResponse.next();
 
   const sessionSecret = process.env.DATASTACK_ADMIN_SESSION_SECRET;
