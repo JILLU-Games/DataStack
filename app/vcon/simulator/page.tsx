@@ -6,12 +6,16 @@ import { CodeBlock } from '@/components/ui/CodeBlock';
 import { Select, Textarea } from '@/components/ui/Input';
 import { Panel } from '@/components/ui/Panel';
 import { useToast } from '@/components/ui/Toast';
+import { getCached, setCached } from '@/lib/vconCache';
 import { useEffect, useState } from 'react';
 
 export default function SimulatorPage() {
   const { success, error } = useToast();
-  const [clients, setClients] = useState<any[]>([]);
-  const [selectedClient, setSelectedClient] = useState<string>('');
+  const [clients, setClients] = useState<any[]>(() => getCached<any[]>('vcon:clients', []));
+  const [selectedClient, setSelectedClient] = useState<string>(() => {
+    const cached = getCached<any[]>('vcon:clients', []);
+    return cached[0]?.clientId ?? '';
+  });
   const [payloadText, setPayloadText] = useState<string>(
     JSON.stringify(
       {
@@ -34,9 +38,9 @@ export default function SimulatorPage() {
         const res = await fetch('/api/clients');
         if (res.ok) {
           const data = await res.json();
-          const list = data.clients || [];
+          const list = setCached('vcon:clients', data.clients || []);
           setClients(list);
-          if (list.length > 0) setSelectedClient(list[0].clientId);
+          if (list.length > 0) setSelectedClient((prev) => prev || list[0].clientId);
         }
       } catch {
         // ignore
@@ -136,7 +140,7 @@ export default function SimulatorPage() {
         }
       />
 
-      <div className="grid grid-cols-1 gap-2.5 xl:grid-cols-2">
+      <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
         <Panel title="Payload" bodyClassName="flex flex-col gap-2.5 p-3">
           <Select
             compact

@@ -15,7 +15,11 @@ export function SettingsTabs({
   onChange: (value: string) => void;
 }) {
   return (
-    <div className="flex overflow-x-auto border-b border-[var(--border)]" role="tablist" aria-label="Settings categories">
+    <div
+      className="flex overflow-x-auto overflow-y-hidden border-b border-[var(--border)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+      role="tablist"
+      aria-label="Settings categories"
+    >
       {items.map((item) => (
         <button
           key={item.id}
@@ -24,7 +28,11 @@ export function SettingsTabs({
           role="tab"
           aria-selected={value === item.id}
           aria-controls={`settings-panel-${item.id}`}
-          className={`mb-[-1px] shrink-0 border-b-2 px-3 py-1.5 text-[11.5px] transition-colors cursor-pointer whitespace-nowrap ${value === item.id ? 'border-[var(--accent)] text-[var(--text)] font-medium' : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text)]'}`}
+          className={`shrink-0 border-b-2 px-3 py-1.5 text-[11.5px] transition-colors cursor-pointer whitespace-nowrap ${
+            value === item.id
+              ? 'border-[var(--accent)] text-[var(--text)] font-medium'
+              : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text)]'
+          }`}
           onClick={() => onChange(item.id)}
         >
           {item.label}
@@ -59,7 +67,7 @@ export function SettingsField({
   children: React.ReactNode;
 }) {
   return (
-    <div className="grid grid-cols-1 items-center gap-1.5 py-1.5 sm:grid-cols-[1fr_2fr] sm:gap-4">
+    <div className="grid grid-cols-1 items-center gap-1.5 py-1.5 sm:grid-cols-[180px_minmax(0,380px)] sm:justify-between sm:gap-4">
       <div className="min-w-0">
         <div className="text-[11.5px] leading-snug text-[var(--text)]">{label}</div>
       </div>

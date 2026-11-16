@@ -468,3 +468,83 @@ export async function verifyAdminCredentials(email: string, password: string) {
   const actualHash = await derivePasswordHash(password, inMem.passwordSalt);
   return timingSafeEqual(actualHash, inMem.passwordHash);
 }
+
+export async function getAdminAccountInfo(fallbackEmail?: string) {
+  const pool = getPool();
+  if (pool) {
+    try {
+      await ensureAdminTable();
+      const result = await pool.query(
+        `SELECT email, created_at FROM admin_users WHERE id = 1`,
+      );
+      if (result.rowCount && result.rowCount > 0) {
+        const row = result.rows[0] as { email: string; created_at: Date | string };
+        return {
+          email: row.email,
+          createdAt: new Date(row.created_at).toISOString(),
+          storageMode: "PostgreSQL" as const,
+        };
+      }
+    } catch {
+      // Fall back to in-memory admin
+    }
+  }
+
+  const inMem = await getOrInitInMemoryAdmin();
+  return {
+    email: fallbackEmail || inMem.email,
+    createdAt: inMem.createdAt.toISOString(),
+    storageMode: "In-Memory" as const,
+  };
+}
+
+export async function updateAdminAccount({
+  currentEmail,
+  currentPassword,
+  nextEmail,
+  nextPassword,
+}: {
+  currentEmail: string;
+  currentPassword: string;
+  nextEmail: string;
+  nextPassword?: string;
+}) {
+  const verified = await verifyAdminCredentials(currentEmail, currentPassword);
+  if (!verified) {
+    return { ok: false as const, error: "Current password is incorrect." };
+  }
+
+  const cleanEmail = nextEmail.trim().toLowerCase();
+  const passwordToSave =
+    nextPassword && nextPassword.length > 0 ? nextPassword : currentPassword;
+  const salt = randomBytes(PASSWORD_SALT_BYTES);
+  const passwordHash = await derivePasswordHash(passwordToSave, salt);
+
+  const pool = getPool();
+  if (pool) {
+    try {
+      await ensureAdminTable();
+      const updated = await pool.query(
+        `UPDATE admin_users
+         SET email = $1, password_salt = $2, password_hash = $3
+         WHERE id = 1`,
+        [cleanEmail, salt, passwordHash],
+      );
+      if (updated.rowCount && updated.rowCount > 0) {
+        return { ok: true as const, email: cleanEmail };
+      }
+    } catch {
+      // Fall back to in-memory update
+    }
+  }
+
+  const existing = await getOrInitInMemoryAdmin();
+  globals.__dataStackInMemoryAdmin = {
+    id: 1,
+    email: cleanEmail,
+    passwordSalt: salt,
+    passwordHash,
+    createdAt: existing.createdAt,
+  };
+  return { ok: true as const, email: cleanEmail };
+}

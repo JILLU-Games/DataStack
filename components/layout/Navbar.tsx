@@ -10,6 +10,18 @@ interface NavbarProps {
   showSidebarToggle?: boolean;
 }
 
+const VCON_LABELS: Record<string, string> = {
+  '/vcon/dashboard': 'Dashboard',
+  '/vcon/data': 'Events',
+  '/vcon/clients': 'Clients',
+  '/vcon/export': 'Export',
+  '/vcon/storage': 'Storage',
+  '/vcon/sdk': 'Python SDK',
+  '/vcon/simulator': 'Simulator',
+  '/vcon/profile': 'Profile',
+  '/vcon/settings': 'Settings',
+};
+
 export const Navbar: React.FC<NavbarProps> = ({
   onToggleSidebar,
   showSidebarToggle = false,
@@ -34,24 +46,44 @@ export const Navbar: React.FC<NavbarProps> = ({
   };
 
   const isVcon = pathname?.startsWith('/vcon');
+  const currentSectionLabel = (pathname && VCON_LABELS[pathname]) || 'Console';
 
-  return (
-    <header className="h-11 shrink-0 bg-[var(--bg-activity)] border-b border-[var(--border)] px-3.5 sm:px-5 flex items-center justify-between gap-4 z-40 select-none">
-      {/* Left: Mobile hamburger + Brand */}
-      <div className="flex items-center gap-2.5 min-w-0">
-        {showSidebarToggle && (
+  if (showSidebarToggle && isVcon) {
+    return (
+      <header className="sticky top-0 z-30 flex h-10 shrink-0 items-center justify-between gap-3 border-b border-[var(--border)] bg-[var(--surface)] px-3.5 select-none md:hidden">
+        <div className="flex min-w-0 items-center gap-2">
           <Button
             type="button"
             variant="icon"
             size="icon"
             icon="Menu"
             onClick={onToggleSidebar}
-            className="lg:hidden h-7 w-7 shrink-0 border border-[var(--border)] bg-[var(--bg-elevated)]"
+            className="h-6.5 w-6.5 shrink-0 border border-[var(--border)] bg-[var(--surface-2)]"
             aria-label="Toggle Navigation"
             title="Toggle Navigation"
           />
-        )}
+          <span className="truncate text-[12px] font-medium text-[var(--text)]">
+            {currentSectionLabel}
+          </span>
+        </div>
 
+        <Button
+          type="button"
+          variant="icon"
+          size="icon"
+          icon={theme === 'dark' ? 'Sun' : 'Moon'}
+          onClick={toggleTheme}
+          aria-label="Toggle Theme"
+          title="Toggle Theme"
+          className="h-6.5 w-6.5 border border-[var(--border)] bg-[var(--surface-2)]"
+        />
+      </header>
+    );
+  }
+
+  return (
+    <header className="h-11 shrink-0 bg-[var(--bg-activity)] border-b border-[var(--border)] px-3.5 sm:px-5 flex items-center justify-between gap-4 z-40 select-none">
+      <div className="flex items-center gap-2.5 min-w-0">
         <Link href="/" className="flex items-center gap-1.5 min-w-0 text-[13px] font-medium whitespace-nowrap shrink-0">
           <span className="grid h-3.5 w-3.5 shrink-0 place-items-center bg-[var(--accent)]">
             <span className="h-1.5 w-1.5 bg-[var(--bg)]" />
@@ -62,44 +94,12 @@ export const Navbar: React.FC<NavbarProps> = ({
         </Link>
       </div>
 
-      {/* Middle: Links */}
       <nav className="hidden sm:flex items-center gap-5 text-[12px]">
-        {isVcon ? (
-          <>
-            <Link href="/" className="text-[var(--text-muted)] hover:text-[var(--text)] whitespace-nowrap shrink-0">
-              Overview
-            </Link>
-            <Link
-              href="/vcon/dashboard"
-              className={`px-2 py-1.5 transition-colors border-b-2 whitespace-nowrap shrink-0 ${
-                pathname !== '/vcon/export'
-                  ? 'border-[var(--accent)] text-[var(--text)] font-medium'
-                  : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text)]'
-              }`}
-            >
-              Console
-            </Link>
-            <Link
-              href="/vcon/export"
-              className={`px-2 py-1.5 transition-colors border-b-2 whitespace-nowrap shrink-0 ${
-                pathname === '/vcon/export'
-                  ? 'border-[var(--accent)] text-[var(--text)] font-medium'
-                  : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text)]'
-              }`}
-            >
-              Export
-            </Link>
-          </>
-        ) : (
-          <>
-            <Link href="#features" className="text-[var(--text-muted)] hover:text-[var(--text)] whitespace-nowrap shrink-0">Features</Link>
-            <Link href="#sdk" className="text-[var(--text-muted)] hover:text-[var(--text)] whitespace-nowrap shrink-0">SDK</Link>
-            <Link href="#about" className="text-[var(--text-muted)] hover:text-[var(--text)] whitespace-nowrap shrink-0">About</Link>
-          </>
-        )}
+        <Link href="#features" className="text-[var(--text-muted)] hover:text-[var(--text)] whitespace-nowrap shrink-0">Features</Link>
+        <Link href="#sdk" className="text-[var(--text-muted)] hover:text-[var(--text)] whitespace-nowrap shrink-0">SDK</Link>
+        <Link href="#about" className="text-[var(--text-muted)] hover:text-[var(--text)] whitespace-nowrap shrink-0">About</Link>
       </nav>
 
-      {/* Right: Theme switcher or public CTA */}
       <div className="flex items-center gap-2 shrink-0">
         <Button
           type="button"
@@ -112,13 +112,11 @@ export const Navbar: React.FC<NavbarProps> = ({
           className="h-7 w-7 border border-[var(--border)] bg-[var(--bg-elevated)]"
         />
 
-        {!isVcon && (
-          <Link href="#sdk">
-            <Button size="xs" variant="primary">
-              SDK Guide
-            </Button>
-          </Link>
-        )}
+        <Link href="/vcon/dashboard">
+          <Button size="xs" variant="primary">
+            Console
+          </Button>
+        </Link>
       </div>
     </header>
   );

@@ -4,7 +4,7 @@ import { AdminPageHeader } from '@/components/layout/AdminPageHeader';
 import { Button } from '@/components/ui/Button';
 import { ClientList, type ClientListItem } from '@/components/ui/ClientList';
 import { Panel } from '@/components/ui/Panel';
-import { StatCard } from '@/components/ui/StatCard';
+import { StatStrip } from '@/components/ui/StatStrip';
 import {
     Table,
     TableBody,
@@ -14,6 +14,7 @@ import {
     TableRow,
     TableWrap,
 } from '@/components/ui/Table';
+import { getCached, setCached } from '@/lib/vconCache';
 import Link from 'next/link';
 import React, { useCallback, useEffect, useState } from 'react';
 
@@ -48,10 +49,10 @@ type StorageFile = {
 };
 
 export const DashboardOverview: React.FC = () => {
-  const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
-  const [events, setEvents] = useState<EventItem[]>([]);
-  const [clients, setClients] = useState<ClientListItem[]>([]);
-  const [files, setFiles] = useState<StorageFile[]>([]);
+  const [metrics, setMetrics] = useState<DashboardMetrics | null>(() => getCached<DashboardMetrics | null>('vcon:metrics', null));
+  const [events, setEvents] = useState<EventItem[]>(() => getCached<EventItem[]>('vcon:dashboard-events', []));
+  const [clients, setClients] = useState<ClientListItem[]>(() => getCached<ClientListItem[]>('vcon:clients', []));
+  const [files, setFiles] = useState<StorageFile[]>(() => getCached<StorageFile[]>('vcon:storage-files', []));
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -64,18 +65,22 @@ export const DashboardOverview: React.FC = () => {
         fetch('/api/clients', { cache: 'no-store' }),
       ]);
 
-      if (metricsResponse.ok) setMetrics(await metricsResponse.json());
+      if (metricsResponse.ok) {
+        const nextMetrics = await metricsResponse.json();
+        setMetrics(setCached('vcon:metrics', nextMetrics));
+      }
       if (eventsResponse.ok) {
         const data = await eventsResponse.json();
-        setEvents(data.events ?? []);
+        setEvents(setCached('vcon:dashboard-events', data.events ?? []));
       }
       if (storageResponse.ok) {
         const data = await storageResponse.json();
-        setFiles(data.files ?? []);
+        setFiles(setCached('vcon:storage-files', data.files ?? []));
+        if (data.stats) setCached('vcon:storage-stats', data.stats);
       }
       if (clientsResponse.ok) {
         const data = await clientsResponse.json();
-        setClients(data.clients ?? []);
+        setClients(setCached('vcon:clients', data.clients ?? []));
       }
     } catch {
       // Keep the last successful dashboard snapshot when one request fails.
@@ -131,27 +136,16 @@ export const DashboardOverview: React.FC = () => {
         }
       />
 
-      <div className="mb-2.5 grid grid-cols-2 gap-2.5 xl:grid-cols-4">
-        <StatCard
-          label="Events today"
-          value={eventsToday.toLocaleString()}
-        />
-        <StatCard
-          label="Active clients"
-          value={`${activeClients} / ${totalClients}`}
-        />
-        <StatCard
-          label="Storage used"
-          value={storageValue}
-          unit={storageUnit}
-        />
-        <StatCard
-          label="Stored rows"
-          value={totalRows.toLocaleString()}
-        />
-      </div>
+      <StatStrip
+        items={[
+          { label: 'Events today', value: eventsToday.toLocaleString() },
+          { label: 'Active clients', value: `${activeClients} / ${totalClients}`, dot: activeClients > 0 ? 'ok' : 'off' },
+          { label: 'Storage used', value: `${storageValue} ${storageUnit}` },
+          { label: 'Stored rows', value: totalRows.toLocaleString() },
+        ]}
+      />
 
-      <div className="grid min-w-0 grid-cols-1 gap-2.5 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+      <div className="grid min-w-0 grid-cols-1 gap-2.5 lg:grid-cols-[minmax(0,1.85fr)_minmax(0,1fr)]">
         <Panel
           title="Recent events"
           meta={`${events.length}`}

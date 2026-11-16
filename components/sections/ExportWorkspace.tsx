@@ -7,7 +7,9 @@ import { Panel } from '@/components/ui/Panel';
 import { Pill } from '@/components/ui/Pill';
 import { StatStrip } from '@/components/ui/StatStrip';
 import { useToast } from '@/components/ui/Toast';
+import { getCached, setCached } from '@/lib/vconCache';
 import { Braces, FileText } from 'lucide-react';
+import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 
 interface Client {
@@ -48,22 +50,18 @@ function relativeTime(value: string, now: number) {
 
 export function ExportWorkspace() {
   const { error, info } = useToast();
-  const [clients, setClients] = useState<Client[]>([]);
-  const [files, setFiles] = useState<StorageFile[]>([]);
+  const [clients, setClients] = useState<Client[]>(() => getCached<Client[]>('vcon:clients', []));
+  const [files, setFiles] = useState<StorageFile[]>(() => getCached<StorageFile[]>('vcon:storage-files', []));
   const [selectedClient, setSelectedClient] = useState('all');
-  const [fromDate, setFromDate] = useState('');
-  const [toDate, setToDate] = useState('');
+  const [fromDate, setFromDate] = useState(() => dateString(new Date()));
+  const [toDate, setToDate] = useState(() => dateString(new Date()));
   const [format, setFormat] = useState<ExportFormat>('csv');
   const [preset, setPreset] = useState<RangePreset>('today');
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => getCached<StorageFile[]>('vcon:storage-files', []).length === 0);
   const [loadError, setLoadError] = useState('');
-  const [now, setNow] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
-    const today = dateString(new Date());
-    setFromDate(today);
-    setToDate(today);
-
     Promise.all([
       fetch('/api/clients').then(async (response) => {
         if (!response.ok) throw new Error('Unable to load clients');
@@ -75,8 +73,9 @@ export function ExportWorkspace() {
       }),
     ])
       .then(([clientData, storageData]) => {
-        setClients(clientData.clients || []);
-        setFiles(storageData.files || []);
+        setClients(setCached('vcon:clients', clientData.clients || []));
+        setFiles(setCached('vcon:storage-files', storageData.files || []));
+        if (storageData.stats) setCached('vcon:storage-stats', storageData.stats);
         setLoadError('');
       })
       .catch((fetchError) => {
@@ -164,7 +163,7 @@ export function ExportWorkspace() {
   };
 
   return (
-    <section className="mx-auto w-full max-w-[var(--console-width)]">
+    <section className="w-full">
       <AdminPageHeader title="Export" />
 
       <StatStrip
@@ -176,8 +175,8 @@ export function ExportWorkspace() {
         ]}
       />
 
-      <div className="grid grid-cols-1 items-start gap-2.5 xl:grid-cols-5">
-        <Panel title="Export builder" bodyClassName="flex flex-col gap-3 p-3" className="min-w-0 xl:col-span-3">
+      <div className="grid grid-cols-1 items-start gap-2.5 lg:grid-cols-5">
+        <Panel title="Export builder" bodyClassName="flex flex-col gap-3 p-3" className="min-w-0 lg:col-span-3">
           <div className="flex flex-wrap items-center gap-1">
             <span className="mr-1 text-[10px] uppercase tracking-wider text-[var(--text-faint)]">Range</span>
             {([
@@ -241,9 +240,9 @@ export function ExportWorkspace() {
 
         <Panel
           title="Files"
-          action={<a href="/vcon/storage" className="text-[11px] text-[var(--text-muted)] hover:text-[var(--text)]">View all</a>}
+          action={<Link href="/vcon/storage" className="text-[11px] text-[var(--text-muted)] hover:text-[var(--text)]">View all</Link>}
           bodyClassName="divide-y divide-[var(--border)]"
-          className="min-w-0 xl:col-span-2"
+          className="min-w-0 lg:col-span-2"
         >
           {loading ? (
             <p className="px-3 py-4 text-[11.5px] text-[var(--text-faint)]">Loading...</p>

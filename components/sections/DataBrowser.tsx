@@ -16,6 +16,7 @@ import {
     TableRow,
     TableWrap,
 } from '@/components/ui/Table';
+import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 
 interface StreamEvent {
@@ -34,6 +35,7 @@ interface Client {
 const PAGE_SIZE = 12;
 
 export function DataBrowser() {
+  const router = useRouter();
   const [events, setEvents] = useState<StreamEvent[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [total, setTotal] = useState(0);
@@ -150,7 +152,7 @@ export function DataBrowser() {
               variant="primary"
               size="xs"
               icon="Download"
-              onClick={() => window.location.assign('/vcon/export')}
+              onClick={() => router.push('/vcon/export')}
             >
               Export CSV
             </Button>

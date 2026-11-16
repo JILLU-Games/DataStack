@@ -6,6 +6,7 @@ import { FormSwitch } from '@/components/ui/Form';
 import { Input } from '@/components/ui/Input';
 import { SettingsField, SettingsGroup, SettingsTabs } from '@/components/ui/SettingsLayout';
 import { useToast } from '@/components/ui/Toast';
+import { getCached, setCached } from '@/lib/vconCache';
 import { useEffect, useMemo, useState } from 'react';
 
 interface EditableSettings {
@@ -45,15 +46,15 @@ type TabId = (typeof TABS)[number]['id'];
 
 export function SettingsWorkspace() {
   const { success, error } = useToast();
-  const [settings, setSettings] = useState<EditableSettings>(DEFAULT_SETTINGS);
-  const [savedSettings, setSavedSettings] = useState<EditableSettings>(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState<EditableSettings>(() => getCached<EditableSettings>('vcon:settings', DEFAULT_SETTINGS));
+  const [savedSettings, setSavedSettings] = useState<EditableSettings>(() => getCached<EditableSettings>('vcon:settings', DEFAULT_SETTINGS));
   const [activeTab, setActiveTab] = useState<TabId>('general');
   const [jwtSecret, setJwtSecret] = useState('');
-  const [storagePath, setStoragePath] = useState('');
+  const [storagePath, setStoragePath] = useState(() => getCached<string>('vcon:storage-path', ''));
   const [baseUrl, setBaseUrl] = useState('');
   const [webSocketUrl, setWebSocketUrl] = useState('');
-  const [serverPort, setServerPort] = useState(4000);
-  const [loading, setLoading] = useState(true);
+  const [serverPort, setServerPort] = useState(() => getCached<number>('vcon:server-port', 4000));
+  const [loading, setLoading] = useState(() => !getCached<boolean>('vcon:settings-loaded', false));
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -85,10 +86,11 @@ export function SettingsWorkspace() {
           enableIdempotency: Boolean(settingsData.settings.enableIdempotency ?? DEFAULT_SETTINGS.enableIdempotency),
           autoPruneDays: Number(settingsData.settings.autoPruneDays ?? DEFAULT_SETTINGS.autoPruneDays),
         };
-        setSettings(loaded);
+        setSettings(setCached('vcon:settings', loaded));
         setSavedSettings(loaded);
-        setServerPort(Number((settingsData.settings as PublicSettings).serverPort ?? 4000));
-        setStoragePath(String(storageData.stats?.storageDirectory ?? ''));
+        setServerPort(setCached('vcon:server-port', Number((settingsData.settings as PublicSettings).serverPort ?? 4000)));
+        setStoragePath(setCached('vcon:storage-path', String(storageData.stats?.storageDirectory ?? '')));
+        setCached('vcon:settings-loaded', true);
       })
       .catch(() => {
         error('Settings load failed', 'Using default runtime settings.');
@@ -128,7 +130,7 @@ export function SettingsWorkspace() {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Settings update failed');
-      setSettings(normalized);
+      setSettings(setCached('vcon:settings', normalized));
       setSavedSettings(normalized);
       setJwtSecret('');
       success('Settings saved', 'Runtime settings updated.');
@@ -145,19 +147,20 @@ export function SettingsWorkspace() {
   };
 
   return (
-    <section className="mx-auto w-full max-w-[var(--console-width)]">
+    <section className="w-full">
       <AdminPageHeader title="Settings" />
 
-      <SettingsTabs items={TABS} value={activeTab} onChange={(tab) => setActiveTab(tab as TabId)} />
+      <div className="max-w-[780px]">
+        <SettingsTabs items={TABS} value={activeTab} onChange={(tab) => setActiveTab(tab as TabId)} />
 
-      <form onSubmit={saveSettings}>
-        <div
-          id={`settings-panel-${activeTab}`}
-          role="tabpanel"
-          aria-labelledby={`settings-tab-${activeTab}`}
-          className="border border-t-0 border-[var(--border)] bg-[var(--surface)]"
-        >
-          <>
+        <form onSubmit={saveSettings}>
+          <div
+            id={`settings-panel-${activeTab}`}
+            role="tabpanel"
+            aria-labelledby={`settings-tab-${activeTab}`}
+            className="border border-t-0 border-[var(--border)] bg-[var(--surface)]"
+          >
+            <>
               {activeTab === 'general' && (
                 <>
                   <SettingsGroup title="Identity">
@@ -231,18 +234,19 @@ export function SettingsWorkspace() {
                   </SettingsField>
                 </SettingsGroup>
               )}
-          </>
-        </div>
-
-        <footer className="flex flex-wrap items-center gap-2 border border-t-0 border-[var(--border)] bg-[var(--surface)] px-3 py-2">
-          <div className="flex flex-1 items-center gap-1.5 text-[11px] text-[var(--text-muted)]" role="status">
-            <span className={`h-1.5 w-1.5 ${isDirty ? 'bg-[var(--warning)]' : 'bg-[var(--accent)]'}`} />
-            {loading ? 'Loading' : isDirty ? 'Unsaved' : 'Saved'}
+            </>
           </div>
-          <Button type="button" size="xs" disabled={!isDirty || saving} onClick={discardChanges}>Discard</Button>
-          <Button type="submit" variant="primary" size="xs" icon="Save" loading={saving} disabled={loading || !isDirty}>Save</Button>
-        </footer>
-      </form>
+
+          <footer className="flex flex-wrap items-center gap-2 border border-t-0 border-[var(--border)] bg-[var(--surface)] px-3 py-2">
+            <div className="flex flex-1 items-center gap-1.5 text-[11px] text-[var(--text-muted)]" role="status">
+              <span className={`h-1.5 w-1.5 ${isDirty ? 'bg-[var(--warning)]' : 'bg-[var(--accent)]'}`} />
+              {loading ? 'Loading' : isDirty ? 'Unsaved' : 'Saved'}
+            </div>
+            <Button type="button" size="xs" disabled={!isDirty || saving} onClick={discardChanges}>Discard</Button>
+            <Button type="submit" variant="primary" size="xs" icon="Save" loading={saving} disabled={loading || !isDirty}>Save</Button>
+          </footer>
+        </form>
+      </div>
     </section>
   );
 }

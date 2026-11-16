@@ -1,6 +1,5 @@
 'use client';
 
-import { cn } from '@/lib/utils';
 import React, { useState } from 'react';
 import { Footer } from './Footer';
 import { Navbar } from './Navbar';
@@ -17,32 +16,38 @@ export const MainLayout: React.FC<MainLayoutProps> = ({
 }) => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
+  if (showSidebar) {
+    return (
+      <div className="min-h-dvh bg-[var(--bg-main)] text-[var(--text)] antialiased md:grid md:grid-cols-[184px_1fr]">
+        <Sidebar
+          isOpen={sidebarOpen}
+          onClose={() => setSidebarOpen(false)}
+        />
+        <div className="flex min-h-dvh min-w-0 flex-col">
+          <Navbar
+            showSidebarToggle={true}
+            onToggleSidebar={() => setSidebarOpen((prev) => !prev)}
+          />
+          <main className="flex flex-1 min-w-0 flex-col">
+            <div className="w-full max-w-[var(--console-width)] flex-1 px-3.5 py-3 sm:px-5 sm:py-3.5">
+              {children}
+            </div>
+            <Footer isAdmin={true} />
+          </main>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-dvh flex flex-col bg-[var(--bg-main)] text-[var(--text)] antialiased">
-      <Navbar
-        showSidebarToggle={showSidebar}
-        onToggleSidebar={() => setSidebarOpen((prev) => !prev)}
-      />
-
-      <div className="flex-1 flex min-h-0 min-w-0 overflow-hidden">
-        {showSidebar && (
-          <Sidebar
-            isOpen={sidebarOpen}
-            onClose={() => setSidebarOpen(false)}
-          />
-        )}
-        <main className="flex-1 min-h-0 overflow-y-auto flex flex-col min-w-0">
-          <div className={cn(
-            'flex-1 min-w-0 w-full mx-auto',
-            showSidebar
-              ? 'max-w-[var(--console-width)] px-3.5 py-3 sm:px-5 sm:py-4'
-              : 'max-w-[var(--container-width)] px-6 py-0'
-          )}>
-            {children}
-          </div>
-          <Footer isAdmin={showSidebar} />
-        </main>
-      </div>
+      <Navbar showSidebarToggle={false} />
+      <main className="flex-1 flex flex-col min-w-0">
+        <div className="flex-1 min-w-0 w-full mx-auto max-w-[var(--container-width)] px-6 py-0">
+          {children}
+        </div>
+        <Footer isAdmin={false} />
+      </main>
     </div>
   );
 };

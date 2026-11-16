@@ -15,12 +15,13 @@ import {
     TableWrap,
 } from '@/components/ui/Table';
 import { useToast } from '@/components/ui/Toast';
+import { getCached, setCached } from '@/lib/vconCache';
 import { useCallback, useEffect, useState } from 'react';
 
 export default function StoragePage() {
   const { success, error } = useToast();
-  const [stats, setStats] = useState<any>(null);
-  const [files, setFiles] = useState<any[]>([]);
+  const [stats, setStats] = useState<any>(() => getCached<any>('vcon:storage-stats', null));
+  const [files, setFiles] = useState<any[]>(() => getCached<any[]>('vcon:storage-files', []));
   const [flushing, setFlushing] = useState(false);
 
   const fetchStorageData = useCallback(async () => {
@@ -28,8 +29,8 @@ export default function StoragePage() {
       const res = await fetch('/api/storage');
       if (!res.ok) throw new Error('Unable to load storage partitions');
       const data = await res.json();
-      setStats(data.stats);
-      setFiles(data.files || []);
+      setStats(setCached('vcon:storage-stats', data.stats));
+      setFiles(setCached('vcon:storage-files', data.files || []));
     } catch {
       error('Storage load failed', 'Could not load storage partitions.');
     }

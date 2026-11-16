@@ -46,9 +46,12 @@ export async function createAdminSessionToken(
   return `${payload}.${encodeBase64Url(new Uint8Array(signature))}`;
 }
 
-export async function verifyAdminSessionToken(token: string, secret: string) {
+export async function getAdminSessionPayload(
+  token: string,
+  secret: string,
+): Promise<AdminSessionPayload | null> {
   const [payload, signature, extra] = token.split(".");
-  if (!payload || !signature || extra) return false;
+  if (!payload || !signature || extra) return null;
 
   try {
     const valid = await crypto.subtle.verify(
@@ -57,19 +60,27 @@ export async function verifyAdminSessionToken(token: string, secret: string) {
       decodeBase64Url(signature),
       encoder.encode(payload),
     );
-    if (!valid) return false;
+    if (!valid) return null;
 
     const session = JSON.parse(
       new TextDecoder().decode(decodeBase64Url(payload)),
     ) as AdminSessionPayload;
-    return (
+    if (
       typeof session.email === "string" &&
       typeof session.expiresAt === "number" &&
       session.expiresAt > Date.now()
-    );
+    ) {
+      return session;
+    }
+    return null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+export async function verifyAdminSessionToken(token: string, secret: string) {
+  const session = await getAdminSessionPayload(token, secret);
+  return Boolean(session);
 }
 
 export function getSessionCookieOptions(request: Request, maxAge: number) {

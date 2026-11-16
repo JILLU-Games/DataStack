@@ -15,6 +15,7 @@ import {
     TableWrap,
 } from '@/components/ui/Table';
 import { useToast } from '@/components/ui/Toast';
+import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import type { ClientCredentials, ClientItem } from './clients/types';
 
@@ -35,6 +36,7 @@ function relativeTime(timestamp: string | undefined, now: number) {
 }
 
 export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps) {
+  const router = useRouter();
   const { success, error } = useToast();
   const [credentials, setCredentials] = useState<ClientCredentials | null>(null);
   const [confirmAction, setConfirmAction] = useState<{
@@ -160,7 +162,7 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
                           className="h-6 w-6 border border-transparent hover:border-[var(--border)] hover:bg-[var(--surface-2)]"
                           title={`View events for ${client.clientId}`}
                           aria-label={`View events for ${client.clientId}`}
-                          onClick={() => window.location.assign(`/vcon/data?clientId=${encodeURIComponent(client.clientId)}`)}
+                          onClick={() => router.push(`/vcon/data?clientId=${encodeURIComponent(client.clientId)}`)}
                         />
                         <Button
                           type="button"

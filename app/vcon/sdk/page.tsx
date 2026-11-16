@@ -7,12 +7,16 @@ import { CodeBlock } from '@/components/ui/CodeBlock';
 import { Select } from '@/components/ui/Input';
 import { Panel } from '@/components/ui/Panel';
 import { useToast } from '@/components/ui/Toast';
+import { getCached, setCached } from '@/lib/vconCache';
 import { useEffect, useState } from 'react';
 
 export default function SdkGuidePage() {
   const { success } = useToast();
-  const [clients, setClients] = useState<any[]>([]);
-  const [selectedClientId, setSelectedClientId] = useState<string>('');
+  const [clients, setClients] = useState<any[]>(() => getCached<any[]>('vcon:clients', []));
+  const [selectedClientId, setSelectedClientId] = useState<string>(() => {
+    const cached = getCached<any[]>('vcon:clients', []);
+    return cached[0]?.clientId ?? '';
+  });
 
   useEffect(() => {
     async function loadClients() {
@@ -20,10 +24,10 @@ export default function SdkGuidePage() {
         const res = await fetch('/api/clients');
         if (res.ok) {
           const data = await res.json();
-          const list = data.clients || [];
+          const list = setCached('vcon:clients', data.clients || []);
           setClients(list);
           if (list.length > 0) {
-            setSelectedClientId(list[0].clientId);
+            setSelectedClientId((prev) => prev || list[0].clientId);
           }
         }
       } catch {
@@ -65,7 +69,7 @@ if client.connect():
   };
 
   return (
-    <section className="flex w-full flex-col gap-2.5">
+    <section className="w-full">
       <AdminPageHeader
         title="Python SDK"
         actions={
@@ -80,38 +84,40 @@ if client.connect():
         }
       />
 
-      <Card compact className="flex items-center justify-between bg-[var(--surface)] px-3 py-2 font-mono text-[11.5px]">
-        <span className="text-[var(--accent)]">pip install ./sdk-python</span>
-        <Button
-          size="xs"
-          variant="ghost"
-          icon="Copy"
-          onClick={() => copySnippet('pip install ./sdk-python', 'Pip command')}
-        />
-      </Card>
+      <div className="flex max-w-[860px] flex-col gap-2.5">
+        <Card compact className="flex items-center justify-between bg-[var(--surface)] px-3 py-2 font-mono text-[11.5px]">
+          <span className="text-[var(--accent)]">pip install ./sdk-python</span>
+          <Button
+            size="xs"
+            variant="ghost"
+            icon="Copy"
+            onClick={() => copySnippet('pip install ./sdk-python', 'Pip command')}
+          />
+        </Card>
 
-      <Panel
-        title="Client Snippet"
-        action={
-          clients.length > 0 ? (
-            <div className="w-[170px]">
-              <Select
-                compact
-                value={selectedClientId}
-                onChange={(e) => setSelectedClientId(e.target.value)}
-              >
-                {clients.map((c) => (
-                  <option key={c.clientId} value={c.clientId}>
-                    {c.clientId}
-                  </option>
-                ))}
-              </Select>
-            </div>
-          ) : undefined
-        }
-      >
-        <CodeBlock>{pythonSnippet}</CodeBlock>
-      </Panel>
+        <Panel
+          title="Client Snippet"
+          action={
+            clients.length > 0 ? (
+              <div className="w-[170px]">
+                <Select
+                  compact
+                  value={selectedClientId}
+                  onChange={(e) => setSelectedClientId(e.target.value)}
+                >
+                  {clients.map((c) => (
+                    <option key={c.clientId} value={c.clientId}>
+                      {c.clientId}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            ) : undefined
+          }
+        >
+          <CodeBlock>{pythonSnippet}</CodeBlock>
+        </Panel>
+      </div>
     </section>
   );
 }

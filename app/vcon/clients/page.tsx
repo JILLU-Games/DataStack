@@ -8,26 +8,26 @@ import { NewClientModal } from '@/components/sections/NewClientModal';
 import { Button } from '@/components/ui/Button';
 import { StatStrip } from '@/components/ui/StatStrip';
 import { useToast } from '@/components/ui/Toast';
+import { getCached, setCached } from '@/lib/vconCache';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 export default function ClientsPage() {
   const { error } = useToast();
   const [modalOpen, setModalOpen] = useState(false);
-  const [clients, setClients] = useState<ClientItem[]>([]);
+  const [clients, setClients] = useState<ClientItem[]>(() => getCached<ClientItem[]>('vcon:clients', []));
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<ClientStatusFilter>('all');
-  const [now, setNow] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
 
   const fetchClients = useCallback(async () => {
     const response = await fetch('/api/clients');
     if (!response.ok) throw new Error('Unable to load clients');
     const data = await response.json();
-    setClients(data.clients || []);
+    setClients(setCached('vcon:clients', data.clients || []));
   }, []);
 
   useEffect(() => {
     fetchClients().catch(() => {
-      setClients([]);
       error('Unable to load clients', 'Could not fetch registered clients.');
     });
   }, [error, fetchClients]);

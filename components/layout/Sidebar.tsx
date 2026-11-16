@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/Button';
 import { Icon } from '@/components/ui/Icon';
 import { cn } from '@/lib/utils';
 import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 import React, { useEffect, useState } from 'react';
 
 interface SidebarProps {
@@ -12,176 +12,197 @@ interface SidebarProps {
   onClose?: () => void;
 }
 
+const NAVIGATION_SECTIONS = [
+  {
+    group: 'Main',
+    items: [
+      { name: 'Dashboard', href: '/vcon/dashboard', icon: 'LayoutDashboard' },
+      { name: 'Events', href: '/vcon/data', icon: 'Activity' },
+      { name: 'Clients', href: '/vcon/clients', icon: 'Key' },
+      { name: 'Export', href: '/vcon/export', icon: 'Download' },
+      { name: 'Storage', href: '/vcon/storage', icon: 'HardDrive' },
+    ],
+  },
+  {
+    group: 'System',
+    items: [
+      { name: 'Python SDK', href: '/vcon/sdk', icon: 'FileCode2' },
+      { name: 'Simulator', href: '/vcon/simulator', icon: 'Play' },
+      { name: 'Settings', href: '/vcon/settings', icon: 'Sliders' },
+      { name: 'Profile', href: '/vcon/profile', icon: 'User' },
+    ],
+  },
+];
+
 export const Sidebar: React.FC<SidebarProps> = ({
   isOpen = false,
   onClose,
 }) => {
   const pathname = usePathname();
-  const router = useRouter();
   const [isSigningOut, setIsSigningOut] = useState(false);
-  const [signOutError, setSignOutError] = useState('');
-
-  const navigation = [
-    {
-      group: 'Monitoring',
-      items: [
-        { name: 'Dashboard', href: '/vcon/dashboard', icon: 'LayoutDashboard' },
-        { name: 'Events', href: '/vcon/data', icon: 'Activity' },
-      ],
-    },
-    {
-      group: 'Data',
-      items: [
-        { name: 'Export', href: '/vcon/export', icon: 'Download' },
-        { name: 'Storage', href: '/vcon/storage', icon: 'HardDrive' },
-      ],
-    },
-    {
-      group: 'Administration',
-      items: [
-        { name: 'Clients', href: '/vcon/clients', icon: 'Key' },
-        { name: 'Settings', href: '/vcon/settings', icon: 'Sliders' },
-      ],
-    },
-    {
-      group: 'Tools',
-      items: [
-        { name: 'Python SDK', href: '/vcon/sdk', icon: 'FileCode2' },
-        { name: 'Simulator', href: '/vcon/simulator', icon: 'Play' },
-      ],
-    },
-  ];
-  const activeGroup = navigation.find((section) =>
-    section.items.some((item) => item.href === pathname)
-  )?.group;
-  const [openGroup, setOpenGroup] = useState(activeGroup ?? navigation[0].group);
+  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
 
   useEffect(() => {
-    if (activeGroup) setOpenGroup(activeGroup);
-  }, [activeGroup]);
+    const saved = localStorage.getItem('datastack-theme') as 'dark' | 'light' | null;
+    const initial = saved === 'light' ? 'light' : 'dark';
+    setTheme(initial);
+    document.documentElement.classList.toggle('light', initial === 'light');
+    document.documentElement.classList.toggle('dark', initial === 'dark');
+  }, []);
+
+  const toggleTheme = () => {
+    const nextTheme = theme === 'dark' ? 'light' : 'dark';
+    setTheme(nextTheme);
+    localStorage.setItem('datastack-theme', nextTheme);
+    document.documentElement.classList.toggle('light', nextTheme === 'light');
+    document.documentElement.classList.toggle('dark', nextTheme === 'dark');
+  };
 
   const signOut = async () => {
     setIsSigningOut(true);
-    setSignOutError('');
     try {
       const response = await fetch('/api/auth/logout', {
         method: 'POST',
         credentials: 'include',
       });
-      if (!response.ok) throw new Error('Unable to sign out. Please try again.');
+      if (!response.ok) throw new Error('Unable to sign out');
       window.location.assign('/vcon/login');
-    } catch (error) {
-      setSignOutError(
-        error instanceof Error ? error.message : 'Unable to sign out. Please try again.',
-      );
-    } finally {
+    } catch {
       setIsSigningOut(false);
     }
   };
 
   return (
     <>
-      {/* Mobile Backdrop */}
       {isOpen && (
         <div
           onClick={onClose}
-          className="fixed inset-x-0 top-11 bottom-0 z-40 bg-black/50 lg:hidden"
+          className="fixed inset-0 z-40 bg-black/55 md:hidden"
         />
       )}
 
-      {/* Sidebar Container */}
       <aside
         className={cn(
-          'fixed left-0 top-11 bottom-0 z-50 w-[216px] shrink-0 overflow-hidden bg-[var(--bg-sidebar)] border-r border-[var(--border)] flex flex-col transition-transform duration-150 ease-in-out lg:static lg:w-[216px] lg:translate-x-0',
+          'fixed inset-y-0 left-0 z-50 flex w-[184px] shrink-0 flex-col border-r border-[var(--border)] bg-[var(--surface)] transition-transform duration-150 ease-out md:sticky md:top-0 md:h-dvh md:translate-x-0',
           isOpen ? 'translate-x-0' : '-translate-x-full'
         )}
       >
-        {/* Mobile Close Header */}
-        <div className="h-9 px-3 flex items-center justify-between border-b border-[var(--border)] bg-[var(--bg-activity)] shrink-0 lg:hidden">
-          <span className="text-[11px] font-medium text-[var(--text-muted)]">Menu</span>
-          <button
+        {/* Brand Header */}
+        <div className="flex h-10 shrink-0 items-center justify-between border-b border-[var(--border)] px-3">
+          <Link
+            href="/vcon/dashboard"
             onClick={onClose}
-            className="text-[var(--text-dim)] hover:text-[var(--text)] p-1 cursor-pointer"
-            aria-label="Close menu"
+            className="flex min-w-0 items-center gap-2 text-[12.5px] font-medium text-[var(--text)]"
           >
-            <Icon name="X" size={12} />
-          </button>
+            <span className="grid h-3 w-3 shrink-0 place-items-center bg-[var(--accent)]">
+              <span className="h-1 w-1 bg-[var(--bg)]" />
+            </span>
+            <span className="truncate">DataStack</span>
+          </Link>
+
+          <Link
+            href="/"
+            title="Public Home"
+            aria-label="Public Home"
+            className="hidden text-[10.5px] text-[var(--text-faint)] hover:text-[var(--text)] md:inline"
+          >
+            Site ↗
+          </Link>
+
+          <Button
+            type="button"
+            variant="icon"
+            size="icon"
+            icon="X"
+            onClick={onClose}
+            aria-label="Close navigation"
+            title="Close navigation"
+            className="h-6 w-6 md:hidden"
+          />
         </div>
 
-        {/* Navigation items */}
-        <nav aria-label="Admin navigation" className="flex-1 min-h-0 overflow-y-auto p-1.5 flex flex-col">
-          {navigation.map((section) => {
-            const isExpanded = openGroup === section.group;
-            const groupId = `nav-${section.group.toLowerCase().replaceAll(' ', '-')}`;
-
-            return (
-              <div key={section.group} className="border-b border-[var(--border)] last:border-b-0">
-                <button
-                  type="button"
-                  aria-expanded={isExpanded}
-                  aria-controls={groupId}
-                  onClick={() => setOpenGroup(isExpanded ? '' : section.group)}
-                  className="w-full h-8 px-2.5 flex items-center justify-between gap-2 text-left text-[11px] font-medium text-[var(--text-muted)] hover:text-[var(--text)] transition-colors cursor-pointer"
-                >
-                  <span className="truncate">{section.group}</span>
-                  <Icon
-                    name="ChevronDown"
-                    size={11}
-                    className={cn('transition-transform', isExpanded && 'rotate-180')}
-                  />
-                </button>
-                {isExpanded && (
-                  <div id={groupId} className="pb-1 flex flex-col gap-0.5">
-                    {section.items.map((item) => {
-                      const isActive = pathname === item.href;
-                      return (
-                        <Link
-                          key={item.href}
-                          href={item.href}
-                          onClick={onClose}
-                          className={cn(
-                            'flex h-8 min-w-0 items-center gap-2 px-2.5 text-[12px] transition-colors border',
-                            isActive
-                              ? 'bg-[var(--accent-soft)] text-[var(--accent-hover)] font-medium border-[var(--accent)]'
-                              : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-hover)]'
-                          )}
-                        >
-                          <Icon
-                            name={item.icon}
-                            size={13}
-                            className={isActive ? 'text-[var(--accent)]' : 'text-[var(--text-dim)]'}
-                          />
-                          <span className="truncate">{item.name}</span>
-                        </Link>
-                      );
-                    })}
-                  </div>
-                )}
+        {/* Clean 2-Group Navigation */}
+        <nav
+          aria-label="Admin navigation"
+          className="flex-1 overflow-y-auto px-2 py-2.5 flex flex-col gap-3.5"
+        >
+          {NAVIGATION_SECTIONS.map((section) => (
+            <div key={section.group} className="flex flex-col gap-0.5">
+              <div className="px-2 pb-1 text-[9.5px] font-medium uppercase tracking-wider text-[var(--text-faint)]">
+                {section.group}
               </div>
-            );
-          })}
+              {section.items.map((item) => {
+                const isActive = pathname === item.href;
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    onClick={onClose}
+                    className={cn(
+                      'flex h-7 min-w-0 items-center gap-2 border-l-2 px-2 text-[12px] transition-colors select-none',
+                      isActive
+                        ? 'border-l-[var(--accent)] bg-[var(--surface-2)] font-medium text-[var(--text)]'
+                        : 'border-l-transparent text-[var(--text-muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]'
+                    )}
+                  >
+                    <Icon
+                      name={item.icon}
+                      size={13}
+                      className={isActive ? 'text-[var(--accent)]' : 'text-[var(--text-faint)]'}
+                    />
+                    <span className="truncate">{item.name}</span>
+                  </Link>
+                );
+              })}
+            </div>
+          ))}
         </nav>
 
-        {/* Sign out action */}
-        {pathname !== '/vcon/setup' && (
-          <div className="p-1.5 border-t border-[var(--border)] bg-[var(--bg-main)] shrink-0">
-            {signOutError && (
-              <p role="alert" className="px-2 pb-1 text-[11px] text-[var(--danger)]">{signOutError}</p>
-            )}
-            <Button
-              type="button"
-              variant="ghost"
-              size="xs"
-              icon="LogOut"
-              loading={isSigningOut}
-              disabled={isSigningOut}
-              onClick={signOut}
-              className="w-full justify-start px-2.5 text-[11.5px] h-7"
-            >
-              Sign out
-            </Button>
-          </div>
-        )}
+        {/* Bottom Dock: Identity + Theme Toggle + Sign Out */}
+        <div className="flex shrink-0 items-center gap-1 border-t border-[var(--border)] bg-[var(--bg)] px-2.5 py-2">
+          <Link
+            href="/vcon/profile"
+            onClick={onClose}
+            className="flex flex-1 min-w-0 items-center gap-2 hover:opacity-90"
+            title="Admin Profile"
+          >
+            <div className="grid h-6 w-6 shrink-0 place-items-center border border-[var(--border-strong)] bg-[var(--surface-3)] text-[10.5px] font-medium text-[var(--text)]">
+              A
+            </div>
+            <div className="min-w-0 flex-1 leading-tight">
+              <div className="truncate text-[11px] font-medium text-[var(--text)]">
+                Admin
+              </div>
+              <div className="truncate text-[9px] uppercase tracking-wider text-[var(--text-faint)]">
+                Owner
+              </div>
+            </div>
+          </Link>
+
+          <Button
+            type="button"
+            variant="icon"
+            size="icon"
+            icon={theme === 'dark' ? 'Sun' : 'Moon'}
+            onClick={toggleTheme}
+            title="Toggle theme"
+            aria-label="Toggle theme"
+            className="h-6 w-6 border border-[var(--border)] bg-[var(--surface)]"
+          />
+
+          <Button
+            type="button"
+            variant="icon"
+            size="icon"
+            icon="LogOut"
+            loading={isSigningOut}
+            disabled={isSigningOut}
+            onClick={signOut}
+            title="Sign out"
+            aria-label="Sign out"
+            className="h-6 w-6 border border-[var(--border)] bg-[var(--surface)] hover:border-[var(--danger)] hover:text-[var(--danger)]"
+          />
+        </div>
       </aside>
     </>
   );
