@@ -443,18 +443,30 @@ export async function verifyAdminCredentials(email: string, password: string) {
       const result = await pool.query(
         `SELECT email, password_salt, password_hash
          FROM admin_users
-         WHERE email = $1`,
-        [cleanEmail],
+         WHERE id = 1`,
       );
       if (result.rowCount && result.rowCount > 0) {
-        const admin = result.rows[0] as
-          | { email: string; password_salt: Buffer; password_hash: Buffer }
-          | undefined;
-        const salt = admin?.password_salt ?? Buffer.alloc(PASSWORD_SALT_BYTES);
-        const expectedHash =
-          admin?.password_hash ?? Buffer.alloc(PASSWORD_HASH_BYTES);
-        const actualHash = await derivePasswordHash(password, salt);
-        return Boolean(admin && timingSafeEqual(actualHash, expectedHash));
+        const admin = result.rows[0] as {
+          email: string;
+          password_salt: Buffer;
+          password_hash: Buffer;
+        };
+        const emailMatches = matchesSecret(
+          cleanEmail,
+          admin.email.trim().toLowerCase(),
+        );
+        const actualHash = await derivePasswordHash(
+          password,
+          admin.password_salt,
+        );
+        const passwordMatches = timingSafeEqual(
+          actualHash,
+          admin.password_hash,
+        );
+        return emailMatches && passwordMatches;
+      }
+      if (!process.env.DATASTACK_ADMIN_PASSWORD) {
+        return false;
       }
     } catch {
       // Database connection error, fall back to in-memory admin

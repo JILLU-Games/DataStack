@@ -6,14 +6,19 @@ services:
       dockerfile: docker/Dockerfile.web
     expose:
       - "3000"
+    volumes:
+      - datastack-data:/app/storage
     environment:
       NODE_ENV: production
       PORT: "3000"
       DATASTACK_JWT_SECRET: "${SERVICE_REALBASE64_64_JWT:?Coolify must generate SERVICE_REALBASE64_64_JWT}"
-      DATASTACK_ADMIN_EMAIL: "${DATASTACK_ADMIN_EMAIL:?Set DATASTACK_ADMIN_EMAIL in .env}"
+      DATASTACK_ADMIN_EMAIL: "${DATASTACK_ADMIN_EMAIL:-admin@datastack.dev}"
       DATASTACK_ADMIN_SESSION_SECRET: "${SERVICE_REALBASE64_64_ADMINSESSION:?Coolify must generate SERVICE_REALBASE64_64_ADMINSESSION}"
       DATASTACK_ADMIN_SETUP_KEY: "${SERVICE_REALBASE64_64_ADMININSTALL:?Coolify must generate SERVICE_REALBASE64_64_ADMININSTALL}"
       DATABASE_URL: "postgresql://datastack:${SERVICE_PASSWORD_64_POSTGRES:?Coolify must generate SERVICE_PASSWORD_64_POSTGRES}@postgres:5432/${SERVICE_HEX_32_DATABASENAME:?Coolify must generate SERVICE_HEX_32_DATABASENAME}"
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test:
@@ -85,7 +90,7 @@ services:
       timeout: 5s
       retries: 3
 
-  # Reserved for the planned metadata integration; not consumed by the current runtime.
+  # PostgreSQL stores the bootstrap admin credential and login throttle state in pgdata.
   postgres:
     image: postgres:16-alpine
     environment:
