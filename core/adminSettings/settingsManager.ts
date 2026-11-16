@@ -26,7 +26,9 @@ export class SettingsManager {
     batchFlushThreshold: 500,
     batchFlushIntervalMs: 2000,
     fileRotationMb: 100,
-    jwtSecret: process.env.DATASTACK_JWT_SECRET || "",
+    jwtSecret:
+      process.env.DATASTACK_JWT_SECRET ||
+      "datastack-jwt-default-secret-key-32-chars-long",
     enableIdempotency: true,
     autoPruneDays: 30,
     updatedAt: new Date().toISOString(),

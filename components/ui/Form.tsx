@@ -6,7 +6,7 @@ export const Form: React.FC<React.FormHTMLAttributes<HTMLFormElement>> = ({
   children,
   ...props
 }) => (
-  <form className={cn('flex flex-col gap-5', className)} {...props}>
+  <form className={cn('flex flex-col gap-3', className)} {...props}>
     {children}
   </form>
 );
@@ -16,7 +16,7 @@ export const FormField: React.FC<React.HTMLAttributes<HTMLDivElement>> = ({
   children,
   ...props
 }) => (
-  <div className={cn('flex flex-col gap-2 w-full', className)} {...props}>
+  <div className={cn('flex flex-col gap-1.5 w-full', className)} {...props}>
     {children}
   </div>
 );
@@ -26,7 +26,7 @@ export const FormRow: React.FC<React.HTMLAttributes<HTMLDivElement>> = ({
   children,
   ...props
 }) => (
-  <div className={cn('grid grid-cols-1 sm:grid-cols-2 gap-4 w-full', className)} {...props}>
+  <div className={cn('grid grid-cols-1 sm:grid-cols-2 gap-3 w-full', className)} {...props}>
     {children}
   </div>
 );
@@ -35,25 +35,21 @@ export const FormSwitch: React.FC<{
   label: string;
   checked: boolean;
   onChange: (checked: boolean) => void;
-  description?: string;
   disabled?: boolean;
-}> = ({ label, checked, onChange, description, disabled = false }) => (
+}> = ({ label, checked, onChange, disabled = false }) => (
   <label
     className={cn(
-      'flex items-center justify-between gap-4 p-4 border border-[var(--border)] bg-[var(--bg-main)] cursor-pointer select-none transition-colors hover:bg-[var(--bg-hover)]',
+      'flex items-center justify-between gap-3 px-2.5 py-1.5 border border-[var(--border)] bg-[var(--bg-main)] cursor-pointer select-none transition-colors hover:bg-[var(--bg-hover)]',
       disabled && 'opacity-50 cursor-not-allowed'
     )}
   >
-    <div className="flex flex-col">
-      <span className="text-[14px] font-medium text-[var(--text)]">{label}</span>
-      {description && <span className="text-[12px] text-[var(--text-muted)]">{description}</span>}
-    </div>
+    <span className="text-[11.5px] text-[var(--text)]">{label}</span>
     <input
       type="checkbox"
       checked={checked}
       disabled={disabled}
       onChange={(e) => onChange(e.target.checked)}
-      className="w-5 h-5 accent-[var(--accent)] cursor-pointer shrink-0"
+      className="w-3.5 h-3.5 accent-[var(--accent)] cursor-pointer shrink-0"
     />
   </label>
 );

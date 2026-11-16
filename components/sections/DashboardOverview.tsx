@@ -1,5 +1,6 @@
 'use client';
 
+import { AdminPageHeader } from '@/components/layout/AdminPageHeader';
 import { Button } from '@/components/ui/Button';
 import { ClientList, type ClientListItem } from '@/components/ui/ClientList';
 import { Panel } from '@/components/ui/Panel';
@@ -106,72 +107,58 @@ export const DashboardOverview: React.FC = () => {
   const totalRows = metrics?.storageStats.totalRows ?? files.reduce((sum, file) => sum + file.linesCount, 0);
 
   return (
-    <section className="flex w-full max-w-[var(--console-width)] flex-col gap-4">
-      <header className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <nav aria-label="Breadcrumb" className="mb-1 flex items-center gap-2 text-[11px] text-[var(--text-faint)]">
-            <span>Console</span>
-            <span>/</span>
-            <span className="text-[var(--text)]">Dashboard</span>
-          </nav>
-          <h1 className="text-[17px] font-medium text-[var(--text)]">Dashboard</h1>
-          <p className="mt-0.5 text-[12px] text-[var(--text-muted)]">Last 24 hours · UTC</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="mr-2 inline-flex items-center gap-2 text-[10px] uppercase text-[var(--text-muted)]">
-            <span className="h-1.5 w-1.5 bg-[var(--accent)]" />
-            {metrics ? `${metrics.bufferStats.currentBufferSize} buffered` : 'Connecting'}
-          </span>
-          <Button
-            size="icon"
-            variant="secondary"
-            icon="RefreshCw"
-            aria-label="Refresh dashboard"
-            title="Refresh dashboard"
-            loading={isRefreshing}
-            onClick={() => void refresh()}
-          />
-          <a href="/api/export?clientId=all" download>
-            <Button size="sm" variant="secondary" icon="Download">Quick export</Button>
-          </a>
-          <Link href="/vcon/clients">
-            <Button size="sm" variant="primary" icon="Plus">New client</Button>
-          </Link>
-        </div>
-      </header>
+    <section className="w-full">
+      <AdminPageHeader
+        title="Dashboard"
+        actions={
+          <>
+            <Button
+              size="icon"
+              variant="secondary"
+              icon="RefreshCw"
+              aria-label="Refresh dashboard"
+              title="Refresh dashboard"
+              loading={isRefreshing}
+              onClick={() => void refresh()}
+            />
+            <a href="/api/export?clientId=all" download>
+              <Button size="xs" variant="secondary" icon="Download">Export</Button>
+            </a>
+            <Link href="/vcon/clients">
+              <Button size="xs" variant="primary" icon="Plus">New client</Button>
+            </Link>
+          </>
+        }
+      />
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="mb-2.5 grid grid-cols-2 gap-2.5 xl:grid-cols-4">
         <StatCard
           label="Events today"
           value={eventsToday.toLocaleString()}
-          meta={`${metrics?.bufferStats.currentBufferSize ?? 0} waiting in buffer`}
         />
         <StatCard
           label="Active clients"
           value={`${activeClients} / ${totalClients}`}
-          meta="registered clients"
         />
         <StatCard
           label="Storage used"
           value={storageValue}
           unit={storageUnit}
-          meta="across stored CSV files"
         />
         <StatCard
           label="Stored rows"
           value={totalRows.toLocaleString()}
-          meta={`${totalFiles} CSV files`}
         />
       </div>
 
-      <div className="grid min-w-0 grid-cols-1 gap-3 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+      <div className="grid min-w-0 grid-cols-1 gap-2.5 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <Panel
-          title="Live ingestion"
-          meta={`${events.length} recent events`}
+          title="Recent events"
+          meta={`${events.length}`}
           action={<Link href="/vcon/data" className="text-[11px] text-[var(--text-muted)] hover:text-[var(--text)]">View all →</Link>}
         >
           <TableWrap className="border-0 bg-transparent">
-            <Table className="min-w-[600px] text-[11.5px]">
+            <Table className="min-w-[560px] text-[11px]">
               <TableHeader>
                 <TableRow>
                   <TableHead>Time</TableHead>
@@ -183,16 +170,16 @@ export const DashboardOverview: React.FC = () => {
               <TableBody>
                 {events.map((event) => (
                   <TableRow key={event.eventId}>
-                    <TableCell className="font-mono text-[11px] text-[var(--text-faint)]">
+                    <TableCell className="font-mono text-[10.5px] tabular-nums text-[var(--text-faint)]">
                       {event.timestamp.includes('T') ? new Date(event.timestamp).toLocaleTimeString() : event.timestamp}
                     </TableCell>
                     <TableCell className="font-mono text-[11px] text-[var(--accent)]">
                       {event.clientId}
                     </TableCell>
-                    <TableCell className="max-w-[420px] truncate font-mono text-[11px] text-[var(--text)]">
+                    <TableCell className="max-w-[380px] truncate font-mono text-[11px] text-[var(--text)]">
                       {event.payload}
                     </TableCell>
-                    <TableCell className="text-right font-mono text-[11px] text-[var(--text-faint)]">
+                    <TableCell className="text-right font-mono text-[10.5px] tabular-nums text-[var(--text-faint)]">
                       {new TextEncoder().encode(event.payload).length} B
                     </TableCell>
                   </TableRow>
@@ -202,9 +189,9 @@ export const DashboardOverview: React.FC = () => {
           </TableWrap>
         </Panel>
 
-        <div className="flex min-w-0 flex-col gap-3">
+        <div className="flex min-w-0 flex-col gap-2.5">
           <Panel
-            title="Recent clients"
+            title="Clients"
             action={<Link href="/vcon/clients" className="text-[11px] text-[var(--text-muted)] hover:text-[var(--text)]">All →</Link>}
           >
             <ClientList clients={clients} limit={4} />
@@ -212,23 +199,23 @@ export const DashboardOverview: React.FC = () => {
 
           <Panel
             title="Storage"
-            meta={`${totalFiles} files`}
-            action={<a href="/api/export?clientId=all" download className="text-[11px] text-[var(--text-muted)] hover:text-[var(--text)]">Quick export ↓</a>}
+            meta={`${totalFiles}`}
+            action={<a href="/api/export?clientId=all" download className="text-[11px] text-[var(--text-muted)] hover:text-[var(--text)]">Export ↓</a>}
           >
             <div className="divide-y divide-[var(--border)]">
               {files.slice(0, 3).map((file) => (
-                <div key={`${file.clientId}/${file.filename}`} className="flex items-center justify-between gap-3 px-4 py-2">
+                <div key={`${file.clientId}/${file.filename}`} className="flex items-center justify-between gap-2.5 px-3 py-1.5">
                   <div className="min-w-0">
-                    <p className="truncate text-[12px] text-[var(--text)]">{file.filename}</p>
+                    <p className="truncate text-[11.5px] text-[var(--text)]">{file.filename}</p>
                     <p className="truncate font-mono text-[10px] text-[var(--text-faint)]">{file.clientId}</p>
                   </div>
-                  <span className="shrink-0 font-mono text-[11px] text-[var(--text-muted)]">
+                  <span className="shrink-0 font-mono text-[10.5px] tabular-nums text-[var(--text-muted)]">
                     {(file.sizeBytes / 1024).toFixed(1)} KB
                   </span>
                 </div>
               ))}
               {files.length === 0 && (
-                <p className="px-4 py-5 text-[12px] text-[var(--text-faint)]">No CSV files yet.</p>
+                <p className="px-3 py-4 text-[11px] text-[var(--text-faint)]">No CSV files</p>
               )}
             </div>
           </Panel>

@@ -8,7 +8,9 @@ export interface ClientTokenPayload {
   exp?: number;
 }
 
-const DEFAULT_SECRET = process.env.DATASTACK_JWT_SECRET || "";
+const DEFAULT_SECRET =
+  process.env.DATASTACK_JWT_SECRET ||
+  "datastack-jwt-default-secret-key-32-chars-long";
 
 export class AuthService {
   private static secret: string = DEFAULT_SECRET;

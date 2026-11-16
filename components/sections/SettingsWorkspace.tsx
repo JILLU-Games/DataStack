@@ -1,5 +1,6 @@
 'use client';
 
+import { AdminPageHeader } from '@/components/layout/AdminPageHeader';
 import { Button } from '@/components/ui/Button';
 import { FormSwitch } from '@/components/ui/Form';
 import { Input } from '@/components/ui/Input';
@@ -38,7 +39,6 @@ const TABS = [
   { id: 'connections', label: 'Connections' },
   { id: 'storage', label: 'Storage' },
   { id: 'security', label: 'Security' },
-  { id: 'notifications', label: 'Notifications' },
 ];
 
 type TabId = (typeof TABS)[number]['id'];
@@ -90,8 +90,8 @@ export function SettingsWorkspace() {
         setServerPort(Number((settingsData.settings as PublicSettings).serverPort ?? 4000));
         setStoragePath(String(storageData.stats?.storageDirectory ?? ''));
       })
-      .catch((loadError) => {
-        error('Settings unavailable', loadError instanceof Error ? loadError.message : 'Unable to load settings');
+      .catch(() => {
+        error('Settings load failed', 'Using default runtime settings.');
       })
       .finally(() => setLoading(false));
   }, [error]);
@@ -107,21 +107,31 @@ export function SettingsWorkspace() {
 
   const saveSettings = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    const normalized: EditableSettings = {
+      maxEventsPerSec: Math.max(1, Math.min(10000, settings.maxEventsPerSec || DEFAULT_SETTINGS.maxEventsPerSec)),
+      maxPayloadSizeKb: Math.max(1, Math.min(5120, settings.maxPayloadSizeKb || DEFAULT_SETTINGS.maxPayloadSizeKb)),
+      batchFlushThreshold: Math.max(1, settings.batchFlushThreshold || DEFAULT_SETTINGS.batchFlushThreshold),
+      batchFlushIntervalMs: Math.max(100, settings.batchFlushIntervalMs || DEFAULT_SETTINGS.batchFlushIntervalMs),
+      fileRotationMb: Math.max(1, settings.fileRotationMb || DEFAULT_SETTINGS.fileRotationMb),
+      enableIdempotency: settings.enableIdempotency,
+      autoPruneDays: Math.max(1, Math.min(365, settings.autoPruneDays || DEFAULT_SETTINGS.autoPruneDays)),
+    };
     setSaving(true);
     try {
       const response = await fetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ...settings,
+          ...normalized,
           ...(jwtSecret.trim() ? { jwtSecret: jwtSecret.trim() } : {}),
         }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Settings update failed');
-      setSavedSettings(settings);
+      setSettings(normalized);
+      setSavedSettings(normalized);
       setJwtSecret('');
-      success('Settings saved', 'Supported runtime settings have been applied.');
+      success('Settings saved', 'Runtime settings updated.');
     } catch (saveError) {
       error('Save failed', saveError instanceof Error ? saveError.message : 'Unable to save settings');
     } finally {
@@ -135,16 +145,8 @@ export function SettingsWorkspace() {
   };
 
   return (
-    <section className="mx-auto w-full max-w-[var(--container-width)]">
-      <nav aria-label="Breadcrumb" className="mb-3 flex items-center gap-1.5 text-xs text-[var(--text-faint)]">
-        <span>Console</span>
-        <span aria-hidden="true" className="text-[var(--border-strong)]">/</span>
-        <span aria-current="page" className="text-[var(--text)]">Settings</span>
-      </nav>
-      <header className="mb-4">
-        <h1 className="text-base font-medium tracking-tight text-[var(--text)]">Settings</h1>
-        <p className="mt-0.5 text-xs text-[var(--text-muted)]">Configure your DataStack instance</p>
-      </header>
+    <section className="mx-auto w-full max-w-[var(--console-width)]">
+      <AdminPageHeader title="Settings" />
 
       <SettingsTabs items={TABS} value={activeTab} onChange={(tab) => setActiveTab(tab as TabId)} />
 
@@ -155,29 +157,23 @@ export function SettingsWorkspace() {
           aria-labelledby={`settings-tab-${activeTab}`}
           className="border border-t-0 border-[var(--border)] bg-[var(--surface)]"
         >
-          {loading ? (
-            <p className="p-4 text-xs text-[var(--text-faint)]">Loading settings...</p>
-          ) : (
-            <>
+          <>
               {activeTab === 'general' && (
                 <>
                   <SettingsGroup title="Identity">
-                    <SettingsField label="Instance name" hint="Shown in dashboard headers and emails">
+                    <SettingsField label="Instance name">
                       <Input compact value="DataStack" readOnly className="border-[var(--border)] bg-[var(--surface-2)] text-[var(--text-muted)]" />
                     </SettingsField>
-                    <SettingsField label="Base URL" hint="Current browser origin">
-                      <Input compact value={baseUrl} readOnly className="border-[var(--border)] bg-[var(--surface-2)] font-mono text-[11.5px] text-[var(--text-muted)]" />
-                    </SettingsField>
-                    <SettingsField label="Instance ID" hint="Instance identifier is not configured">
-                      <Input compact value="Not configured" readOnly className="border-[var(--border)] bg-[var(--surface-2)] text-[var(--text-muted)]" />
+                    <SettingsField label="Base URL">
+                      <Input compact value={baseUrl} readOnly className="border-[var(--border)] bg-[var(--surface-2)] font-mono text-[11px] text-[var(--text-muted)]" />
                     </SettingsField>
                   </SettingsGroup>
                   <SettingsGroup title="Throughput">
-                    <SettingsField label="Events per second" hint="Global cap; client limits may be lower">
+                    <SettingsField label="Events per second">
                       <Input compact type="number" min="1" max="10000" value={settings.maxEventsPerSec} onChange={(event) => updateNumber('maxEventsPerSec', event.target.value)} />
                     </SettingsField>
-                    <SettingsField label="Enable idempotency" hint="Reject duplicate clientId + eventId combinations">
-                      <FormSwitch label="Deduplicate incoming events" checked={settings.enableIdempotency} onChange={(enableIdempotency) => setSettings((current) => ({ ...current, enableIdempotency }))} />
+                    <SettingsField label="Idempotency">
+                      <FormSwitch label="Deduplicate events" checked={settings.enableIdempotency} onChange={(enableIdempotency) => setSettings((current) => ({ ...current, enableIdempotency }))} />
                     </SettingsField>
                   </SettingsGroup>
                 </>
@@ -186,22 +182,19 @@ export function SettingsWorkspace() {
               {activeTab === 'connections' && (
                 <>
                   <SettingsGroup title="WebSocket server">
-                    <SettingsField label="Public WebSocket URL" hint="Clients connect through the configured host">
-                      <Input compact value={webSocketUrl} readOnly className="border-[var(--border)] bg-[var(--surface-2)] font-mono text-[11.5px] text-[var(--text-muted)]" />
+                    <SettingsField label="WebSocket URL">
+                      <Input compact value={webSocketUrl} readOnly className="border-[var(--border)] bg-[var(--surface-2)] font-mono text-[11px] text-[var(--text-muted)]" />
                     </SettingsField>
-                    <SettingsField label="Socket port" hint="Express process port">
+                    <SettingsField label="Socket port">
                       <Input compact type="number" value={serverPort} readOnly className="border-[var(--border)] bg-[var(--surface-2)] font-mono text-[var(--text-muted)]" />
                     </SettingsField>
                   </SettingsGroup>
                   <SettingsGroup title="Event buffer">
-                    <SettingsField label="Batch flush threshold" hint="Write buffered rows to CSV at this count">
+                    <SettingsField label="Batch flush threshold">
                       <Input compact type="number" min="1" value={settings.batchFlushThreshold} onChange={(event) => updateNumber('batchFlushThreshold', event.target.value)} />
                     </SettingsField>
-                    <SettingsField label="Flush interval" hint="Maximum time before buffered rows are written">
-                      <div className="flex items-center gap-0">
-                        <Input compact type="number" min="100" value={settings.batchFlushIntervalMs} onChange={(event) => updateNumber('batchFlushIntervalMs', event.target.value)} className="border-[var(--border)] font-mono" />
-                        <span className="flex h-9 items-center border border-l-0 border-[var(--border)] bg-[var(--surface-2)] px-2.5 text-xs text-[var(--text-muted)]">ms</span>
-                      </div>
+                    <SettingsField label="Flush interval">
+                      <Input compact type="number" min="100" suffix="ms" value={settings.batchFlushIntervalMs} onChange={(event) => updateNumber('batchFlushIntervalMs', event.target.value)} className="font-mono" />
                     </SettingsField>
                   </SettingsGroup>
                 </>
@@ -210,69 +203,46 @@ export function SettingsWorkspace() {
               {activeTab === 'storage' && (
                 <>
                   <SettingsGroup title="CSV files">
-                    <SettingsField label="Root path" hint="Current server storage directory">
-                      <Input compact value={storagePath || 'Unavailable'} readOnly className="border-[var(--border)] bg-[var(--surface-2)] font-mono text-[11.5px] text-[var(--text-muted)]" />
+                    <SettingsField label="Root path">
+                      <Input compact value={storagePath || 'Unavailable'} readOnly className="border-[var(--border)] bg-[var(--surface-2)] font-mono text-[11px] text-[var(--text-muted)]" />
                     </SettingsField>
-                    <SettingsField label="File rotation" hint="Files rotate daily and at the configured size limit">
-                      <div className="flex items-center gap-0">
-                        <Input compact type="number" min="1" value={settings.fileRotationMb} onChange={(event) => updateNumber('fileRotationMb', event.target.value)} className="border-[var(--border)] font-mono" />
-                        <span className="flex h-9 items-center border border-l-0 border-[var(--border)] bg-[var(--surface-2)] px-2.5 text-xs text-[var(--text-muted)]">MB</span>
-                      </div>
+                    <SettingsField label="File rotation">
+                      <Input compact type="number" min="1" suffix="MB" value={settings.fileRotationMb} onChange={(event) => updateNumber('fileRotationMb', event.target.value)} className="font-mono" />
                     </SettingsField>
-                    <SettingsField label="Retention" hint="Retention value is stored; automatic pruning is not enabled">
-                      <div className="flex items-center gap-0">
-                        <Input compact type="number" min="1" max="365" value={settings.autoPruneDays} onChange={(event) => updateNumber('autoPruneDays', event.target.value)} className="border-[var(--border)] font-mono" />
-                        <span className="flex h-9 items-center border border-l-0 border-[var(--border)] bg-[var(--surface-2)] px-2.5 text-xs text-[var(--text-muted)]">days</span>
-                      </div>
+                    <SettingsField label="Retention">
+                      <Input compact type="number" min="1" max="365" suffix="days" value={settings.autoPruneDays} onChange={(event) => updateNumber('autoPruneDays', event.target.value)} className="font-mono" />
                     </SettingsField>
                   </SettingsGroup>
                   <SettingsGroup title="Schema">
-                    <SettingsField label="Row format" hint="Fixed CSV schema">
-                      <Input compact value="clientId, eventId, timestamp, payload" readOnly className="border-[var(--border)] bg-[var(--surface-2)] font-mono text-[11.5px] text-[var(--text-muted)]" />
+                    <SettingsField label="Row format">
+                      <Input compact value="clientId, eventId, timestamp, payload" readOnly className="border-[var(--border)] bg-[var(--surface-2)] font-mono text-[11px] text-[var(--text-muted)]" />
                     </SettingsField>
                   </SettingsGroup>
                 </>
               )}
 
               {activeTab === 'security' && (
-                <>
-                  <SettingsGroup title="Authentication">
-                    <SettingsField label="JWT secret" hint="Changing the secret invalidates existing client tokens">
-                      <Input compact type="password" autoComplete="new-password" value={jwtSecret} onChange={(event) => setJwtSecret(event.target.value)} placeholder="Leave blank to keep the current secret" />
-                    </SettingsField>
-                    <SettingsField label="Payload size limit" hint="Maximum accepted event payload size">
-                      <div className="flex items-center gap-0">
-                        <Input compact type="number" min="1" max="5120" value={settings.maxPayloadSizeKb} onChange={(event) => updateNumber('maxPayloadSizeKb', event.target.value)} className="border-[var(--border)] font-mono" />
-                        <span className="flex h-9 items-center border border-l-0 border-[var(--border)] bg-[var(--surface-2)] px-2.5 text-xs text-[var(--text-muted)]">KB</span>
-                      </div>
-                    </SettingsField>
-                  </SettingsGroup>
-                  <SettingsGroup title="Configuration">
-                    <p className="text-xs leading-relaxed text-[var(--text-faint)]">Allowed origins and token expiration are controlled by deployment configuration and are not editable from this console.</p>
-                  </SettingsGroup>
-                </>
-              )}
-
-              {activeTab === 'notifications' && (
-                <SettingsGroup title="Delivery">
-                  <p className="text-xs leading-relaxed text-[var(--text-faint)]">Email and webhook notification delivery are not configured for this instance.</p>
+                <SettingsGroup title="Authentication">
+                  <SettingsField label="JWT secret">
+                    <Input compact type="password" autoComplete="new-password" value={jwtSecret} onChange={(event) => setJwtSecret(event.target.value)} placeholder="New secret..." />
+                  </SettingsField>
+                  <SettingsField label="Payload size limit">
+                    <Input compact type="number" min="1" max="5120" suffix="KB" value={settings.maxPayloadSizeKb} onChange={(event) => updateNumber('maxPayloadSizeKb', event.target.value)} className="font-mono" />
+                  </SettingsField>
                 </SettingsGroup>
               )}
-            </>
-          )}
+          </>
         </div>
 
-        <footer className="flex flex-wrap items-center gap-2 border border-t-0 border-[var(--border)] bg-[var(--surface)] px-4 py-2.5">
-          <div className="flex flex-1 items-center gap-1.5 text-xs text-[var(--text-muted)]" role="status">
+        <footer className="flex flex-wrap items-center gap-2 border border-t-0 border-[var(--border)] bg-[var(--surface)] px-3 py-2">
+          <div className="flex flex-1 items-center gap-1.5 text-[11px] text-[var(--text-muted)]" role="status">
             <span className={`h-1.5 w-1.5 ${isDirty ? 'bg-[var(--warning)]' : 'bg-[var(--accent)]'}`} />
-            {loading ? 'Loading settings' : isDirty ? 'Unsaved changes' : 'All changes saved'}
+            {loading ? 'Loading' : isDirty ? 'Unsaved' : 'Saved'}
           </div>
           <Button type="button" size="xs" disabled={!isDirty || saving} onClick={discardChanges}>Discard</Button>
-          <Button type="submit" variant="primary" size="xs" icon="Save" loading={saving} disabled={loading || !isDirty}>Save changes</Button>
+          <Button type="submit" variant="primary" size="xs" icon="Save" loading={saving} disabled={loading || !isDirty}>Save</Button>
         </footer>
       </form>
-
-      <p className="mt-3 text-[11px] text-[var(--text-faint)]">Some settings require a service restart to take effect.</p>
     </section>
   );
 }

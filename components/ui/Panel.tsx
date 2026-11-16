@@ -19,10 +19,10 @@ export const Panel: React.FC<PanelProps> = ({
   ...props
 }) => (
   <section className={cn('flex min-w-0 flex-col border border-[var(--border)] bg-[var(--surface)]', className)} {...props}>
-    <header className="flex min-h-11 items-center justify-between gap-3 border-b border-[var(--border)] px-4 py-2.5">
-      <h2 className="text-[12px] font-medium text-[var(--text)]">{title}</h2>
-      <div className="flex items-center gap-3">
-        {meta && <span className="text-[11px] text-[var(--text-faint)]">{meta}</span>}
+    <header className="flex min-h-8.5 items-center justify-between gap-2 border-b border-[var(--border)] px-3 py-1.5">
+      <h2 className="text-[11.5px] font-medium text-[var(--text)]">{title}</h2>
+      <div className="flex items-center gap-2.5">
+        {meta && <span className="font-mono text-[10.5px] tabular-nums text-[var(--text-faint)]">{meta}</span>}
         {action}
       </div>
     </header>

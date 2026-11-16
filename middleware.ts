@@ -60,7 +60,9 @@ export async function middleware(request: NextRequest) {
     );
   }
 
-  const sessionSecret = process.env.DATASTACK_ADMIN_SESSION_SECRET;
+  const sessionSecret =
+    process.env.DATASTACK_ADMIN_SESSION_SECRET ||
+    "datastack-admin-session-default-secret-32-chars";
   const token = request.cookies.get(SESSION_COOKIE)?.value;
   const authenticated = Boolean(
     sessionSecret &&

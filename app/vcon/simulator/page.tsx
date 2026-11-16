@@ -1,8 +1,10 @@
 'use client';
 
+import { AdminPageHeader } from '@/components/layout/AdminPageHeader';
 import { Button } from '@/components/ui/Button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
+import { CodeBlock } from '@/components/ui/CodeBlock';
 import { Select, Textarea } from '@/components/ui/Input';
+import { Panel } from '@/components/ui/Panel';
 import { useToast } from '@/components/ui/Toast';
 import { useEffect, useState } from 'react';
 
@@ -48,7 +50,7 @@ export default function SimulatorPage() {
     try {
       parsedData = JSON.parse(payloadText);
     } catch {
-      error('Invalid JSON', 'Please fix payload syntax before emitting');
+      error('Invalid JSON', 'Fix payload syntax');
       return;
     }
 
@@ -67,7 +69,7 @@ export default function SimulatorPage() {
       setLastResponse(data);
 
       if (res.ok) {
-        success('Event Accepted', `Event ID: ${data.event.eventId} buffered to Redis`);
+        success('Event Accepted', `${data.event.eventId} buffered`);
       } else {
         error('Event Rejected', data.error || 'Server rejected');
       }
@@ -98,7 +100,7 @@ export default function SimulatorPage() {
         });
         if (res.ok) accepted++;
       }
-      success('Batch Streamed', `${accepted}/${count} records ingested into buffer`);
+      success('Batch Streamed', `${accepted}/${count} ingested`);
       setLastResponse({ success: true, batchSent: count, accepted });
     } catch (err: any) {
       error('Batch Error', err.message);
@@ -108,78 +110,66 @@ export default function SimulatorPage() {
   };
 
   return (
-    <div className="flex flex-col gap-4 max-w-[960px]">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[var(--border)] pb-2">
-        <h1 className="text-[22px] font-semibold text-[var(--text)]">
-          Simulator
-        </h1>
-
-        <div className="flex items-center gap-1.5 self-start sm:self-auto">
-          <Button
-            size="xs"
-            variant="secondary"
-            loading={sending}
-            onClick={() => handleSendBatch(10)}
-          >
-            Burst 10
-          </Button>
-          <Button
-            size="xs"
-            variant="primary"
-            icon="Send"
-            loading={sending}
-            onClick={handleSendSingle}
-          >
-            Send Event
-          </Button>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-        {/* Editor Card */}
-        <Card compact className="flex flex-col gap-2 p-2 bg-[var(--bg-elevated)]">
-          <CardHeader className="p-0 pb-1 mb-0 border-b-0">
-            <CardTitle>Payload Configuration</CardTitle>
-          </CardHeader>
-          <CardContent className="p-0 flex flex-col gap-2">
-            <Select
-              value={selectedClient}
-              onChange={(e) => setSelectedClient(e.target.value)}
+    <section className="flex w-full flex-col gap-2.5">
+      <AdminPageHeader
+        title="Simulator"
+        actions={
+          <>
+            <Button
+              size="xs"
+              variant="secondary"
+              loading={sending}
+              onClick={() => handleSendBatch(10)}
             >
-              {clients.map((c) => (
-                <option key={c.clientId} value={c.clientId}>
-                  {c.clientId}
-                </option>
-              ))}
-            </Select>
+              Burst 10
+            </Button>
+            <Button
+              size="xs"
+              variant="primary"
+              icon="Send"
+              loading={sending}
+              onClick={handleSendSingle}
+            >
+              Send Event
+            </Button>
+          </>
+        }
+      />
 
-            <Textarea
-              rows={8}
-              value={payloadText}
-              onChange={(e) => setPayloadText(e.target.value)}
-            />
-          </CardContent>
-        </Card>
+      <div className="grid grid-cols-1 gap-2.5 xl:grid-cols-2">
+        <Panel title="Payload" bodyClassName="flex flex-col gap-2.5 p-3">
+          <Select
+            compact
+            value={selectedClient}
+            onChange={(e) => setSelectedClient(e.target.value)}
+          >
+            {clients.map((c) => (
+              <option key={c.clientId} value={c.clientId}>
+                {c.clientId}
+              </option>
+            ))}
+          </Select>
 
-        {/* Response Inspector */}
-        <Card compact className="flex flex-col gap-3 bg-[var(--bg-elevated)] font-mono text-[12px]">
-          <CardHeader className="p-0 pb-1 mb-0 border-b-0">
-            <CardTitle>Pipeline Response</CardTitle>
-          </CardHeader>
-          <CardContent className="p-0 flex flex-col gap-1">
-            {lastResponse ? (
-              <pre className="p-4 bg-[var(--bg-main)] border border-[var(--border)] text-[12px] text-[var(--text)] overflow-x-auto max-h-[320px]">
-                {JSON.stringify(lastResponse, null, 2)}
-              </pre>
-            ) : (
-              <div className="p-6 text-center text-[var(--text-dim)] italic border border-dashed border-[var(--border-strong)]">
-                Click &apos;Send Event&apos; to test ingestion.
-              </div>
-            )}
-          </CardContent>
-        </Card>
+          <Textarea
+            rows={7}
+            value={payloadText}
+            onChange={(e) => setPayloadText(e.target.value)}
+            className="font-mono text-[11.5px]"
+          />
+        </Panel>
+
+        <Panel title="Response" bodyClassName="p-3 font-mono text-[11.5px]">
+          {lastResponse ? (
+            <CodeBlock className="max-h-[280px] border border-[var(--border)] text-[11px]">
+              {JSON.stringify(lastResponse, null, 2)}
+            </CodeBlock>
+          ) : (
+            <div className="border border-dashed border-[var(--border-strong)] p-5 text-center text-[11px] text-[var(--text-dim)]">
+              No response
+            </div>
+          )}
+        </Panel>
       </div>
-    </div>
+    </section>
   );
 }

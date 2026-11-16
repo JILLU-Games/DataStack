@@ -11,7 +11,7 @@ export const Pill = React.forwardRef<HTMLButtonElement, PillProps>(
       ref={ref}
       type={type}
       className={cn(
-        'inline-flex h-[26px] shrink-0 items-center gap-1.5 border px-2.5 text-[11.5px] transition-colors disabled:cursor-not-allowed disabled:opacity-50',
+        'inline-flex h-6 shrink-0 items-center gap-1 border px-2 text-[11px] transition-colors cursor-pointer whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-50',
         active
           ? 'border-[var(--border-strong)] bg-[var(--surface-2)] text-[var(--text)]'
           : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]',

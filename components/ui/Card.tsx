@@ -25,8 +25,8 @@ export const Card: React.FC<CardProps> = ({
       className={cn(
         'transition-colors',
         variantStyles[variant],
-        className,
-        compact ? 'p-4' : 'p-5 sm:p-6'
+        compact ? 'p-3' : 'p-4 sm:p-5',
+        className
       )}
       {...props}
     >
@@ -42,7 +42,7 @@ export const CardHeader: React.FC<React.HTMLAttributes<HTMLDivElement>> = ({
 }) => (
   <div
     className={cn(
-      'flex items-center justify-between gap-3 pb-3 mb-3 border-b border-[var(--border)]',
+      'flex items-center justify-between gap-2 pb-2 mb-2 border-b border-[var(--border)]',
       className
     )}
     {...props}
@@ -56,7 +56,7 @@ export const CardTitle: React.FC<React.HTMLAttributes<HTMLHeadingElement>> = ({
   children,
   ...props
 }) => (
-  <h3 className={cn('text-[15px] font-semibold text-[var(--text)] leading-snug', className)} {...props}>
+  <h3 className={cn('text-[12px] font-medium text-[var(--text)] leading-snug', className)} {...props}>
     {children}
   </h3>
 );
@@ -66,7 +66,7 @@ export const CardDescription: React.FC<React.HTMLAttributes<HTMLParagraphElement
   children,
   ...props
 }) => (
-  <p className={cn('text-[13px] text-[var(--text-muted)] leading-relaxed', className)} {...props}>
+  <p className={cn('text-[11.5px] text-[var(--text-muted)] leading-relaxed', className)} {...props}>
     {children}
   </p>
 );
@@ -76,7 +76,7 @@ export const CardContent: React.FC<React.HTMLAttributes<HTMLDivElement>> = ({
   children,
   ...props
 }) => (
-  <div className={cn('text-[14px]', className)} {...props}>
+  <div className={cn('text-[12px]', className)} {...props}>
     {children}
   </div>
 );
@@ -88,7 +88,7 @@ export const CardFooter: React.FC<React.HTMLAttributes<HTMLDivElement>> = ({
 }) => (
   <div
     className={cn(
-      'flex items-center justify-between gap-3 pt-3 mt-3 border-t border-[var(--border)] text-[13px]',
+      'flex items-center justify-between gap-2 pt-2 mt-2 border-t border-[var(--border)] text-[11.5px]',
       className
     )}
     {...props}

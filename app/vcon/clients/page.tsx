@@ -7,10 +7,11 @@ import { ClientsTable } from '@/components/sections/ClientsTable';
 import { NewClientModal } from '@/components/sections/NewClientModal';
 import { Button } from '@/components/ui/Button';
 import { StatStrip } from '@/components/ui/StatStrip';
-import { Plus } from 'lucide-react';
+import { useToast } from '@/components/ui/Toast';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 export default function ClientsPage() {
+  const { error } = useToast();
   const [modalOpen, setModalOpen] = useState(false);
   const [clients, setClients] = useState<ClientItem[]>([]);
   const [search, setSearch] = useState('');
@@ -25,8 +26,11 @@ export default function ClientsPage() {
   }, []);
 
   useEffect(() => {
-    fetchClients().catch(() => setClients([]));
-  }, [fetchClients]);
+    fetchClients().catch(() => {
+      setClients([]);
+      error('Unable to load clients', 'Could not fetch registered clients.');
+    });
+  }, [error, fetchClients]);
 
   useEffect(() => {
     const updateClock = () => setNow(Date.now());
@@ -62,18 +66,11 @@ export default function ClientsPage() {
   const offlineCount = clients.length - onlineCount - pendingCount;
 
   return (
-    <div className="w-full max-w-[var(--console-width)]">
-      <div className="mb-3 flex items-center gap-1.5 text-xs text-[var(--text-faint)]" aria-label="Breadcrumb">
-        <span>Console</span>
-        <span aria-hidden="true" className="text-[var(--border-strong)]">/</span>
-        <span aria-current="page" className="text-[var(--text)]">Clients</span>
-      </div>
+    <section className="w-full">
       <AdminPageHeader
         title="Clients"
-        subtitle="Registered SDK clients and their API access"
         actions={
-          <Button type="button" variant="primary" size="sm" onClick={() => setModalOpen(true)}>
-            <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+          <Button type="button" variant="primary" size="xs" icon="Plus" onClick={() => setModalOpen(true)}>
             New client
           </Button>
         }
@@ -81,10 +78,10 @@ export default function ClientsPage() {
 
       <StatStrip
         items={[
-          { label: 'Total clients', value: clients.length },
-          { label: 'Online now', value: onlineCount, dot: 'ok' },
+          { label: 'Total', value: clients.length },
+          { label: 'Online', value: onlineCount, dot: 'ok' },
           { label: 'Offline', value: offlineCount, dot: 'off' },
-          { label: 'Pending setup', value: pendingCount, dot: 'pending' },
+          { label: 'Pending', value: pendingCount, dot: 'pending' },
         ]}
       />
 
@@ -101,6 +98,6 @@ export default function ClientsPage() {
         onClose={() => setModalOpen(false)}
         onCreated={fetchClients}
       />
-    </div>
+    </section>
   );
 }

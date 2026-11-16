@@ -7,7 +7,7 @@ import { Panel } from '@/components/ui/Panel';
 import { Pill } from '@/components/ui/Pill';
 import { StatStrip } from '@/components/ui/StatStrip';
 import { useToast } from '@/components/ui/Toast';
-import { Braces, FileText, Info } from 'lucide-react';
+import { Braces, FileText } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
 interface Client {
@@ -139,7 +139,7 @@ export function ExportWorkspace() {
 
   const downloadExport = () => {
     if (fromDate && toDate && fromDate > toDate) {
-      error('Invalid date range', 'The start date must be on or before the end date.');
+      error('Invalid date range', 'Start date must be on or before end date.');
       return;
     }
     window.location.assign(exportUrl);
@@ -164,31 +164,26 @@ export function ExportWorkspace() {
   };
 
   return (
-    <section className="mx-auto w-full max-w-[var(--container-width)]">
-      <nav aria-label="Breadcrumb" className="mb-3 flex items-center gap-1.5 text-xs text-[var(--text-faint)]">
-        <span>Console</span>
-        <span aria-hidden="true" className="text-[var(--border-strong)]">/</span>
-        <span aria-current="page" className="text-[var(--text)]">Export</span>
-      </nav>
-      <AdminPageHeader title="Export" subtitle="Generate CSV or JSON exports from collected data" />
+    <section className="mx-auto w-full max-w-[var(--console-width)]">
+      <AdminPageHeader title="Export" />
 
       <StatStrip
         items={[
-          { label: 'Stored files', value: files.length.toLocaleString() },
-          { label: 'Stored rows', value: stats.rows.toLocaleString() },
-          { label: 'Storage used', value: formatBytes(stats.bytes) },
+          { label: 'Files', value: files.length.toLocaleString() },
+          { label: 'Rows', value: stats.rows.toLocaleString() },
+          { label: 'Storage', value: formatBytes(stats.bytes) },
           { label: 'Clients', value: stats.clients.toLocaleString() },
         ]}
       />
 
-      <div className="grid grid-cols-1 items-start gap-3 xl:grid-cols-5">
-        <Panel title="Export builder" meta="Estimate updates on change" bodyClassName="flex flex-col gap-4 p-4" className="min-w-0 xl:col-span-3">
+      <div className="grid grid-cols-1 items-start gap-2.5 xl:grid-cols-5">
+        <Panel title="Export builder" bodyClassName="flex flex-col gap-3 p-3" className="min-w-0 xl:col-span-3">
           <div className="flex flex-wrap items-center gap-1">
-            <span className="mr-1.5 text-[10px] uppercase tracking-wider text-[var(--text-faint)]">Quick range</span>
+            <span className="mr-1 text-[10px] uppercase tracking-wider text-[var(--text-faint)]">Range</span>
             {([
               ['today', 'Today'],
-              ['7d', 'Last 7d'],
-              ['30d', 'Last 30d'],
+              ['7d', '7d'],
+              ['30d', '30d'],
               ['all', 'All'],
             ] as const).map(([id, label]) => (
               <Pill key={id} active={preset === id} onClick={() => setQuickRange(id)}>{label}</Pill>
@@ -196,50 +191,47 @@ export function ExportWorkspace() {
           </div>
 
           <div className="grid grid-cols-1 gap-px border border-[var(--border)] bg-[var(--border)] md:grid-cols-[1.2fr_1fr_1fr]">
-            <div className="min-w-0 bg-[var(--surface)] p-3">
+            <div className="min-w-0 bg-[var(--surface)] p-2.5">
               <Select
                 label="Client"
                 compact
                 value={selectedClient}
                 onChange={(event) => setSelectedClient(event.target.value)}
-                className="border-0 bg-transparent px-0 focus:border-transparent"
               >
                 <option value="all">All clients</option>
                 {clients.map((client) => <option key={client.clientId} value={client.clientId}>{client.name}</option>)}
               </Select>
             </div>
-            <div className="min-w-0 bg-[var(--surface)] p-3">
-              <Input label="From" compact type="date" value={fromDate} onChange={(event) => rangeChanged(setFromDate, event.target.value)} className="border-0 bg-transparent px-0 focus:border-transparent" />
+            <div className="min-w-0 bg-[var(--surface)] p-2.5">
+              <Input label="From" compact type="date" value={fromDate} onChange={(event) => rangeChanged(setFromDate, event.target.value)} />
             </div>
-            <div className="min-w-0 bg-[var(--surface)] p-3">
-              <Input label="To" compact type="date" value={toDate} onChange={(event) => rangeChanged(setToDate, event.target.value)} className="border-0 bg-transparent px-0 focus:border-transparent" />
+            <div className="min-w-0 bg-[var(--surface)] p-2.5">
+              <Input label="To" compact type="date" value={toDate} onChange={(event) => rangeChanged(setToDate, event.target.value)} />
             </div>
           </div>
 
-          <fieldset className="flex flex-col gap-2">
+          <fieldset className="flex flex-col gap-1.5">
             <legend className="text-[10px] uppercase tracking-wider text-[var(--text-faint)]">Format</legend>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Export format">
-              <FormatOption value="csv" selected={format === 'csv'} label="CSV" hint="Comma-separated values" onSelect={setFormat} />
-              <FormatOption value="json" selected={format === 'json'} label="JSON" hint="Structured array" onSelect={setFormat} />
+            <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Export format">
+              <FormatOption value="csv" selected={format === 'csv'} label="CSV" onSelect={setFormat} />
+              <FormatOption value="json" selected={format === 'json'} label="JSON" onSelect={setFormat} />
             </div>
           </fieldset>
 
-          <div className="flex flex-col gap-2">
-            <span className="text-[10px] uppercase tracking-wider text-[var(--text-faint)]">Preview</span>
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border border-l-2 border-[var(--border)] border-l-[var(--accent)] bg-[var(--surface-2)] px-3 py-2 font-mono text-xs text-[var(--text-muted)]">
-              <Info className="h-3.5 w-3.5 text-[var(--accent)]" aria-hidden="true" />
+          <div className="flex flex-col gap-1.5">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border border-[var(--border)] bg-[var(--surface-2)] px-2.5 py-1.5 font-mono text-[11px] tabular-nums text-[var(--text-muted)]">
               <span><strong className="font-medium text-[var(--text)]">{preview.rows.toLocaleString()}</strong> rows</span>
               <span aria-hidden="true">·</span>
-              <span><strong className="font-medium text-[var(--text)]">~{formatBytes(preview.bytes)}</strong> source size</span>
+              <span><strong className="font-medium text-[var(--text)]">~{formatBytes(preview.bytes)}</strong></span>
               <span aria-hidden="true">·</span>
               <span><strong className="font-medium text-[var(--text)]">{preview.files}</strong> files</span>
             </div>
-            {loadError && <p role="alert" className="text-xs text-[var(--text-muted)]">{loadError}</p>}
+            {loadError && <p role="alert" className="text-[11px] text-[var(--text-muted)]">{loadError}</p>}
             {fromDate && toDate && fromDate > toDate && (
-              <p role="alert" className="text-xs text-[var(--text-muted)]">Start date must be on or before end date.</p>
+              <p role="alert" className="text-[11px] text-[var(--text-muted)]">Start date must be on or before end date.</p>
             )}
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2 border-t border-[var(--border)] pt-3">
+          <div className="flex flex-wrap items-center justify-end gap-1.5 border-t border-[var(--border)] pt-2.5">
             <Button type="button" size="xs" onClick={resetExport}>Reset</Button>
             <Button type="button" variant="primary" size="xs" icon="Download" disabled={loading || Boolean(fromDate && toDate && fromDate > toDate)} onClick={downloadExport}>
               Download {format.toUpperCase()}
@@ -248,22 +240,22 @@ export function ExportWorkspace() {
         </Panel>
 
         <Panel
-          title="Recent exports"
-          action={<a href="/vcon/storage" className="text-xs text-[var(--text-muted)] hover:text-[var(--text)]">View all</a>}
+          title="Files"
+          action={<a href="/vcon/storage" className="text-[11px] text-[var(--text-muted)] hover:text-[var(--text)]">View all</a>}
           bodyClassName="divide-y divide-[var(--border)]"
           className="min-w-0 xl:col-span-2"
         >
           {loading ? (
-            <p className="px-4 py-5 text-xs text-[var(--text-faint)]">Loading stored files...</p>
+            <p className="px-3 py-4 text-[11.5px] text-[var(--text-faint)]">Loading...</p>
           ) : sortedRecentFiles.length === 0 ? (
-            <p className="px-4 py-5 text-xs text-[var(--text-faint)]">No stored files available to export.</p>
+            <p className="px-3 py-4 text-[11.5px] text-[var(--text-faint)]">No files</p>
           ) : (
             sortedRecentFiles.map((file) => (
-              <div key={`${file.clientId}/${file.filename}`} className="flex items-center gap-2.5 px-3.5 py-2.5 transition-colors hover:bg-[var(--surface-2)]">
-                <span className="shrink-0 border border-[var(--border-strong)] px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-[var(--text-muted)]">CSV</span>
+              <div key={`${file.clientId}/${file.filename}`} className="flex items-center gap-2 px-3 py-2 transition-colors hover:bg-[var(--surface-2)]">
+                <span className="shrink-0 border border-[var(--border-strong)] px-1 py-0.5 font-mono text-[9px] uppercase tracking-wider text-[var(--text-muted)]">CSV</span>
                 <div className="min-w-0 flex-1">
-                  <div className="truncate font-mono text-xs text-[var(--text)]">{file.filename}</div>
-                  <div className="mt-0.5 truncate text-[10.5px] text-[var(--text-faint)]">
+                  <div className="truncate font-mono text-[11.5px] text-[var(--text)]">{file.filename}</div>
+                  <div className="truncate text-[10px] tabular-nums text-[var(--text-faint)]">
                     {file.clientId} · {relativeTime(file.modifiedAt, now)} · {file.linesCount.toLocaleString()} rows · {formatBytes(file.sizeBytes)}
                   </div>
                 </div>
@@ -273,10 +265,6 @@ export function ExportWorkspace() {
           )}
         </Panel>
       </div>
-
-      <p className="mt-2 text-[11px] text-[var(--text-faint)]">
-        Exports are generated from CSV files on disk · Estimates are approximate · Large downloads are streamed
-      </p>
     </section>
   );
 }
@@ -285,13 +273,11 @@ function FormatOption({
   value,
   selected,
   label,
-  hint,
   onSelect,
 }: {
   value: ExportFormat;
   selected: boolean;
   label: string;
-  hint: string;
   onSelect: (value: ExportFormat) => void;
 }) {
   const FormatIcon = value === 'csv' ? FileText : Braces;
@@ -301,16 +287,13 @@ function FormatOption({
       type="button"
       role="radio"
       aria-checked={selected}
-      className={`flex min-w-0 items-center gap-2.5 border px-3 py-2.5 text-left transition-colors ${selected ? 'border-[var(--border-strong)] bg-[var(--surface-2)]' : 'border-[var(--border)] hover:border-[var(--border-strong)]'}`}
+      className={`flex min-w-0 items-center gap-2 border px-2.5 py-1.5 text-left transition-colors ${selected ? 'border-[var(--border-strong)] bg-[var(--surface-2)]' : 'border-[var(--border)] hover:border-[var(--border-strong)]'}`}
       onClick={() => onSelect(value)}
     >
-      <span className={`grid h-7 w-7 shrink-0 place-items-center border ${selected ? 'border-[var(--border-strong)] text-[var(--accent)]' : 'border-[var(--border)] text-[var(--text-muted)]'}`}>
-        <FormatIcon className="h-3.5 w-3.5" aria-hidden="true" />
+      <span className={`grid h-6 w-6 shrink-0 place-items-center border ${selected ? 'border-[var(--border-strong)] text-[var(--accent)]' : 'border-[var(--border)] text-[var(--text-muted)]'}`}>
+        <FormatIcon className="h-3 w-3" aria-hidden="true" />
       </span>
-      <span className="min-w-0">
-        <span className="block text-xs font-medium leading-tight text-[var(--text)]">{label}</span>
-        <span className="mt-0.5 block truncate text-[10.5px] text-[var(--text-faint)]">{hint}</span>
-      </span>
+      <span className="text-[11.5px] font-medium text-[var(--text)]">{label}</span>
     </button>
   );
 }

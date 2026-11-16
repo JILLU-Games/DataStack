@@ -24,7 +24,7 @@ export const Table: React.FC<React.TableHTMLAttributes<HTMLTableElement>> = ({
 }) => (
   <table
     className={cn(
-      'w-full min-w-[680px] border-collapse text-left text-[13px] whitespace-nowrap',
+      'w-full min-w-[640px] border-collapse text-left text-[11.5px] whitespace-nowrap',
       className
     )}
     {...props}
@@ -40,7 +40,7 @@ export const TableHeader: React.FC<React.HTMLAttributes<HTMLTableSectionElement>
 }) => (
   <thead
     className={cn(
-      'bg-[var(--bg-sidebar)] border-b border-[var(--border)] text-[12px] font-medium text-[var(--text-muted)] uppercase',
+      'bg-[var(--bg-sidebar)] border-b border-[var(--border)] text-[10px] font-medium tracking-wider text-[var(--text-muted)] uppercase',
       className
     )}
     {...props}
@@ -76,7 +76,7 @@ export const TableHead: React.FC<React.ThHTMLAttributes<HTMLTableCellElement>> =
   children,
   ...props
 }) => (
-  <th className={cn('px-3 py-2.5 font-medium', className)} {...props}>
+  <th className={cn('px-3 py-1.5 font-medium', className)} {...props}>
     {children}
   </th>
 );
@@ -86,19 +86,19 @@ export const TableCell: React.FC<React.TdHTMLAttributes<HTMLTableCellElement>> =
   children,
   ...props
 }) => (
-  <td className={cn('px-3 py-2.5 text-[var(--text-muted)] align-middle', className)} {...props}>
+  <td className={cn('px-3 py-1.5 text-[var(--text-muted)] align-middle', className)} {...props}>
     {children}
   </td>
 );
 
 export const TableEmpty: React.FC<{ colSpan: number; message?: string }> = ({
   colSpan,
-  message = 'No data available',
+  message = 'No data',
 }) => (
   <tr>
     <td
       colSpan={colSpan}
-      className="px-4 py-10 text-center text-[13px] text-[var(--text-dim)]"
+      className="px-3 py-6 text-center text-[11.5px] text-[var(--text-dim)]"
     >
       {message}
     </td>

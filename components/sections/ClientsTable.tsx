@@ -2,6 +2,7 @@
 
 import { Button } from '@/components/ui/Button';
 import { CopyButton } from '@/components/ui/CopyButton';
+import { Textarea } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import {
     Table,
@@ -36,9 +37,14 @@ function relativeTime(timestamp: string | undefined, now: number) {
 export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps) {
   const { success, error } = useToast();
   const [credentials, setCredentials] = useState<ClientCredentials | null>(null);
+  const [confirmAction, setConfirmAction] = useState<{
+    type: 'rotate' | 'revoke';
+    client: ClientItem;
+  } | null>(null);
+  const [processing, setProcessing] = useState(false);
 
-  const rotateKey = async (client: ClientItem) => {
-    if (!window.confirm(`Rotate credentials for ${client.clientId}? Existing credentials will stop working.`)) return;
+  const executeRotateKey = async (client: ClientItem) => {
+    setProcessing(true);
     try {
       const response = await fetch(`/api/clients/${encodeURIComponent(client.clientId)}`, {
         method: 'PATCH',
@@ -47,17 +53,19 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Unable to rotate credentials');
+      setConfirmAction(null);
       setCredentials(data.client);
       success('Credentials rotated', `New credentials issued for ${client.clientId}.`);
       await onStatusChange();
     } catch (rotateError) {
       error('Credential rotation failed', rotateError instanceof Error ? rotateError.message : 'Unknown error');
+    } finally {
+      setProcessing(false);
     }
   };
 
-  const toggleStatus = async (client: ClientItem) => {
-    const status = client.status === 'active' ? 'revoked' : 'active';
-    if (status === 'revoked' && !window.confirm(`Revoke access for ${client.clientId}?`)) return;
+  const executeStatusChange = async (client: ClientItem, status: 'active' | 'revoked') => {
+    setProcessing(true);
     try {
       const response = await fetch(`/api/clients/${encodeURIComponent(client.clientId)}`, {
         method: 'PATCH',
@@ -66,17 +74,37 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Unable to update client status');
+      setConfirmAction(null);
       success('Client status updated', `${client.clientId} is now ${status}.`);
       await onStatusChange();
     } catch (statusError) {
       error('Status update failed', statusError instanceof Error ? statusError.message : 'Unknown error');
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  const toggleStatus = (client: ClientItem) => {
+    if (client.status === 'active') {
+      setConfirmAction({ type: 'revoke', client });
+    } else {
+      void executeStatusChange(client, 'active');
+    }
+  };
+
+  const handleConfirm = async () => {
+    if (!confirmAction) return;
+    if (confirmAction.type === 'rotate') {
+      await executeRotateKey(confirmAction.client);
+    } else {
+      await executeStatusChange(confirmAction.client, 'revoked');
     }
   };
 
   return (
     <>
       <TableWrap>
-        <Table className="min-w-[760px] text-xs">
+        <Table className="min-w-[680px] text-[11px]">
           <TableHeader>
             <TableRow>
               <TableHead>Client</TableHead>
@@ -88,7 +116,7 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
           </TableHeader>
           <TableBody>
             {clients.length === 0 ? (
-              <TableEmpty colSpan={5} message="No clients match these filters." />
+              <TableEmpty colSpan={5} message="No matching clients" />
             ) : (
               clients.map((client) => {
                 const online = client.status === 'active' && Boolean(client.lastActive) &&
@@ -102,34 +130,34 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
                     : 'bg-[var(--text-faint)]';
 
                 return (
-                  <TableRow key={client.clientId} className="border-b border-[var(--border)] last:border-b-0 hover:bg-[var(--surface-2)]">
-                    <TableCell className="px-3.5 py-2.5">
-                      <div className="flex min-w-0 items-center gap-2.5">
+                  <TableRow key={client.clientId}>
+                    <TableCell>
+                      <div className="flex min-w-0 items-center gap-2">
                         <span className={`h-1.5 w-1.5 shrink-0 ${dotClass}`} title={label} />
                         <div className="min-w-0 leading-tight">
-                          <div className="truncate text-[12.5px] text-[var(--text)]">{client.name}</div>
-                          <div className="mt-0.5 truncate font-mono text-[10.5px] text-[var(--text-faint)]">{client.clientId}</div>
+                          <div className="truncate text-[11.5px] text-[var(--text)]">{client.name}</div>
+                          <div className="mt-0.5 truncate font-mono text-[10px] text-[var(--text-faint)]">{client.clientId}</div>
                         </div>
                       </div>
                     </TableCell>
-                    <TableCell className="px-3.5 py-2.5 font-mono text-[11.5px] text-[var(--text-muted)]" title="Secret keys are hidden. Rotate credentials to issue a new key.">
+                    <TableCell className="font-mono text-[11px]">
                       sec_••••••••
                     </TableCell>
-                    <TableCell className="px-3.5 py-2.5 text-right font-mono text-[11.5px] text-[var(--text-muted)]">
+                    <TableCell className="text-right font-mono text-[11px] tabular-nums">
                       {client.totalEvents.toLocaleString()}
                     </TableCell>
-                    <TableCell className="px-3.5 py-2.5 font-mono text-[11.5px] text-[var(--text-muted)]">
+                    <TableCell className="font-mono text-[11px] tabular-nums">
                       {client.lastActive ? new Date(client.lastActive).toLocaleTimeString([], { hour12: false }) : '—'}
-                      <span className="ml-1 font-sans text-[10.5px] text-[var(--text-faint)]">{relativeTime(client.lastActive, now)}</span>
+                      <span className="ml-1 font-sans text-[10px] text-[var(--text-faint)]">{relativeTime(client.lastActive, now)}</span>
                     </TableCell>
-                    <TableCell className="px-3.5 py-2.5 text-right">
+                    <TableCell className="text-right">
                       <div className="inline-flex gap-0.5">
                         <Button
                           type="button"
                           variant="icon"
                           size="icon"
                           icon="Activity"
-                          className="h-[26px] w-[26px] border border-transparent hover:border-[var(--border)] hover:bg-[var(--surface-2)]"
+                          className="h-6 w-6 border border-transparent hover:border-[var(--border)] hover:bg-[var(--surface-2)]"
                           title={`View events for ${client.clientId}`}
                           aria-label={`View events for ${client.clientId}`}
                           onClick={() => window.location.assign(`/vcon/data?clientId=${encodeURIComponent(client.clientId)}`)}
@@ -139,17 +167,17 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
                           variant="icon"
                           size="icon"
                           icon="RefreshCw"
-                          className="h-[26px] w-[26px] border border-transparent hover:border-[var(--border)] hover:bg-[var(--surface-2)]"
+                          className="h-6 w-6 border border-transparent hover:border-[var(--border)] hover:bg-[var(--surface-2)]"
                           title={`Rotate key for ${client.clientId}`}
                           aria-label={`Rotate key for ${client.clientId}`}
-                          onClick={() => rotateKey(client)}
+                          onClick={() => setConfirmAction({ type: 'rotate', client })}
                         />
                         <Button
                           type="button"
                           variant="icon"
                           size="icon"
                           icon={client.status === 'active' ? 'Trash2' : 'ShieldCheck'}
-                          className={`h-[26px] w-[26px] border border-transparent ${client.status === 'active' ? 'hover:border-[var(--danger)] hover:text-[var(--danger)]' : 'hover:border-[var(--border)] hover:bg-[var(--surface-2)]'}`}
+                          className={`h-6 w-6 border border-transparent ${client.status === 'active' ? 'hover:border-[var(--danger)] hover:text-[var(--danger)]' : 'hover:border-[var(--border)] hover:bg-[var(--surface-2)]'}`}
                           title={`${client.status === 'active' ? 'Revoke' : 'Reactivate'} ${client.clientId}`}
                           aria-label={`${client.status === 'active' ? 'Revoke' : 'Reactivate'} ${client.clientId}`}
                           onClick={() => toggleStatus(client)}
@@ -165,30 +193,76 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
       </TableWrap>
 
       <Modal
+        isOpen={Boolean(confirmAction)}
+        onClose={() => !processing && setConfirmAction(null)}
+        title={confirmAction?.type === 'rotate' ? 'Rotate credentials' : 'Revoke access'}
+        maxWidth="xs"
+        footer={
+          <>
+            <Button type="button" variant="ghost" size="xs" disabled={processing} onClick={() => setConfirmAction(null)}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant={confirmAction?.type === 'revoke' ? 'danger' : 'primary'}
+              size="xs"
+              loading={processing}
+              onClick={handleConfirm}
+            >
+              {confirmAction?.type === 'rotate' ? 'Rotate' : 'Revoke'}
+            </Button>
+          </>
+        }
+      >
+        <p className="text-[12px] text-[var(--text-muted)]">
+          {confirmAction?.type === 'rotate'
+            ? `Rotate credentials for ${confirmAction.client.clientId}? Existing credentials will stop working.`
+            : `Revoke access for ${confirmAction?.client.clientId || ''}?`}
+        </p>
+      </Modal>
+
+      <Modal
         isOpen={Boolean(credentials)}
         onClose={() => setCredentials(null)}
         title={`Credentials: ${credentials?.clientId || ''}`}
-        description="Copy the new credentials now. The secret is only shown after rotation."
-        footer={<Button type="button" size="sm" onClick={() => setCredentials(null)}>Close</Button>}
+        footer={<Button type="button" size="xs" onClick={() => setCredentials(null)}>Close</Button>}
       >
-        {credentials && (
-          <div className="flex flex-col gap-3">
-            <Credential label="Client ID" value={credentials.clientId} />
-            <Credential label="Client secret key" value={credentials.secret} />
-            <Credential label="JWT token" value={credentials.token} />
-          </div>
-        )}
+        {credentials && <CredentialsDisplay credentials={credentials} />}
       </Modal>
     </>
   );
 }
 
-function Credential({ label, value }: { label: string; value: string }) {
+export function CredentialsDisplay({ credentials }: { credentials: ClientCredentials }) {
   return (
-    <div className="flex flex-col gap-1.5">
-      <span className="text-xs uppercase text-[var(--text-faint)]">{label}</span>
-      <div className="flex min-w-0 items-center justify-between gap-2 border border-[var(--border)] bg-[var(--bg)] p-2.5">
-        <code className="min-w-0 break-all font-mono text-xs text-[var(--text)]">{value}</code>
+    <div className="flex flex-col gap-2.5">
+      <CredentialItem label="Client ID" value={credentials.clientId} />
+      <CredentialItem label="Secret key" value={credentials.secret} />
+      <div className="flex flex-col gap-1">
+        <div className="flex items-center justify-between gap-2">
+          <label htmlFor={`token-${credentials.clientId}`} className="text-[10px] uppercase tracking-wider text-[var(--text-faint)]">
+            JWT token
+          </label>
+          <CopyButton value={credentials.token} />
+        </div>
+        <Textarea
+          id={`token-${credentials.clientId}`}
+          readOnly
+          value={credentials.token}
+          rows={3}
+          className="font-mono text-[11px] text-[var(--accent)]"
+        />
+      </div>
+    </div>
+  );
+}
+
+function CredentialItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-[10px] uppercase tracking-wider text-[var(--text-faint)]">{label}</span>
+      <div className="flex min-w-0 items-center justify-between gap-2 border border-[var(--border)] bg-[var(--bg)] p-2">
+        <code className="min-w-0 truncate font-mono text-[11px] text-[var(--text)]">{value}</code>
         <CopyButton value={value} />
       </div>
     </div>

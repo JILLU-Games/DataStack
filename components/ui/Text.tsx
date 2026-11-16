@@ -15,15 +15,15 @@ export const Text: React.FC<TextProps> = ({
   ...props
 }) => {
   const variantStyles = {
-    h1: 'text-[24px] font-semibold text-[var(--text)]',
-    h2: 'text-[20px] font-semibold text-[var(--text)]',
-    h3: 'text-[17px] font-medium text-[var(--text)]',
-    body: 'text-[14px] font-normal text-[var(--text)]',
-    muted: 'text-[13px] font-normal text-[var(--text-muted)]',
-    dim: 'text-[12px] font-normal text-[var(--text-dim)]',
-    label: 'text-[12px] font-medium uppercase text-[var(--text-muted)]',
-    code: 'text-[12px] font-mono text-[var(--accent)] bg-[var(--bg-hover)] px-2 py-1 border border-[var(--border)]',
-    badge: 'text-[11.5px] font-medium px-2 py-1 border border-[var(--border)] text-[var(--text-muted)] inline-flex items-center gap-1',
+    h1: 'text-[16px] font-medium tracking-tight text-[var(--text)]',
+    h2: 'text-[14px] font-medium tracking-tight text-[var(--text)]',
+    h3: 'text-[12.5px] font-medium text-[var(--text)]',
+    body: 'text-[13px] font-normal text-[var(--text)]',
+    muted: 'text-[12px] font-normal text-[var(--text-muted)]',
+    dim: 'text-[11px] font-normal text-[var(--text-dim)]',
+    label: 'text-[10.5px] font-medium uppercase tracking-wider text-[var(--text-muted)]',
+    code: 'text-[11.5px] font-mono text-[var(--accent)] bg-[var(--bg-hover)] px-1.5 py-0.5 border border-[var(--border)]',
+    badge: 'text-[10.5px] font-medium px-1.5 py-0.5 border border-[var(--border)] text-[var(--text-muted)] inline-flex items-center gap-1',
   };
 
   return (

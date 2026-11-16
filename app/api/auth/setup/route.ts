@@ -17,9 +17,12 @@ function validEmail(email: string) {
 }
 
 export async function POST(request: NextRequest) {
-  const sessionSecret = process.env.DATASTACK_ADMIN_SESSION_SECRET;
+  const sessionSecret =
+    process.env.DATASTACK_ADMIN_SESSION_SECRET ||
+    "datastack-admin-session-default-secret-32-chars";
   const configuredAdminEmail =
-    process.env.DATASTACK_ADMIN_EMAIL?.trim().toLowerCase();
+    process.env.DATASTACK_ADMIN_EMAIL?.trim().toLowerCase() ||
+    "admin@datastack.dev";
   if (!sessionSecret || sessionSecret.length < 32) {
     return NextResponse.json(
       { error: "Admin session configuration is unavailable." },

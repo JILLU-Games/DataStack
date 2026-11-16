@@ -4,17 +4,17 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: 'DataStack - Realtime Data Collection Platform',
-  description: 'A self-hosted workspace for collecting, reviewing, and exporting realtime data.',
+  description: 'Self-hosted universal realtime data collection engine with Socket.IO ingestion, Redis buffer, JWT client auth, CSV batch rotation, and /vcon/ admin panel.',
   manifest: '/manifest.json',
   openGraph: {
     title: 'DataStack - Realtime Data Collection Platform',
-    description: 'Collect, review, and export realtime data from one clear workspace.',
+    description: 'Self-hosted universal realtime data collection engine with Socket.IO ingestion, Redis buffer, JWT client auth, CSV batch rotation, and /vcon/ admin panel.',
     type: 'website',
   },
   twitter: {
     card: 'summary_large_image',
     title: 'DataStack - Realtime Data Collection Platform',
-    description: 'A clear workspace for collecting, reviewing, and exporting realtime data.',
+    description: 'Self-hosted universal realtime data collection engine with Socket.IO ingestion, Redis buffer, JWT client auth, CSV batch rotation, and /vcon/ admin panel.',
   },
 };
 

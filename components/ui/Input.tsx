@@ -7,10 +7,12 @@ export interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> 
   error?: string;
   icon?: string;
   compact?: boolean;
+  suffix?: string;
+  rightElement?: React.ReactNode;
 }
 
 export const Input = React.forwardRef<HTMLInputElement, InputProps>(
-  ({ label, error, icon, compact = false, className, id, ...props }, ref) => {
+  ({ label, error, icon, compact = false, suffix, rightElement, className, id, ...props }, ref) => {
     const inputId = id || (label ? label.toLowerCase().replace(/\s+/g, '-') : undefined);
 
     return (
@@ -18,15 +20,15 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(
         {label && (
           <label
             htmlFor={inputId}
-            className="text-[12px] font-medium text-[var(--text-muted)]"
+            className="text-[10.5px] font-medium text-[var(--text-muted)]"
           >
             {label}
           </label>
         )}
         <div className="relative flex items-center w-full">
           {icon && (
-            <div className="absolute left-2.5 flex items-center pointer-events-none text-[var(--text-dim)]">
-              <Icon name={icon} size={13} />
+            <div className="absolute left-2 flex items-center pointer-events-none text-[var(--text-dim)]">
+              <Icon name={icon} size={12} />
             </div>
           )}
           <input
@@ -34,15 +36,31 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(
             ref={ref}
             className={cn(
               'w-full bg-[var(--bg-main)] text-[var(--text)] border border-[var(--border-strong)] placeholder:text-[var(--text-dim)] transition-colors focus:outline-none focus:border-[var(--accent)] disabled:opacity-50 disabled:cursor-not-allowed',
-              compact ? 'h-9 px-3 text-[13px]' : 'h-10 px-3.5 text-[14px]',
-              icon && 'pl-8',
+              compact ? 'h-7.5 px-2.5 text-[11.5px]' : 'h-8.5 px-3 text-[12px]',
+              icon && 'pl-7',
+              rightElement && 'pr-8',
               error && 'border-[var(--danger)]',
               className
             )}
             {...props}
           />
+          {rightElement && (
+            <div className="absolute right-0 top-0 bottom-0 flex items-center">
+              {rightElement}
+            </div>
+          )}
+          {suffix && (
+            <span
+              className={cn(
+                'flex shrink-0 items-center border border-l-0 border-[var(--border-strong)] bg-[var(--surface-2)] text-[var(--text-muted)] select-none',
+                compact ? 'h-7.5 px-2 text-[11px]' : 'h-8.5 px-2.5 text-[11.5px]'
+              )}
+            >
+              {suffix}
+            </span>
+          )}
         </div>
-        {error && <span className="text-[12px] text-[var(--danger)]">{error}</span>}
+        {error && <span className="text-[11px] text-[var(--danger)]">{error}</span>}
       </div>
     );
   }
@@ -64,7 +82,7 @@ export const Textarea = React.forwardRef<HTMLTextAreaElement, TextareaProps>(
         {label && (
           <label
             htmlFor={textareaId}
-            className="text-[12px] font-medium text-[var(--text-muted)]"
+            className="text-[10.5px] font-medium text-[var(--text-muted)]"
           >
             {label}
           </label>
@@ -73,13 +91,13 @@ export const Textarea = React.forwardRef<HTMLTextAreaElement, TextareaProps>(
           id={textareaId}
           ref={ref}
           className={cn(
-            'w-full bg-[var(--bg-main)] text-[var(--text)] border border-[var(--border-strong)] p-3.5 text-[14px] placeholder:text-[var(--text-dim)] focus:outline-none focus:border-[var(--accent)] min-h-[96px] resize-y font-mono',
+            'w-full bg-[var(--bg-main)] text-[var(--text)] border border-[var(--border-strong)] p-2.5 text-[12px] placeholder:text-[var(--text-dim)] focus:outline-none focus:border-[var(--accent)] min-h-[80px] resize-y font-mono',
             error && 'border-[var(--danger)]',
             className
           )}
           {...props}
         />
-        {error && <span className="text-[12px] text-[var(--danger)]">{error}</span>}
+        {error && <span className="text-[11px] text-[var(--danger)]">{error}</span>}
       </div>
     );
   }
@@ -103,7 +121,7 @@ export const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
         {label && (
           <label
             htmlFor={selectId}
-            className="text-[12px] font-medium text-[var(--text-muted)]"
+            className="text-[10.5px] font-medium text-[var(--text-muted)]"
           >
             {label}
           </label>
@@ -113,7 +131,7 @@ export const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
           ref={ref}
           className={cn(
             'w-full bg-[var(--bg-main)] text-[var(--text)] border border-[var(--border-strong)] focus:outline-none focus:border-[var(--accent)] cursor-pointer',
-            compact ? 'h-9 px-2.5 text-[13px]' : 'h-10 px-3 text-[14px]',
+            compact ? 'h-7.5 px-2 text-[11.5px]' : 'h-8.5 px-2.5 text-[12px]',
             error && 'border-[var(--danger)]',
             className
           )}
@@ -127,7 +145,7 @@ export const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
               ))
             : children}
         </select>
-        {error && <span className="text-[12px] text-[var(--danger)]">{error}</span>}
+        {error && <span className="text-[11px] text-[var(--danger)]">{error}</span>}
       </div>
     );
   }

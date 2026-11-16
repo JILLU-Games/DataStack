@@ -42,10 +42,10 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
     };
 
     const sizeStyles = {
-      default: 'min-h-10 px-4 text-[13.5px] gap-2',
-      sm: 'h-9 px-3 text-[12.5px] gap-1.5',
-      xs: 'h-8 px-2.5 text-[12px] gap-1.5',
-      icon: 'w-9 h-9 p-0',
+      default: 'min-h-8.5 px-3 text-[12px] gap-1.5',
+      sm: 'h-7.5 px-2.5 text-[11.5px] gap-1.5',
+      xs: 'h-7 px-2 text-[11px] gap-1',
+      icon: 'w-7.5 h-7.5 p-0',
     };
 
     return (
@@ -61,15 +61,15 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         {...props}
       >
         {loading ? (
-          <Icon name="Loader2" size={size === 'sm' || size === 'xs' ? 12 : 14} className="animate-spin" />
+          <Icon name="Loader2" size={11} className="animate-spin" />
         ) : (
           icon && iconPosition === 'left' && (
-            <Icon name={icon} size={size === 'sm' || size === 'xs' ? 12 : 14} />
+            <Icon name={icon} size={11} />
           )
         )}
         {children && <span>{children}</span>}
         {!loading && icon && iconPosition === 'right' && (
-          <Icon name={icon} size={size === 'sm' || size === 'xs' ? 12 : 14} />
+          <Icon name={icon} size={11} />
         )}
       </button>
     );

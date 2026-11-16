@@ -35,7 +35,7 @@ export const MainLayout: React.FC<MainLayoutProps> = ({
           <div className={cn(
             'flex-1 min-w-0 w-full mx-auto',
             showSidebar
-              ? 'max-w-[1600px] px-4 py-4 sm:px-6 sm:py-6 xl:px-8 xl:py-7'
+              ? 'max-w-[var(--console-width)] px-3.5 py-3 sm:px-5 sm:py-4'
               : 'max-w-[var(--container-width)] px-6 py-0'
           )}>
             {children}

@@ -31,3 +31,10 @@
 - The root `notes/` directory is local-only and must remain ignored by Git.
 - `notes/` is exclusively for private development-time notes, plans, reports, and update/fix phase logs. Never put public-facing or publishable documentation, Markdown, or public information in this directory.
 - Before starting any repository update, fix, or addition, record its report and plan in `notes/` first. Keep the relevant steps and phase status/logs updated there as work progresses.
+
+## 6. Phase Implementation & Fast Single-Pass Verification Rules
+
+- **Strict Scope Lock**: Every phase must only touch the files and targets locked in its phase specification. Never modify unrelated features or UI outside the active phase scope.
+- **No Long Verification Loops**: Once a phase's code changes are applied, perform a single verification pass (`compile_applet` + `lint_applet`), update the `notes/` phase logs immediately, close the phase, and prepare for the next phase.
+- **Zero Redundant Testing Loops**: Never run repetitive or unnecessary multi-round verification/test loops within the same phase. Implement the scoped patch cleanly, verify once, and close the phase directly.
+

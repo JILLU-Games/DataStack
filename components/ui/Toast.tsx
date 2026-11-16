@@ -80,17 +80,17 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             <div
               key={t.id}
               className={cn(
-                'pointer-events-auto flex items-start gap-3 p-4 bg-[var(--bg-elevated)] border border-[var(--border-strong)] text-[var(--text)] text-[13px] transition-all',
+                'pointer-events-auto flex items-start gap-2.5 p-3 bg-[var(--bg-elevated)] border border-[var(--border-strong)] text-[var(--text)] text-[12px] transition-all',
                 typeBorder
               )}
             >
               <div className="mt-0.5 shrink-0">
-                <Icon name={typeIcon} size={17} color={iconColor} />
+                <Icon name={typeIcon} size={14} color={iconColor} />
               </div>
               <div className="flex-1 min-w-0">
                 <div className="font-medium text-[var(--text)] leading-tight">{t.title}</div>
                 {t.message && (
-                  <div className="text-[12px] text-[var(--text-muted)] mt-1 leading-normal break-words">
+                  <div className="text-[11.5px] text-[var(--text-muted)] mt-0.5 leading-normal break-words">
                     {t.message}
                   </div>
                 )}
@@ -100,7 +100,7 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 className="shrink-0 text-[var(--text-dim)] hover:text-[var(--text)] p-0.5 cursor-pointer"
                 aria-label="Dismiss toast"
               >
-                <Icon name="X" size={12} />
+                <Icon name="X" size={11} />
               </button>
             </div>
           );

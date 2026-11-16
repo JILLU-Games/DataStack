@@ -1,9 +1,11 @@
 'use client';
 
+import { AdminPageHeader } from '@/components/layout/AdminPageHeader';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input, Select } from '@/components/ui/Input';
 import { Panel } from '@/components/ui/Panel';
+import { Pill } from '@/components/ui/Pill';
 import {
     Table,
     TableBody,
@@ -128,39 +130,37 @@ export function DataBrowser() {
   };
 
   return (
-    <section className="mx-auto flex w-full max-w-[var(--console-width)] flex-col gap-4">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-base font-medium tracking-[-0.3px] text-[var(--text)]">Data</h1>
-          <p className="mt-0.5 text-xs text-[var(--text-muted)]">Collected events across all clients</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            type="button"
-            variant="icon"
-            size="icon"
-            icon="RefreshCw"
-            className="h-8 w-8 border border-[var(--border)]"
-            title="Refresh events"
-            aria-label="Refresh events"
-            loading={refreshing}
-            onClick={refresh}
-          />
-          <Button
-            type="button"
-            variant="primary"
-            size="sm"
-            icon="Download"
-            onClick={() => window.location.assign('/vcon/export')}
-          >
-            Export CSV
-          </Button>
-        </div>
-      </header>
+    <section className="w-full">
+      <AdminPageHeader
+        title="Events"
+        actions={
+          <>
+            <Button
+              type="button"
+              variant="secondary"
+              size="icon"
+              icon="RefreshCw"
+              title="Refresh events"
+              aria-label="Refresh events"
+              loading={refreshing}
+              onClick={refresh}
+            />
+            <Button
+              type="button"
+              variant="primary"
+              size="xs"
+              icon="Download"
+              onClick={() => window.location.assign('/vcon/export')}
+            >
+              Export CSV
+            </Button>
+          </>
+        }
+      />
 
-      <Card compact className="!p-0">
+      <Card compact className="mb-2.5 p-0">
         <div className="grid grid-cols-1 gap-px bg-[var(--border)] sm:grid-cols-2 lg:grid-cols-5">
-          <div className="bg-[var(--surface)] p-3">
+          <div className="bg-[var(--surface)] p-2.5">
             <Select
               label="Client"
               compact
@@ -175,7 +175,7 @@ export function DataBrowser() {
               ))}
             </Select>
           </div>
-          <div className="bg-[var(--surface)] p-3">
+          <div className="bg-[var(--surface)] p-2.5">
             <Input
               label="From"
               compact
@@ -184,7 +184,7 @@ export function DataBrowser() {
               onChange={(event) => setFromFilter(event.target.value)}
             />
           </div>
-          <div className="bg-[var(--surface)] p-3">
+          <div className="bg-[var(--surface)] p-2.5">
             <Input
               label="To"
               compact
@@ -193,17 +193,17 @@ export function DataBrowser() {
               onChange={(event) => setToFilter(event.target.value)}
             />
           </div>
-          <div className="bg-[var(--surface)] p-3">
+          <div className="bg-[var(--surface)] p-2.5">
             <Input
-              label="Search payload"
+              label="Search"
               compact
-              placeholder="e.g. sensor, user_id"
+              placeholder="Keyword..."
               icon="Search"
               value={searchFilter}
               onChange={(event) => setSearchFilter(event.target.value)}
             />
           </div>
-          <div className="flex items-end justify-end gap-2 bg-[var(--surface)] p-3">
+          <div className="flex items-end justify-end gap-1.5 bg-[var(--surface)] p-2.5">
             <Button type="button" size="xs" icon="X" onClick={resetFilters}>
               Reset
             </Button>
@@ -216,11 +216,11 @@ export function DataBrowser() {
 
       <Panel
         title="Events"
-        meta={`${total.toLocaleString()} results · page ${page} of ${pageCount}`}
+        meta={`${total.toLocaleString()} · ${page}/${pageCount}`}
         bodyClassName="overflow-hidden"
       >
         <TableWrap className="border-0">
-          <Table className="min-w-[760px] text-xs">
+          <Table className="min-w-[680px] text-[11px]">
             <TableHeader>
               <TableRow>
                 <TableHead>Time</TableHead>
@@ -235,11 +235,11 @@ export function DataBrowser() {
               {errorMessage ? (
                 <TableEmpty colSpan={6} message={errorMessage} />
               ) : events.length === 0 ? (
-                <TableEmpty colSpan={6} message="No events match these filters." />
+                <TableEmpty colSpan={6} message="No matching events" />
               ) : (
                 events.map((event) => (
                   <TableRow key={event.eventId}>
-                    <TableCell className="font-mono text-[var(--text)]">
+                    <TableCell className="font-mono text-[10.5px] tabular-nums text-[var(--text)]">
                       {new Date(event.timestamp).toLocaleTimeString([], {
                         hour: '2-digit',
                         minute: '2-digit',
@@ -247,18 +247,18 @@ export function DataBrowser() {
                         hour12: false,
                       })}
                     </TableCell>
-                    <TableCell className="font-mono text-[var(--accent)]">{event.clientId}</TableCell>
-                    <TableCell className="hidden font-mono text-[var(--text-faint)] sm:table-cell">
+                    <TableCell className="font-mono text-[11px] text-[var(--accent)]">{event.clientId}</TableCell>
+                    <TableCell className="hidden font-mono text-[10.5px] text-[var(--text-faint)] sm:table-cell">
                       {event.eventId}
                     </TableCell>
-                    <TableCell className="max-w-0 truncate font-mono text-[var(--text)]">
+                    <TableCell className="max-w-0 truncate font-mono text-[11px] text-[var(--text)]">
                       {event.payload}
                     </TableCell>
-                    <TableCell className="hidden font-mono md:table-cell">
+                    <TableCell className="hidden font-mono text-[10.5px] tabular-nums md:table-cell">
                       {new TextEncoder().encode(event.payload).length} B
                     </TableCell>
                     <TableCell className="text-right">
-                      <span className="inline-flex items-center gap-1.5 text-[var(--text-muted)]">
+                      <span className="inline-flex items-center gap-1.5 text-[10.5px] text-[var(--text-muted)]">
                         <span className="h-1.5 w-1.5 bg-[var(--accent)]" />{event.status}
                       </span>
                     </TableCell>
@@ -268,10 +268,9 @@ export function DataBrowser() {
             </TableBody>
           </Table>
         </TableWrap>
-        <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--border)] px-4 py-2.5">
-          <p className="text-xs text-[var(--text-muted)]">
-            Showing <strong className="font-medium text-[var(--text)]">{firstVisible}–{lastVisible}</strong> of{' '}
-            <strong className="font-medium text-[var(--text)]">{total.toLocaleString()}</strong> events
+        <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border)] px-3 py-2">
+          <p className="font-mono text-[11px] tabular-nums text-[var(--text-muted)]">
+            {firstVisible}–{lastVisible} of {total.toLocaleString()}
           </p>
           <nav className="flex items-center gap-1" aria-label="Event pages">
             <Button
@@ -279,35 +278,48 @@ export function DataBrowser() {
               variant="icon"
               size="icon"
               icon="ChevronLeft"
-              className="h-7 w-7 border border-[var(--border)]"
+              className="h-6 w-6 border border-[var(--border)]"
               aria-label="Previous page"
               disabled={page <= 1}
               onClick={() => setPage((current) => Math.max(1, current - 1))}
             />
             {firstPage > 1 && (
               <>
-                <PageButton pageNumber={1} active={page === 1} onSelect={setPage} />
-                {firstPage > 2 && <span className="px-1 text-xs text-[var(--text-faint)]">…</span>}
+                <Pill
+                  active={page === 1}
+                  aria-current={page === 1 ? 'page' : undefined}
+                  className="min-w-6 justify-center px-1.5 font-mono tabular-nums"
+                  onClick={() => setPage(1)}
+                >
+                  1
+                </Pill>
+                {firstPage > 2 && <span className="px-1 text-[11px] text-[var(--text-faint)]">…</span>}
               </>
             )}
             {visiblePages.map((pageNumber) => (
-              <PageButton
+              <Pill
                 key={pageNumber}
-                pageNumber={pageNumber}
                 active={page === pageNumber}
-                onSelect={setPage}
-              />
+                aria-current={page === pageNumber ? 'page' : undefined}
+                className="min-w-6 justify-center px-1.5 font-mono tabular-nums"
+                onClick={() => setPage(pageNumber)}
+              >
+                {pageNumber}
+              </Pill>
             ))}
             {firstPage + visiblePages.length - 1 < pageCount && (
               <>
                 {firstPage + visiblePages.length < pageCount && (
-                  <span className="px-1 text-xs text-[var(--text-faint)]">…</span>
+                  <span className="px-1 text-[11px] text-[var(--text-faint)]">…</span>
                 )}
-                <PageButton
-                  pageNumber={pageCount}
+                <Pill
                   active={page === pageCount}
-                  onSelect={setPage}
-                />
+                  aria-current={page === pageCount ? 'page' : undefined}
+                  className="min-w-6 justify-center px-1.5 font-mono tabular-nums"
+                  onClick={() => setPage(pageCount)}
+                >
+                  {pageCount}
+                </Pill>
               </>
             )}
             <Button
@@ -315,7 +327,7 @@ export function DataBrowser() {
               variant="icon"
               size="icon"
               icon="ChevronRight"
-              className="h-7 w-7 border border-[var(--border)]"
+              className="h-6 w-6 border border-[var(--border)]"
               aria-label="Next page"
               disabled={page >= pageCount}
               onClick={() => setPage((current) => Math.min(pageCount, current + 1))}
@@ -324,30 +336,5 @@ export function DataBrowser() {
         </footer>
       </Panel>
     </section>
-  );
-}
-
-function PageButton({
-  pageNumber,
-  active,
-  onSelect,
-}: {
-  pageNumber: number;
-  active: boolean;
-  onSelect: (page: number) => void;
-}) {
-  return (
-    <button
-      type="button"
-      aria-current={active ? 'page' : undefined}
-      className={`grid h-7 min-w-7 place-items-center border px-2 text-xs transition-colors ${
-        active
-          ? 'border-[var(--border-strong)] bg-[var(--surface-2)] text-[var(--text)]'
-          : 'border-[var(--border)] text-[var(--text-muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]'
-      }`}
-      onClick={() => onSelect(pageNumber)}
-    >
-      {pageNumber}
-    </button>
   );
 }
