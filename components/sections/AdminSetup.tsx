@@ -4,7 +4,6 @@ import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { ArrowRight } from 'lucide-react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 
 export function AdminSetup({
@@ -14,7 +13,6 @@ export function AdminSetup({
   databaseReady?: boolean;
   initialEmail?: string;
 }) {
-  const router = useRouter();
   const [email, setEmail] = useState(initialEmail || 'admin@datastack.dev');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -42,12 +40,15 @@ export function AdminSetup({
       const response = await fetch('/api/auth/setup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ email, password, setupKey }),
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || 'Admin setup failed.');
-      router.replace('/vcon/dashboard');
-      router.refresh();
+      window.location.assign('/vcon/dashboard');
+      window.setTimeout(() => {
+        setIsSubmitting(false);
+      }, 2500);
     } catch (submitError) {
       setErrorMessage(
         submitError instanceof Error ? submitError.message : 'Admin setup failed.',

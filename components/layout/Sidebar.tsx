@@ -64,10 +64,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
     setIsSigningOut(true);
     setSignOutError('');
     try {
-      const response = await fetch('/api/auth/logout', { method: 'POST' });
+      const response = await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'include',
+      });
       if (!response.ok) throw new Error('Unable to sign out. Please try again.');
-      router.replace('/vcon/login');
-      router.refresh();
+      window.location.assign('/vcon/login');
     } catch (error) {
       setSignOutError(
         error instanceof Error ? error.message : 'Unable to sign out. Please try again.',

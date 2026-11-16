@@ -15,22 +15,20 @@ function isProtectedApi(pathname: string, method: string) {
 function isSameOriginRequest(request: NextRequest) {
   const originHeader = request.headers.get("origin");
   const requestHost = request.headers.get("host");
-  if (!originHeader || !requestHost) return false;
+  const forwardedHost = request.headers
+    .get("x-forwarded-host")
+    ?.split(",")[0]
+    ?.trim();
+  if (!originHeader || (!requestHost && !forwardedHost)) return false;
 
   try {
     const origin = new URL(originHeader);
-    const forwardedProtocol = request.headers
-      .get("x-forwarded-proto")
-      ?.split(",")[0]
-      .trim()
-      .toLowerCase();
-    const requestProtocol =
-      forwardedProtocol || request.nextUrl.protocol.replace(/:$/, "");
+    const originHost = origin.host.toLowerCase();
+    const matchesHost =
+      (requestHost && originHost === requestHost.toLowerCase()) ||
+      (forwardedHost && originHost === forwardedHost.toLowerCase());
 
-    return (
-      origin.host.toLowerCase() === requestHost.toLowerCase() &&
-      origin.protocol === `${requestProtocol}:`
-    );
+    return Boolean(matchesHost);
   } catch {
     return false;
   }

@@ -1,4 +1,7 @@
-import { createAdminSessionToken } from "@/core/auth/adminSession";
+import {
+  createAdminSessionToken,
+  getSessionCookieOptions,
+} from "@/core/auth/adminSession";
 import {
   createInitialAdmin,
   isAdminSetupComplete,
@@ -90,13 +93,11 @@ export async function POST(request: NextRequest) {
       Date.now() + SESSION_SECONDS * 1000,
     );
     const response = NextResponse.json({ success: true });
-    response.cookies.set(SESSION_COOKIE, token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
-      path: "/",
-      maxAge: SESSION_SECONDS,
-    });
+    response.cookies.set(
+      SESSION_COOKIE,
+      token,
+      getSessionCookieOptions(request, SESSION_SECONDS),
+    );
     return response;
   } catch {
     return NextResponse.json(

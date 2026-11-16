@@ -1,21 +1,17 @@
-import { createAdminSessionToken } from "@/core/auth/adminSession";
+import {
+  createAdminSessionToken,
+  getSessionCookieOptions,
+} from "@/core/auth/adminSession";
 import {
   clearAdminLoginAttempts,
   consumeAdminLoginAttempt,
   verifyAdminCredentials,
 } from "@/core/auth/adminUsers";
 import { NextRequest, NextResponse } from "next/server";
-import { createHash, timingSafeEqual } from "node:crypto";
 
 const SESSION_COOKIE = "datastack_admin_session";
 const SESSION_SECONDS = 8 * 60 * 60;
 const REMEMBERED_SESSION_SECONDS = 30 * 24 * 60 * 60;
-
-function constantTimeEqual(left: string, right: string) {
-  const leftHash = createHash("sha256").update(left).digest();
-  const rightHash = createHash("sha256").update(right).digest();
-  return timingSafeEqual(leftHash, rightHash);
-}
 
 export async function POST(request: NextRequest) {
   const sessionSecret =
@@ -100,13 +96,11 @@ export async function POST(request: NextRequest) {
     );
     const response = NextResponse.json({ success: true });
 
-    response.cookies.set(SESSION_COOKIE, token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
-      path: "/",
-      maxAge,
-    });
+    response.cookies.set(
+      SESSION_COOKIE,
+      token,
+      getSessionCookieOptions(request, maxAge),
+    );
 
     return response;
   } catch {

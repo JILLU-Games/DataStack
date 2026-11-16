@@ -71,3 +71,35 @@ export async function verifyAdminSessionToken(token: string, secret: string) {
     return false;
   }
 }
+
+export function getSessionCookieOptions(request: Request, maxAge: number) {
+  const forwardedProto = request.headers
+    .get("x-forwarded-proto")
+    ?.split(",")[0]
+    ?.trim()
+    .toLowerCase();
+  const originHeader = request.headers.get("origin")?.toLowerCase() ?? "";
+  const isHttps =
+    forwardedProto === "https" ||
+    originHeader.startsWith("https://") ||
+    request.url.startsWith("https://");
+
+  if (isHttps) {
+    return {
+      httpOnly: true,
+      secure: true,
+      sameSite: "none" as const,
+      partitioned: true,
+      path: "/",
+      maxAge,
+    };
+  }
+
+  return {
+    httpOnly: true,
+    secure: false,
+    sameSite: "lax" as const,
+    path: "/",
+    maxAge,
+  };
+}

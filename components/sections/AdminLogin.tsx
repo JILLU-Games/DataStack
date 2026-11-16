@@ -5,7 +5,6 @@ import { FormSwitch } from '@/components/ui/Form';
 import { Input } from '@/components/ui/Input';
 import { ArrowRight } from 'lucide-react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 
 function safeNextPath() {
@@ -16,7 +15,6 @@ function safeNextPath() {
 }
 
 export function AdminLogin() {
-  const router = useRouter();
   const [email, setEmail] = useState('admin@datastack.dev');
   const [password, setPassword] = useState('admin12345678');
   const [remember, setRemember] = useState(true);
@@ -50,12 +48,16 @@ export function AdminLogin() {
       const response = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ email, password, remember }),
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || 'Sign in failed.');
-      router.replace(safeNextPath());
-      router.refresh();
+      const targetPath = safeNextPath();
+      window.location.assign(targetPath);
+      window.setTimeout(() => {
+        setIsSubmitting(false);
+      }, 2500);
     } catch (submitError) {
       setErrorMessage(submitError instanceof Error ? submitError.message : 'Unable to sign in.');
       setIsSubmitting(false);
