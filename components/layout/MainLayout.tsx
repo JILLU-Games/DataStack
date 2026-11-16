@@ -29,7 +29,7 @@ export const MainLayout: React.FC<MainLayoutProps> = ({
             onToggleSidebar={() => setSidebarOpen((prev) => !prev)}
           />
           <main className="flex flex-1 min-w-0 flex-col">
-            <div className="w-full max-w-[var(--console-width)] flex-1 px-3.5 py-3 sm:px-5 sm:py-3.5">
+            <div className="w-full max-w-[var(--console-width)] flex-1 px-3.5 pb-4 pt-0 sm:px-5">
               {children}
             </div>
             <Footer isAdmin={true} />

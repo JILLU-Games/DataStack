@@ -1,18 +1,18 @@
 'use client';
 
-import { AdminPageHeader } from '@/components/layout/AdminPageHeader';
+import { PageShell } from '@/components/layout/PageShell';
 import { Button } from '@/components/ui/Button';
 import { Panel } from '@/components/ui/Panel';
 import { StatStrip } from '@/components/ui/StatStrip';
 import {
-    Table,
-    TableBody,
-    TableCell,
-    TableEmpty,
-    TableHead,
-    TableHeader,
-    TableRow,
-    TableWrap,
+  Table,
+  TableBody,
+  TableCell,
+  TableEmpty,
+  TableHead,
+  TableHeader,
+  TableRow,
+  TableWrap,
 } from '@/components/ui/Table';
 import { useToast } from '@/components/ui/Toast';
 import { getCached, setCached } from '@/lib/vconCache';
@@ -20,8 +20,12 @@ import { useCallback, useEffect, useState } from 'react';
 
 export default function StoragePage() {
   const { success, error } = useToast();
-  const [stats, setStats] = useState<any>(() => getCached<any>('vcon:storage-stats', null));
-  const [files, setFiles] = useState<any[]>(() => getCached<any[]>('vcon:storage-files', []));
+  const [stats, setStats] = useState<any>(() =>
+    getCached<any>('vcon:storage-stats', null)
+  );
+  const [files, setFiles] = useState<any[]>(() =>
+    getCached<any[]>('vcon:storage-files', [])
+  );
   const [flushing, setFlushing] = useState(false);
 
   const fetchStorageData = useCallback(async () => {
@@ -59,37 +63,38 @@ export default function StoragePage() {
   };
 
   return (
-    <section className="w-full">
-      <AdminPageHeader
-        title="Storage"
-        actions={
-          <>
-            <Button
-              size="xs"
-              variant="secondary"
-              icon="RotateCw"
-              onClick={fetchStorageData}
-            >
-              Refresh
-            </Button>
-            <Button
-              size="xs"
-              variant="primary"
-              icon="HardDrive"
-              loading={flushing}
-              onClick={handleManualFlush}
-            >
-              Flush Buffer
-            </Button>
-          </>
-        }
-      />
-
+    <PageShell
+      title="Storage"
+      actions={
+        <>
+          <Button
+            size="xs"
+            variant="secondary"
+            icon="RotateCw"
+            onClick={fetchStorageData}
+          >
+            Refresh
+          </Button>
+          <Button
+            size="xs"
+            variant="primary"
+            icon="HardDrive"
+            loading={flushing}
+            onClick={handleManualFlush}
+          >
+            Flush Buffer
+          </Button>
+        </>
+      }
+    >
       <StatStrip
         items={[
           { label: 'Disk usage', value: `${stats?.totalMB ?? '0.00'} MB` },
           { label: 'CSV files', value: stats?.totalFiles ?? 0 },
-          { label: 'Persisted rows', value: stats?.totalRows ? stats.totalRows.toLocaleString() : 0 },
+          {
+            label: 'Persisted rows',
+            value: stats?.totalRows ? stats.totalRows.toLocaleString() : 0,
+          },
           { label: 'Rotation', value: '100MB / Daily' },
         ]}
       />
@@ -112,19 +117,19 @@ export default function StoragePage() {
               ) : (
                 files.map((file, idx) => (
                   <TableRow key={idx}>
-                    <TableCell className="font-mono text-[11px] text-[var(--accent)]">
+                    <TableCell className="font-mono text-[var(--accent)]">
                       {file.clientId}
                     </TableCell>
-                    <TableCell className="font-mono text-[11px] font-medium text-[var(--text)]">
+                    <TableCell className="font-mono font-medium text-[var(--text)]">
                       {file.filename}
                     </TableCell>
-                    <TableCell className="font-mono text-[11px] tabular-nums">
+                    <TableCell className="font-mono tabular-nums">
                       {(file.sizeBytes / 1024).toFixed(1)} KB
                     </TableCell>
-                    <TableCell className="font-mono text-[11px] tabular-nums">
+                    <TableCell className="font-mono tabular-nums">
                       {file.linesCount.toLocaleString()}
                     </TableCell>
-                    <TableCell className="font-mono text-[11px] tabular-nums text-[var(--text-dim)]">
+                    <TableCell className="font-mono tabular-nums text-[var(--text-dim)]">
                       {new Date(file.modifiedAt).toLocaleString()}
                     </TableCell>
                   </TableRow>
@@ -134,6 +139,6 @@ export default function StoragePage() {
           </Table>
         </TableWrap>
       </Panel>
-    </section>
+    </PageShell>
   );
 }

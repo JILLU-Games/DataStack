@@ -1,17 +1,20 @@
 'use client';
 
-import { AdminPageHeader } from '@/components/layout/AdminPageHeader';
+import { PageShell } from '@/components/layout/PageShell';
 import { Button } from '@/components/ui/Button';
 import { CodeBlock } from '@/components/ui/CodeBlock';
 import { Select, Textarea } from '@/components/ui/Input';
 import { Panel } from '@/components/ui/Panel';
+import { StatStrip } from '@/components/ui/StatStrip';
 import { useToast } from '@/components/ui/Toast';
 import { getCached, setCached } from '@/lib/vconCache';
 import { useEffect, useState } from 'react';
 
 export default function SimulatorPage() {
   const { success, error } = useToast();
-  const [clients, setClients] = useState<any[]>(() => getCached<any[]>('vcon:clients', []));
+  const [clients, setClients] = useState<any[]>(() =>
+    getCached<any[]>('vcon:clients', [])
+  );
   const [selectedClient, setSelectedClient] = useState<string>(() => {
     const cached = getCached<any[]>('vcon:clients', []);
     return cached[0]?.clientId ?? '';
@@ -40,7 +43,8 @@ export default function SimulatorPage() {
           const data = await res.json();
           const list = setCached('vcon:clients', data.clients || []);
           setClients(list);
-          if (list.length > 0) setSelectedClient((prev) => prev || list[0].clientId);
+          if (list.length > 0)
+            setSelectedClient((prev) => prev || list[0].clientId);
         }
       } catch {
         // ignore
@@ -114,33 +118,47 @@ export default function SimulatorPage() {
   };
 
   return (
-    <section className="flex w-full flex-col gap-2.5">
-      <AdminPageHeader
-        title="Simulator"
-        actions={
-          <>
-            <Button
-              size="xs"
-              variant="secondary"
-              loading={sending}
-              onClick={() => handleSendBatch(10)}
-            >
-              Burst 10
-            </Button>
-            <Button
-              size="xs"
-              variant="primary"
-              icon="Send"
-              loading={sending}
-              onClick={handleSendSingle}
-            >
-              Send Event
-            </Button>
-          </>
-        }
+    <PageShell
+      title="Simulator"
+      actions={
+        <>
+          <Button
+            size="xs"
+            variant="secondary"
+            loading={sending}
+            onClick={() => handleSendBatch(10)}
+          >
+            Burst 10
+          </Button>
+          <Button
+            size="xs"
+            variant="primary"
+            icon="Send"
+            loading={sending}
+            onClick={handleSendSingle}
+          >
+            Send Event
+          </Button>
+        </>
+      }
+    >
+      <StatStrip
+        items={[
+          {
+            label: 'Target client',
+            value: selectedClient || 'py_telemetry_agent_01',
+            dot: 'ok',
+          },
+          { label: 'Ingest route', value: 'POST /api/events' },
+          { label: 'Payload format', value: 'JSON' },
+          {
+            label: 'Last dispatch',
+            value: lastResponse ? 'Accepted' : 'Ready',
+          },
+        ]}
       />
 
-      <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
         <Panel title="Payload" bodyClassName="flex flex-col gap-2.5 p-3">
           <Select
             compact
@@ -174,6 +192,6 @@ export default function SimulatorPage() {
           )}
         </Panel>
       </div>
-    </section>
+    </PageShell>
   );
 }

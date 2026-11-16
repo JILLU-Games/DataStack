@@ -1,9 +1,14 @@
 'use client';
 
-import { AdminPageHeader } from '@/components/layout/AdminPageHeader';
+import { PageShell } from '@/components/layout/PageShell';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
-import { SettingsField, SettingsGroup } from '@/components/ui/SettingsLayout';
+import {
+  SettingsField,
+  SettingsFooter,
+  SettingsGroup,
+  SettingsPanel,
+} from '@/components/ui/SettingsLayout';
 import { StatStrip } from '@/components/ui/StatStrip';
 import { useToast } from '@/components/ui/Toast';
 import { getCached, setCached } from '@/lib/vconCache';
@@ -28,12 +33,18 @@ const DEFAULT_PROFILE: AdminProfileData = {
 
 export function ProfileWorkspace() {
   const { success, error } = useToast();
-  const [profile, setProfile] = useState<AdminProfileData>(() => getCached<AdminProfileData>('vcon:profile', DEFAULT_PROFILE));
-  const [email, setEmail] = useState(() => getCached<AdminProfileData>('vcon:profile', DEFAULT_PROFILE).email);
+  const [profile, setProfile] = useState<AdminProfileData>(() =>
+    getCached<AdminProfileData>('vcon:profile', DEFAULT_PROFILE)
+  );
+  const [email, setEmail] = useState(
+    () => getCached<AdminProfileData>('vcon:profile', DEFAULT_PROFILE).email
+  );
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [loading, setLoading] = useState(() => !getCached<boolean>('vcon:profile-loaded', false));
+  const [loading, setLoading] = useState(
+    () => !getCached<boolean>('vcon:profile-loaded', false)
+  );
   const [saving, setSaving] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
 
@@ -93,7 +104,12 @@ export function ProfileWorkspace() {
       setConfirmPassword('');
       success('Profile updated', 'Administrator credentials updated.');
     } catch (saveError) {
-      error('Update failed', saveError instanceof Error ? saveError.message : 'Unable to update profile');
+      error(
+        'Update failed',
+        saveError instanceof Error
+          ? saveError.message
+          : 'Unable to update profile'
+      );
     } finally {
       setSaving(false);
     }
@@ -115,30 +131,28 @@ export function ProfileWorkspace() {
   };
 
   return (
-    <section className="w-full">
-      <AdminPageHeader
-        title="Profile"
-        actions={
-          <>
-            <Link href="/vcon/settings">
-              <Button type="button" size="xs" variant="secondary" icon="Sliders">
-                Settings
-              </Button>
-            </Link>
-            <Button
-              type="button"
-              size="xs"
-              variant="danger"
-              icon="LogOut"
-              loading={signingOut}
-              onClick={handleSignOut}
-            >
-              Sign out
+    <PageShell
+      title="Profile"
+      actions={
+        <>
+          <Link href="/vcon/settings">
+            <Button type="button" size="xs" variant="secondary" icon="Sliders">
+              Settings
             </Button>
-          </>
-        }
-      />
-
+          </Link>
+          <Button
+            type="button"
+            size="xs"
+            variant="danger"
+            icon="LogOut"
+            loading={signingOut}
+            onClick={handleSignOut}
+          >
+            Sign out
+          </Button>
+        </>
+      }
+    >
       <StatStrip
         items={[
           { label: 'Administrator', value: profile.email },
@@ -147,72 +161,81 @@ export function ProfileWorkspace() {
           {
             label: 'Session Expires',
             value: profile.sessionExpiresAt
-              ? new Date(profile.sessionExpiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
+              ? new Date(profile.sessionExpiresAt).toLocaleTimeString([], {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  hour12: false,
+                })
               : 'Active',
           },
         ]}
       />
 
-      <form onSubmit={handleSave} className="max-w-[780px] border border-[var(--border)] bg-[var(--surface)]">
-        <SettingsGroup title="Account identity">
-          <SettingsField label="Admin email">
-            <Input
-              compact
-              type="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              required
-            />
-          </SettingsField>
-          <SettingsField label="Access role">
-            <Input
-              compact
-              value={profile.role}
-              readOnly
-              className="border-[var(--border)] bg-[var(--surface-2)] text-[var(--text-muted)]"
-            />
-          </SettingsField>
-        </SettingsGroup>
+      <form onSubmit={handleSave} className="w-full">
+        <SettingsPanel>
+          <SettingsGroup title="Account identity">
+            <SettingsField label="Admin email">
+              <Input
+                compact
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                required
+              />
+            </SettingsField>
+            <SettingsField label="Access role">
+              <Input
+                compact
+                value={profile.role}
+                readOnly
+                className="border-[var(--border)] bg-[var(--surface-2)] text-[var(--text-muted)]"
+              />
+            </SettingsField>
+          </SettingsGroup>
 
-        <SettingsGroup title="Security & password">
-          <SettingsField label="Current password">
-            <Input
-              compact
-              type="password"
-              autoComplete="current-password"
-              placeholder="Required to confirm changes"
-              value={currentPassword}
-              onChange={(event) => setCurrentPassword(event.target.value)}
-              required
-            />
-          </SettingsField>
-          <SettingsField label="New password">
-            <Input
-              compact
-              type="password"
-              autoComplete="new-password"
-              placeholder="Leave blank to keep current"
-              value={newPassword}
-              onChange={(event) => setNewPassword(event.target.value)}
-            />
-          </SettingsField>
-          <SettingsField label="Confirm new password">
-            <Input
-              compact
-              type="password"
-              autoComplete="new-password"
-              placeholder="Repeat new password"
-              value={confirmPassword}
-              onChange={(event) => setConfirmPassword(event.target.value)}
-            />
-          </SettingsField>
-        </SettingsGroup>
+          <SettingsGroup title="Security & password">
+            <SettingsField label="Current password">
+              <Input
+                compact
+                type="password"
+                autoComplete="current-password"
+                placeholder="Required to confirm changes"
+                value={currentPassword}
+                onChange={(event) => setCurrentPassword(event.target.value)}
+                required
+              />
+            </SettingsField>
+            <SettingsField label="New password">
+              <Input
+                compact
+                type="password"
+                autoComplete="new-password"
+                placeholder="Leave blank to keep current"
+                value={newPassword}
+                onChange={(event) => setNewPassword(event.target.value)}
+              />
+            </SettingsField>
+            <SettingsField label="Confirm new password">
+              <Input
+                compact
+                type="password"
+                autoComplete="new-password"
+                placeholder="Repeat new password"
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+              />
+            </SettingsField>
+          </SettingsGroup>
 
-        <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border)] bg-[var(--surface)] px-3 py-2">
-          <span className="text-[11px] text-[var(--text-muted)]">
-            {loading ? 'Loading profile...' : 'Confirm current password to update credentials'}
-          </span>
-          <div className="flex items-center gap-2">
+          <SettingsFooter
+            status={
+              <span>
+                {loading
+                  ? 'Loading profile...'
+                  : 'Confirm current password to update credentials'}
+              </span>
+            }
+          >
             <Button
               type="button"
               size="xs"
@@ -236,9 +259,9 @@ export function ProfileWorkspace() {
             >
               Update profile
             </Button>
-          </div>
-        </footer>
+          </SettingsFooter>
+        </SettingsPanel>
       </form>
-    </section>
+    </PageShell>
   );
 }

@@ -8,7 +8,7 @@ export const TableWrap: React.FC<React.HTMLAttributes<HTMLDivElement>> = ({
 }) => (
   <div
     className={cn(
-      'w-full overflow-x-auto border border-[var(--border)] bg-[var(--bg-elevated)]',
+      'w-full overflow-x-auto border border-[var(--border)] bg-[var(--surface)]',
       className
     )}
     {...props}
@@ -40,7 +40,7 @@ export const TableHeader: React.FC<React.HTMLAttributes<HTMLTableSectionElement>
 }) => (
   <thead
     className={cn(
-      'bg-[var(--bg-sidebar)] border-b border-[var(--border)] text-[10px] font-medium tracking-wider text-[var(--text-muted)] uppercase',
+      'border-b border-[var(--border)] bg-[var(--surface-2)] text-[10px] font-medium uppercase tracking-wider text-[var(--text-muted)]',
       className
     )}
     {...props}
@@ -62,7 +62,7 @@ export const TableRow: React.FC<React.HTMLAttributes<HTMLTableRowElement>> = ({
 }) => (
   <tr
     className={cn(
-      'transition-colors hover:bg-[var(--bg-hover)] text-[var(--text)]',
+      'text-[var(--text)] transition-colors hover:bg-[var(--bg-hover)]',
       className
     )}
     {...props}
@@ -86,7 +86,7 @@ export const TableCell: React.FC<React.TdHTMLAttributes<HTMLTableCellElement>> =
   children,
   ...props
 }) => (
-  <td className={cn('px-3 py-1.5 text-[var(--text-muted)] align-middle', className)} {...props}>
+  <td className={cn('px-3 py-1.5 align-middle text-[var(--text-muted)]', className)} {...props}>
     {children}
   </td>
 );

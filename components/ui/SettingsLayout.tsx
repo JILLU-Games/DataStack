@@ -1,3 +1,4 @@
+import { cn } from '@/lib/utils';
 import React from 'react';
 
 export interface SettingsTabItem {
@@ -16,7 +17,7 @@ export function SettingsTabs({
 }) {
   return (
     <div
-      className="flex overflow-x-auto overflow-y-hidden border-b border-[var(--border)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+      className="flex w-full overflow-x-auto overflow-y-hidden border border-b-0 border-[var(--border)] bg-[var(--surface-2)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       role="tablist"
       aria-label="Settings categories"
     >
@@ -28,16 +29,34 @@ export function SettingsTabs({
           role="tab"
           aria-selected={value === item.id}
           aria-controls={`settings-panel-${item.id}`}
-          className={`shrink-0 border-b-2 px-3 py-1.5 text-[11.5px] transition-colors cursor-pointer whitespace-nowrap ${
+          className={`shrink-0 border-b-2 border-r border-r-[var(--border)] px-3.5 py-2 text-[11.5px] transition-colors cursor-pointer whitespace-nowrap ${
             value === item.id
-              ? 'border-[var(--accent)] text-[var(--text)] font-medium'
-              : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text)]'
+              ? 'border-b-[var(--accent)] bg-[var(--surface)] text-[var(--text)] font-medium'
+              : 'border-b-transparent text-[var(--text-muted)] hover:bg-[var(--surface)] hover:text-[var(--text)]'
           }`}
           onClick={() => onChange(item.id)}
         >
           {item.label}
         </button>
       ))}
+    </div>
+  );
+}
+
+export function SettingsPanel({
+  children,
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLDivElement>) {
+  return (
+    <div
+      className={cn(
+        'w-full border border-[var(--border)] bg-[var(--surface)]',
+        className
+      )}
+      {...props}
+    >
+      {children}
     </div>
   );
 }
@@ -50,11 +69,11 @@ export function SettingsGroup({
   children: React.ReactNode;
 }) {
   return (
-    <section className="border-b border-[var(--border)] p-3 last:border-b-0">
-      <h2 className="mb-2 flex items-center gap-1.5 text-[9.5px] uppercase tracking-wider text-[var(--text-faint)]">
+    <section className="border-b border-[var(--border)] p-3.5 last:border-b-0">
+      <h2 className="mb-2.5 flex items-center gap-1.5 text-[9.5px] font-medium uppercase tracking-wider text-[var(--text-faint)]">
         {title}
       </h2>
-      <div className="flex flex-col gap-1">{children}</div>
+      <div className="flex flex-col gap-1.5">{children}</div>
     </section>
   );
 }
@@ -67,11 +86,28 @@ export function SettingsField({
   children: React.ReactNode;
 }) {
   return (
-    <div className="grid grid-cols-1 items-center gap-1.5 py-1.5 sm:grid-cols-[180px_minmax(0,380px)] sm:justify-between sm:gap-4">
+    <div className="grid grid-cols-1 items-center gap-1.5 py-1 sm:grid-cols-[220px_minmax(0,520px)] sm:justify-start sm:gap-6">
       <div className="min-w-0">
         <div className="text-[11.5px] leading-snug text-[var(--text)]">{label}</div>
       </div>
-      <div className="min-w-0">{children}</div>
+      <div className="min-w-0 w-full">{children}</div>
     </div>
+  );
+}
+
+export function SettingsFooter({
+  status,
+  children,
+}: {
+  status?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <footer className="flex w-full flex-wrap items-center justify-between gap-2 border-t border-[var(--border)] bg-[var(--surface-2)] px-3.5 py-2">
+      <div className="flex items-center gap-1.5 text-[11px] text-[var(--text-muted)]" role="status">
+        {status}
+      </div>
+      <div className="flex items-center gap-1.5">{children}</div>
+    </footer>
   );
 }

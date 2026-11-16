@@ -1,20 +1,20 @@
 'use client';
 
-import { AdminPageHeader } from '@/components/layout/AdminPageHeader';
+import { PageShell } from '@/components/layout/PageShell';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input, Select } from '@/components/ui/Input';
 import { Panel } from '@/components/ui/Panel';
 import { Pill } from '@/components/ui/Pill';
 import {
-    Table,
-    TableBody,
-    TableCell,
-    TableEmpty,
-    TableHead,
-    TableHeader,
-    TableRow,
-    TableWrap,
+  Table,
+  TableBody,
+  TableCell,
+  TableEmpty,
+  TableHead,
+  TableHeader,
+  TableRow,
+  TableWrap,
 } from '@/components/ui/Table';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
@@ -132,35 +132,33 @@ export function DataBrowser() {
   };
 
   return (
-    <section className="w-full">
-      <AdminPageHeader
-        title="Events"
-        actions={
-          <>
-            <Button
-              type="button"
-              variant="secondary"
-              size="icon"
-              icon="RefreshCw"
-              title="Refresh events"
-              aria-label="Refresh events"
-              loading={refreshing}
-              onClick={refresh}
-            />
-            <Button
-              type="button"
-              variant="primary"
-              size="xs"
-              icon="Download"
-              onClick={() => router.push('/vcon/export')}
-            >
-              Export CSV
-            </Button>
-          </>
-        }
-      />
-
-      <Card compact className="mb-2.5 p-0">
+    <PageShell
+      title="Events"
+      actions={
+        <>
+          <Button
+            type="button"
+            variant="secondary"
+            size="icon"
+            icon="RefreshCw"
+            title="Refresh events"
+            aria-label="Refresh events"
+            loading={refreshing}
+            onClick={refresh}
+          />
+          <Button
+            type="button"
+            variant="primary"
+            size="xs"
+            icon="Download"
+            onClick={() => router.push('/vcon/export')}
+          >
+            Export CSV
+          </Button>
+        </>
+      }
+    >
+      <Card compact className="p-0">
         <div className="grid grid-cols-1 gap-px bg-[var(--border)] sm:grid-cols-2 lg:grid-cols-5">
           <div className="bg-[var(--surface)] p-2.5">
             <Select
@@ -221,8 +219,8 @@ export function DataBrowser() {
         meta={`${total.toLocaleString()} · ${page}/${pageCount}`}
         bodyClassName="overflow-hidden"
       >
-        <TableWrap className="border-0">
-          <Table className="min-w-[680px] text-[11px]">
+        <TableWrap className="border-0 bg-transparent">
+          <Table>
             <TableHeader>
               <TableRow>
                 <TableHead>Time</TableHead>
@@ -241,7 +239,7 @@ export function DataBrowser() {
               ) : (
                 events.map((event) => (
                   <TableRow key={event.eventId}>
-                    <TableCell className="font-mono text-[10.5px] tabular-nums text-[var(--text)]">
+                    <TableCell className="font-mono tabular-nums text-[var(--text)]">
                       {new Date(event.timestamp).toLocaleTimeString([], {
                         hour: '2-digit',
                         minute: '2-digit',
@@ -249,19 +247,22 @@ export function DataBrowser() {
                         hour12: false,
                       })}
                     </TableCell>
-                    <TableCell className="font-mono text-[11px] text-[var(--accent)]">{event.clientId}</TableCell>
-                    <TableCell className="hidden font-mono text-[10.5px] text-[var(--text-faint)] sm:table-cell">
+                    <TableCell className="font-mono text-[var(--accent)]">
+                      {event.clientId}
+                    </TableCell>
+                    <TableCell className="hidden font-mono text-[var(--text-faint)] sm:table-cell">
                       {event.eventId}
                     </TableCell>
-                    <TableCell className="max-w-0 truncate font-mono text-[11px] text-[var(--text)]">
+                    <TableCell className="max-w-0 truncate font-mono text-[var(--text)]">
                       {event.payload}
                     </TableCell>
-                    <TableCell className="hidden font-mono text-[10.5px] tabular-nums md:table-cell">
+                    <TableCell className="hidden font-mono tabular-nums md:table-cell">
                       {new TextEncoder().encode(event.payload).length} B
                     </TableCell>
                     <TableCell className="text-right">
-                      <span className="inline-flex items-center gap-1.5 text-[10.5px] text-[var(--text-muted)]">
-                        <span className="h-1.5 w-1.5 bg-[var(--accent)]" />{event.status}
+                      <span className="inline-flex items-center gap-1.5 text-[var(--text-muted)]">
+                        <span className="h-1.5 w-1.5 bg-[var(--accent)]" />
+                        {event.status}
                       </span>
                     </TableCell>
                   </TableRow>
@@ -270,7 +271,7 @@ export function DataBrowser() {
             </TableBody>
           </Table>
         </TableWrap>
-        <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border)] px-3 py-2">
+        <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border)] bg-[var(--surface-2)] px-3 py-2">
           <p className="font-mono text-[11px] tabular-nums text-[var(--text-muted)]">
             {firstVisible}–{lastVisible} of {total.toLocaleString()}
           </p>
@@ -337,6 +338,6 @@ export function DataBrowser() {
           </nav>
         </footer>
       </Panel>
-    </section>
+    </PageShell>
   );
 }

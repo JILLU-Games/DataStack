@@ -27,7 +27,7 @@ export function ClientsFilters({
   counts,
 }: ClientsFiltersProps) {
   return (
-    <div className="mb-2.5 flex flex-wrap items-center gap-2">
+    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border)] bg-[var(--surface)] px-3 py-2">
       <div className="w-full flex-1 sm:max-w-xs">
         <Input
           compact
@@ -37,7 +37,6 @@ export function ClientsFilters({
           value={search}
           onChange={(event) => onSearchChange(event.target.value)}
           placeholder="Search client..."
-          className="bg-[var(--surface)]"
         />
       </div>
       <div className="ml-auto flex min-w-0 gap-1 overflow-x-auto" role="group" aria-label="Filter clients by status">

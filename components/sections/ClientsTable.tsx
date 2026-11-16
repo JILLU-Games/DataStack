@@ -5,14 +5,14 @@ import { CopyButton } from '@/components/ui/CopyButton';
 import { Textarea } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import {
-    Table,
-    TableBody,
-    TableCell,
-    TableEmpty,
-    TableHead,
-    TableHeader,
-    TableRow,
-    TableWrap,
+  Table,
+  TableBody,
+  TableCell,
+  TableEmpty,
+  TableHead,
+  TableHeader,
+  TableRow,
+  TableWrap,
 } from '@/components/ui/Table';
 import { useToast } from '@/components/ui/Toast';
 import { useRouter } from 'next/navigation';
@@ -105,8 +105,8 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
 
   return (
     <>
-      <TableWrap>
-        <Table className="min-w-[680px] text-[11px]">
+      <TableWrap className="border-0 bg-transparent">
+        <Table>
           <TableHeader>
             <TableRow>
               <TableHead>Client</TableHead>
@@ -137,20 +137,20 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
                       <div className="flex min-w-0 items-center gap-2">
                         <span className={`h-1.5 w-1.5 shrink-0 ${dotClass}`} title={label} />
                         <div className="min-w-0 leading-tight">
-                          <div className="truncate text-[11.5px] text-[var(--text)]">{client.name}</div>
-                          <div className="mt-0.5 truncate font-mono text-[10px] text-[var(--text-faint)]">{client.clientId}</div>
+                          <div className="truncate font-medium text-[var(--text)]">{client.name}</div>
+                          <div className="mt-0.5 truncate font-mono text-[10.5px] text-[var(--text-faint)]">{client.clientId}</div>
                         </div>
                       </div>
                     </TableCell>
-                    <TableCell className="font-mono text-[11px]">
+                    <TableCell className="font-mono">
                       sec_••••••••
                     </TableCell>
-                    <TableCell className="text-right font-mono text-[11px] tabular-nums">
+                    <TableCell className="text-right font-mono tabular-nums">
                       {client.totalEvents.toLocaleString()}
                     </TableCell>
-                    <TableCell className="font-mono text-[11px] tabular-nums">
+                    <TableCell className="font-mono tabular-nums">
                       {client.lastActive ? new Date(client.lastActive).toLocaleTimeString([], { hour12: false }) : '—'}
-                      <span className="ml-1 font-sans text-[10px] text-[var(--text-faint)]">{relativeTime(client.lastActive, now)}</span>
+                      <span className="ml-1.5 font-sans text-[10.5px] text-[var(--text-faint)]">{relativeTime(client.lastActive, now)}</span>
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="inline-flex gap-0.5">

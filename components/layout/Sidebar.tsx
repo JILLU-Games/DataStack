@@ -3,6 +3,7 @@
 import { Button } from '@/components/ui/Button';
 import { Icon } from '@/components/ui/Icon';
 import { cn } from '@/lib/utils';
+import { getCached, setCached } from '@/lib/vconCache';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import React, { useEffect, useState } from 'react';
@@ -10,6 +11,11 @@ import React, { useEffect, useState } from 'react';
 interface SidebarProps {
   isOpen?: boolean;
   onClose?: () => void;
+}
+
+interface CachedProfile {
+  email?: string;
+  role?: string;
 }
 
 const NAVIGATION_SECTIONS = [
@@ -41,6 +47,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const pathname = usePathname();
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [adminEmail, setAdminEmail] = useState<string>(
+    () => getCached<CachedProfile>('vcon:profile', {}).email || 'Admin'
+  );
+  const [adminRole, setAdminRole] = useState<string>(
+    () => getCached<CachedProfile>('vcon:profile', {}).role || 'Owner'
+  );
 
   useEffect(() => {
     const saved = localStorage.getItem('datastack-theme') as 'dark' | 'light' | null;
@@ -49,6 +61,28 @@ export const Sidebar: React.FC<SidebarProps> = ({
     document.documentElement.classList.toggle('light', initial === 'light');
     document.documentElement.classList.toggle('dark', initial === 'dark');
   }, []);
+
+  useEffect(() => {
+    const cached = getCached<CachedProfile>('vcon:profile', {});
+    if (cached.email) {
+      setAdminEmail(cached.email);
+      if (cached.role) setAdminRole(cached.role);
+    }
+
+    fetch('/api/auth/profile', { credentials: 'include' })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.profile?.email) {
+          setCached('vcon:profile', data.profile);
+          setCached('vcon:profile-loaded', true);
+          setAdminEmail(data.profile.email);
+          setAdminRole(data.profile.role || 'Owner');
+        }
+      })
+      .catch(() => {
+        // Keep cached or default identity label if offline
+      });
+  }, [pathname]);
 
   const toggleTheme = () => {
     const nextTheme = theme === 'dark' ? 'light' : 'dark';
@@ -72,6 +106,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
     }
   };
 
+  const avatarInitial = adminEmail.trim().charAt(0).toUpperCase() || 'A';
+
   return (
     <>
       {isOpen && (
@@ -87,7 +123,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           isOpen ? 'translate-x-0' : '-translate-x-full'
         )}
       >
-        {/* Brand Header */}
+        {/* Brand Header (h-10 = 40px, aligned pixel-for-pixel with AdminPageHeader) */}
         <div className="flex h-10 shrink-0 items-center justify-between border-b border-[var(--border)] px-3">
           <Link
             href="/vcon/dashboard"
@@ -158,23 +194,23 @@ export const Sidebar: React.FC<SidebarProps> = ({
           ))}
         </nav>
 
-        {/* Bottom Dock: Identity + Theme Toggle + Sign Out */}
+        {/* Bottom Dock: Live Admin Identity + Theme Toggle + Sign Out */}
         <div className="flex shrink-0 items-center gap-1 border-t border-[var(--border)] bg-[var(--bg)] px-2.5 py-2">
           <Link
             href="/vcon/profile"
             onClick={onClose}
             className="flex flex-1 min-w-0 items-center gap-2 hover:opacity-90"
-            title="Admin Profile"
+            title={`Admin Profile (${adminEmail})`}
           >
             <div className="grid h-6 w-6 shrink-0 place-items-center border border-[var(--border-strong)] bg-[var(--surface-3)] text-[10.5px] font-medium text-[var(--text)]">
-              A
+              {avatarInitial}
             </div>
             <div className="min-w-0 flex-1 leading-tight">
               <div className="truncate text-[11px] font-medium text-[var(--text)]">
-                Admin
+                {adminEmail}
               </div>
               <div className="truncate text-[9px] uppercase tracking-wider text-[var(--text-faint)]">
-                Owner
+                {adminRole}
               </div>
             </div>
           </Link>
