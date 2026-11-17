@@ -61,7 +61,7 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    const bufferStats = DataBufferEngine.getBufferStats();
+    const bufferStats = await DataBufferEngine.getBufferStatsAsync();
 
     return NextResponse.json({
       status: 'online',

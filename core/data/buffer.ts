@@ -53,6 +53,7 @@ interface BufferGlobalState {
 type BufferGlobals = typeof globalThis & {
   __dataStackBufferState?: BufferGlobalState;
   __dataStackBufferShutdownRegistered?: boolean;
+  __dataStackBufferShuttingDown?: Promise<void> | null;
 };
 
 const globals = globalThis as BufferGlobals;
@@ -202,6 +203,30 @@ export class DataBufferEngine {
     }
   }
 
+  public static async flushAndShutdownOnSignal(): Promise<void> {
+    if (globals.__dataStackBufferShuttingDown) {
+      return globals.__dataStackBufferShuttingDown;
+    }
+
+    const run = (async () => {
+      try {
+        await Promise.race([
+          this.flush().catch(() => undefined),
+          new Promise<void>((resolve) => setTimeout(resolve, 4000)),
+        ]);
+      } finally {
+        await Promise.race([
+          this.shutdown().catch(() => undefined),
+          new Promise<void>((resolve) => setTimeout(resolve, 1500)),
+        ]);
+        globals.__dataStackBufferShuttingDown = null;
+      }
+    })();
+
+    globals.__dataStackBufferShuttingDown = run;
+    return run;
+  }
+
   public static init() {
     const state = getState();
     if (!state.flushTimer) {
@@ -212,15 +237,22 @@ export class DataBufferEngine {
 
     if (
       typeof process !== 'undefined' &&
-      typeof process.on === 'function' &&
+      typeof process.once === 'function' &&
       !globals.__dataStackBufferShutdownRegistered
     ) {
       globals.__dataStackBufferShutdownRegistered = true;
       const flushOnExit = () => {
-        void this.flush().catch(() => undefined);
+        void this.flushAndShutdownOnSignal().finally(() => {
+          if (
+            process.env.NODE_ENV === 'production' &&
+            !process.execArgv.includes('--test')
+          ) {
+            process.exit(0);
+          }
+        });
       };
-      process.on('SIGTERM', flushOnExit);
-      process.on('SIGINT', flushOnExit);
+      process.once('SIGTERM', flushOnExit);
+      process.once('SIGINT', flushOnExit);
     }
   }
 

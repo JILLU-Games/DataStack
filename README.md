@@ -289,7 +289,7 @@ DataStack includes a production-ready Docker Compose stack in [`docker/docker-co
 - **`ingestion`**: Express + Socket.IO container on port `4000` (runs as non-root user).
 - **`postgres`**: PostgreSQL 16 with persistent `pgdata` volume.
 - **`redis`**: Redis 7 with persistent `redisdata` volume.
-- **`datastack-data` Volume**: Mounted at `/app/storage/data` in both `web` and `ingestion` so CSV partitions are shared seamlessly across containers.
+- **`datastack-data` Volume**: Mounted at `/app/storage` (persisting `/app/storage/data/{clientId}/{YYYY-MM-DD}.csv`) in both `web` and `ingestion` so CSV partitions are shared seamlessly across containers.
 
 ### Coolify Deployment Steps
 1. Create a **Docker Compose** resource in Coolify pointing to your repository.
@@ -310,7 +310,8 @@ datastack/
 │   └── ui/               # Single-source-of-truth UI primitives (Button, Input, Table, Modal, StatStrip)
 ├── core/                 # Backend TypeScript modules (auth, Database, sdk, adminSettings, data, Storage, Security)
 ├── server/               # Dedicated Port 4000 Express + Socket.IO service & CSV batch worker
-├── sdk-python/           # Official pip-installable Python client SDK (datastack-sdk)
+├── sdk/                  # Official pip-installable Python SDK (`./sdk/python/datastack`)
+├── sdk-python/           # Backward-compatible Python client package (`datastack-sdk`)
 ├── storage/              # Partitioned CSV storage root (/storage/data/{clientId}/{YYYY-MM-DD}.csv)
 ├── docker/               # Production Dockerfiles, Nginx config, and docker-compose.yml
 ├── nginx/                # Local Nginx reverse proxy configuration

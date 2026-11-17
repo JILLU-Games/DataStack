@@ -13,6 +13,7 @@ services:
       PORT: "3000"
       INGESTION_INTERNAL_URL: "http://ingestion:4000"
       DATASTACK_JWT_SECRET: "${SERVICE_REALBASE64_64_JWT:?Coolify must generate SERVICE_REALBASE64_64_JWT}"
+      DATASTACK_INTERNAL_SECRET: "${DATASTACK_INTERNAL_SECRET:-${SERVICE_REALBASE64_64_INTERNAL:-}}"
       DATASTACK_ADMIN_EMAIL: "${DATASTACK_ADMIN_EMAIL:-admin@datastack.dev}"
       DATASTACK_ADMIN_SESSION_SECRET: "${SERVICE_REALBASE64_64_ADMINSESSION:?Coolify must generate SERVICE_REALBASE64_64_ADMINSESSION}"
       DATASTACK_ADMIN_SETUP_KEY: "${SERVICE_REALBASE64_64_ADMININSTALL:?Coolify must generate SERVICE_REALBASE64_64_ADMININSTALL}"
@@ -30,7 +31,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "fetch('http://127.0.0.1:3000/').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))",
+          "fetch('http://127.0.0.1:3000/api/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))",
         ]
       interval: 30s
       timeout: 5s
@@ -50,6 +51,7 @@ services:
       NODE_ENV: production
       PORT_SOCKET: "4000"
       DATASTACK_JWT_SECRET: "${SERVICE_REALBASE64_64_JWT:?Coolify must generate SERVICE_REALBASE64_64_JWT}"
+      DATASTACK_INTERNAL_SECRET: "${DATASTACK_INTERNAL_SECRET:-${SERVICE_REALBASE64_64_INTERNAL:-}}"
       DATABASE_URL: "postgresql://datastack:${SERVICE_PASSWORD_64_POSTGRES:?Coolify must generate SERVICE_PASSWORD_64_POSTGRES}@postgres:5432/${SERVICE_HEX_32_DATABASENAME:?Coolify must generate SERVICE_HEX_32_DATABASENAME}"
       REDIS_URL: "redis://redis:6379"
     depends_on:
@@ -85,7 +87,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/api/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -94,6 +96,9 @@ services:
   # Shared Redis ingestion buffer & distributed flush coordination
   redis:
     image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -120,3 +125,4 @@ services:
 volumes:
   datastack-data:
   pgdata:
+  redisdata:

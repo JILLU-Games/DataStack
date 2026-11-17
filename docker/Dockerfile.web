@@ -25,4 +25,4 @@ COPY --from=builder --chown=node:node /app/public ./public
 COPY --from=builder --chown=node:node /app/.next/standalone ./
 COPY --from=builder --chown=node:node /app/.next/static ./.next/static
 EXPOSE 3000
-CMD ["sh", "-c", "mkdir -p /app/storage/data && chown -R node:node /app/storage && exec su-exec node:node node server.js"]
+CMD ["sh", "-c", "mkdir -p /app/storage/data && NODE_UG=\"$(id -u node):$(id -g node)\" && if [ \"$(stat -c '%u:%g' /app/storage/data)\" != \"$NODE_UG\" ]; then chown -R node:node /app/storage; else chown node:node /app/storage /app/storage/data; fi && exec su-exec node:node node server.js"]

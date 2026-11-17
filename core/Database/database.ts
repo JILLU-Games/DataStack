@@ -98,7 +98,32 @@ export class DatabaseEngine {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
       `),
-    ]).then(() => undefined);
+    ]).then(() =>
+      Promise.all([
+        pool.query(`
+          ALTER TABLE client_sdks
+            ADD COLUMN IF NOT EXISTS rate_limit INTEGER NOT NULL DEFAULT 100,
+            ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active',
+            ADD COLUMN IF NOT EXISTS total_events BIGINT NOT NULL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS last_active TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        `),
+        pool.query(`
+          ALTER TABLE admin_settings
+            ADD COLUMN IF NOT EXISTS server_port INTEGER NOT NULL DEFAULT 4000,
+            ADD COLUMN IF NOT EXISTS web_port INTEGER NOT NULL DEFAULT 3000,
+            ADD COLUMN IF NOT EXISTS max_events_per_sec INTEGER NOT NULL DEFAULT 100,
+            ADD COLUMN IF NOT EXISTS max_payload_size_kb INTEGER NOT NULL DEFAULT 100,
+            ADD COLUMN IF NOT EXISTS batch_flush_threshold INTEGER NOT NULL DEFAULT 500,
+            ADD COLUMN IF NOT EXISTS batch_flush_interval_ms INTEGER NOT NULL DEFAULT 2000,
+            ADD COLUMN IF NOT EXISTS file_rotation_mb INTEGER NOT NULL DEFAULT 100,
+            ADD COLUMN IF NOT EXISTS enable_idempotency BOOLEAN NOT NULL DEFAULT true,
+            ADD COLUMN IF NOT EXISTS auto_prune_days INTEGER NOT NULL DEFAULT 30,
+            ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        `),
+      ]),
+    ).then(() => undefined);
 
     try {
       await globals.__dataStackCoreSchema;

@@ -1,5 +1,6 @@
 import { existsSync, rmSync } from "node:fs";
 import { resolve, sep } from "node:path";
+import { SettingsManager } from "../adminSettings/settingsManager";
 import { AuthService } from "../auth/jwt";
 import { DatabaseEngine } from "../Database/database";
 import { getInternalIngestionHeaders } from "../Security/security";
@@ -24,6 +25,12 @@ type SDKDatabaseGlobals = typeof globalThis & {
 };
 
 const globals = globalThis as SDKDatabaseGlobals;
+
+async function ensureDbSettingsHydrated(): Promise<void> {
+  if (DatabaseEngine.getPool()) {
+    await SettingsManager.getSettingsAsync();
+  }
+}
 
 function getClientsMap(): Map<string, ClientSDK> {
   if (!globals.__dataStackClientsMap) {
@@ -160,6 +167,7 @@ export class SDKManager {
   }
 
   public static async syncAllClientsToIngestionAsync(): Promise<void> {
+    await ensureDbSettingsHydrated();
     const headers = getInternalIngestionHeaders();
     if (!headers["x-datastack-internal-secret"]) return;
     const ingestionBaseUrl = (
@@ -185,6 +193,7 @@ export class SDKManager {
   }
 
   public static async listClientsAsync(): Promise<ClientSDK[]> {
+    await ensureDbSettingsHydrated();
     const fromDb = await this.syncFromDatabase();
     if (fromDb !== null) {
       return fromDb;
@@ -253,6 +262,7 @@ export class SDKManager {
   public static async getClientAsync(
     clientId: string,
   ): Promise<ClientSDK | undefined> {
+    await ensureDbSettingsHydrated();
     const pool = DatabaseEngine.getPool();
     if (pool) {
       try {
@@ -354,6 +364,7 @@ export class SDKManager {
     name: string;
     rateLimit?: number;
   }): Promise<ClientSDK> {
+    await ensureDbSettingsHydrated();
     const safeClientId = data.clientId
       .trim()
       .toLowerCase()
@@ -427,6 +438,7 @@ export class SDKManager {
   public static async regenerateTokenAsync(
     clientId: string,
   ): Promise<ClientSDK | null> {
+    await ensureDbSettingsHydrated();
     const existing = await this.getClientAsync(clientId);
     if (!existing) return null;
 
@@ -493,6 +505,7 @@ export class SDKManager {
     clientId: string,
     updates: Partial<Pick<ClientSDK, "name" | "rateLimit" | "status">>,
   ): Promise<ClientSDK | null> {
+    await ensureDbSettingsHydrated();
     const client = await this.getClientAsync(clientId);
     if (!client) return null;
 
@@ -607,6 +620,7 @@ export class SDKManager {
     clientId: string,
     options?: { purgeFiles?: boolean },
   ): Promise<boolean> {
+    await ensureDbSettingsHydrated();
     const normalized = String(clientId || "")
       .trim()
       .toLowerCase();

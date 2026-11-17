@@ -63,7 +63,11 @@ export class SettingsManager {
       AuthService.setSecret(settings.jwtSecret);
     }
     CSVStorageManager.maxFileSizeBytes = settings.fileRotationMb * 1024 * 1024;
-    if (settings.autoPruneDays > 0) {
+    const hasConfiguredDb = Boolean(process.env.DATABASE_URL?.trim());
+    if (
+      settings.autoPruneDays > 0 &&
+      (!hasConfiguredDb || globals.__dataStackSettingsHydrated === true)
+    ) {
       CSVStorageManager.pruneExpiredPartitions(settings.autoPruneDays);
     }
   }
