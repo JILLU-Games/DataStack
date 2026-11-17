@@ -252,7 +252,7 @@ const io = new Server(server, {
   cors: { origin: '*', methods: ['GET', 'POST'] },
 });
 
-// Health check endpoint with activeSockets count
+// Health check endpoint with activeSockets count and runtime capabilities
 app.get('/health', (_req, res) => {
   res.json({
     status: 'online',
@@ -260,6 +260,8 @@ app.get('/health', (_req, res) => {
     port: PORT,
     activeSockets: io.engine ? io.engine.clientsCount : 0,
     bufferSize: bufferQueue.length,
+    maxEventsPerSec: runtimeConfig.maxEventsPerSec,
+    maxPayloadSizeBytes: runtimeConfig.maxPayloadSizeBytes,
     uptime: process.uptime(),
   });
 });

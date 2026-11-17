@@ -307,6 +307,47 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
         }
       }
     });
+
+    // Heartbeat & Reconnection Verification Event
+    socket.on("ping_verify", async (_payload, callback) => {
+      try {
+        const dbCheck = await verifyClientInDb(
+          clientId,
+          socket.data.token,
+          true,
+        );
+        if (!dbCheck.allowed) {
+          if (callback) {
+            callback({
+              success: false,
+              status: "REVOKED",
+              error: dbCheck.reason || "CLIENT_REVOKED",
+            });
+          }
+          socket.disconnect(true);
+          return;
+        }
+        const config = getRuntimeConfig();
+        if (callback) {
+          callback({
+            success: true,
+            status: "VERIFIED",
+            clientId,
+            rateLimit: dbCheck.rateLimit || socket.data.rateLimit || 100,
+            maxPayloadSizeBytes: config.maxPayloadSizeBytes,
+            serverTime: new Date().toISOString(),
+          });
+        }
+      } catch (err) {
+        if (callback) {
+          callback({
+            success: false,
+            status: "ERROR",
+            error: err.message,
+          });
+        }
+      }
+    });
   });
 }
 

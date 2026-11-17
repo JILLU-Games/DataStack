@@ -9,7 +9,8 @@ Root directory manifest for **DataStack**, an open-source, self-hosted real-time
 - `core/`: Backend TypeScript modules (`auth`, `data`, `Database`, `Storage`, `Security`, `sdk`, `adminSettings`, `apiEngine`).
 - `server/`: Dedicated Express + Socket.IO ingestion service on Port 4000 (`index.js`, `socket/handlers.js`, `workers/csvWriter.js`).
 - `storage/`: Partitioned CSV data directory (`/storage/data/{clientId}/{YYYY-MM-DD}.csv`).
-- `sdk-python/`: Official pip-installable Python client library (`datastack-sdk`).
+- `sdk/python/datastack/`: Official production Python SDK (`datastack`) featuring `config.datastack.py` auto-discovery, Heartbeat HTTP fallback, offline disk spooling, and direct `.csv`/`.json`/`.jsonl` file ingestion.
+- `sdk-python/`: Backward-compatible Python client package (`datastack-sdk`).
 - `docker/`: Production Dockerfiles (`Dockerfile.web`, `Dockerfile.server`, `Dockerfile.proxy`), Nginx config, and `docker-compose.yml`.
 - `nginx/`: Local Nginx reverse proxy configuration (`default.conf`).
 - `README.md`: Comprehensive A–Z project documentation, quickstart, architecture, and deployment guide.

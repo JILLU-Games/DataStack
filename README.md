@@ -182,50 +182,72 @@ All environment variables are documented in [`.env.example`](./.env.example):
 
 ---
 
-## Python SDK (`datastack-sdk`)
+## Python SDK (`sdk/python/datastack/`)
 
-The official Python SDK is located in [`./sdk-python`](./sdk-python) and uses `python-socketio` with `threading.Event` synchronization for reliable acknowledgments over both local and WAN connections.
+The official production Python SDK is located in [`./sdk/python/datastack`](./sdk/python/datastack) (with full backward compatibility in [`./sdk-python`](./sdk-python)). It provides zero-boilerplate `config.datastack.py` auto-discovery, low-latency Socket.IO streaming, automatic Heartbeat HTTP fallback (`POST /api/events`), offline disk spooling (`.datastack_spool/spool.jsonl`), and direct `.csv`, `.json`, and `.jsonl` file ingestion.
 
 ### Installation
 
 ```bash
-pip install ./sdk-python
+# Install from local repository
+pip install ./sdk/python/datastack
+
+# Or install from PyPI release
+pip install datastack
 ```
 
-### Usage Example
+### 1. Drop `config.datastack.py` into Your Project Root
+
+You can copy a pre-populated `config.datastack.py` directly from **`/vcon/sdk`**:
 
 ```python
-from datastack_sdk import DataStackClient
+# config.datastack.py
+DATASTACK_CONFIG = {
+    "SERVER_URL": "http://localhost:4000",        # Port 4000 Socket.IO Ingestion Service
+    "API_URL": "http://localhost:3000",           # Port 3000 HTTP Fallback & File Ingestion API
+    "CLIENT_TOKEN": "YOUR_SIGNED_CLIENT_JWT_TOKEN",
+    "AUTO_CONNECT": True,
+    "ENABLE_HTTP_FALLBACK": True,
+    "HEARTBEAT_INTERVAL_SEC": 5.0,
+    "MAX_RETRIES": 3,
+    "BATCH_CHUNK_SIZE": 250,
+    "OFFLINE_SPOOL_ENABLED": True,
+    "OFFLINE_SPOOL_DIR": ".datastack_spool",
+}
+```
 
-client = DataStackClient(
-    server_url="http://localhost:4000",
-    token="YOUR_SIGNED_CLIENT_JWT_TOKEN",
-)
+### 2. Stream Events, Batches, and `.csv` / `.json` Files
 
-if client.connect():
-    # 1. Send a single event and wait for server acknowledgment
-    ack = client.sync(
-        data={
-            "event_type": "sensor_reading",
-            "device_id": "env-node-04",
-            "temperature_c": 24.2,
-            "humidity_pct": 56.8,
-        },
-        timeout=5.0,
-    )
-    print("Single event ack:", ack)
+```python
+from datastack import DataStack
 
-    # 2. Send a batch of events in a single round-trip
-    batch_ack = client.batch_sync(
-        records=[
-            {"metric": "cpu_usage", "value": 38.4, "unit": "%"},
-            {"metric": "memory_used_mb", "value": 2048, "unit": "MB"},
-        ],
-        timeout=10.0,
-    )
-    print("Batch ack:", batch_ack)
+# Automatically discovers config.datastack.py and connects
+client = DataStack()
 
-    client.disconnect()
+# 1. Send a single event (WebSocket primary -> Auto HTTP Fallback -> Offline Spool)
+ack = client.send({
+    "event_type": "sensor_reading",
+    "device_id": "env-node-04",
+    "temperature_c": 24.2,
+    "humidity_pct": 56.8,
+})
+print("Single event ack:", ack)
+
+# 2. Send a batch of events
+batch_ack = client.send_batch([
+    {"metric": "cpu_usage", "value": 38.4, "unit": "%"},
+    {"metric": "memory_used_mb", "value": 2048, "unit": "MB"},
+])
+print("Batch ack:", batch_ack)
+
+# 3. Directly stream a .csv, .json, or .jsonl file in chunks
+file_ack = client.send_file("monthly_telemetry.csv", chunk_size=250)
+print("File ingestion ack:", file_ack)
+
+# 4. Inspect connection state & Heartbeat IDLE status
+print("SDK status:", client.status())
+
+client.disconnect()
 ```
 
 ---
@@ -237,12 +259,13 @@ Connect with Socket.IO handshake auth: `auth: { token: "<CLIENT_JWT_TOKEN>" }`.
 
 - **`sync_data`**: Emit `{ eventId?, timestamp?, data }` -> Callback returns `{ success: true, eventId }` or `{ success: false, error }`.
 - **`batch_sync`**: Emit `[{ eventId?, timestamp?, data }, ...]` -> Callback returns `{ success: true, processed, rejected, errors? }`.
+- **`ping_verify`**: Emit `{}` -> Verifies live client status in PostgreSQL and returns `{ success: true, status: "VERIFIED", clientId, rateLimit, maxPayloadSizeBytes, serverTime }`.
 
 ### REST Endpoints (Port 3000)
 
 | Method & Endpoint | Auth Required | Description |
 | :--- | :--- | :--- |
-| `POST /api/events` | Client Bearer JWT or Admin Cookie | Ingest a single event or `{ batch: [...] }` over HTTP |
+| `POST /api/events` | Client Bearer JWT or Admin Cookie | Ingest a single event, `{ batch: [...] }`, or `{ fileName, records: [...] }` over HTTP |
 | `GET /api/events` | Admin Session Cookie | List recent buffered and persisted events |
 | `GET /api/clients` | Admin Session Cookie | List registered SDK clients and their signed JWT tokens |
 | `POST /api/clients` | Admin Session Cookie | Register a new SDK client (`clientId`, `name`, `rateLimit`) |
