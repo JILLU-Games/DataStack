@@ -288,12 +288,12 @@ class DataStackClient:
         )
 
         with self._lock:
+            self.is_connected = False
             if self.sio.connected:
                 try:
                     self.sio.disconnect()
                 except Exception:
                     pass
-                self.is_connected = False
 
             try:
                 self.sio.connect(
@@ -699,7 +699,7 @@ class DataStackClient:
         Replays any offline spooled events from `.datastack_spool/spool.jsonl`
         once connectivity (WebSocket or HTTP fallback) is restored.
         Routes batches through `_send_formatted_batch_recursive(..., allow_spool=False)`
-        so oversized or rate-limited spool batches automatically split and pace.
+        and preserves any `unprocessedItems` so zero spooled events are ever lost.
         """
         if not self.config.offline_spool_enabled:
             return 0
@@ -724,10 +724,23 @@ class DataStackClient:
                     file_name=None,
                     allow_spool=False,
                 )
-                if not res.get("success", False):
+                processed_now = int(res.get("processed", 0))
+                duplicates_now = int(res.get("duplicates", 0))
+                unprocessed = res.get("unprocessedItems")
+
+                if (
+                    not res.get("success", False)
+                    and processed_now == 0
+                    and duplicates_now == 0
+                ):
                     break
 
                 self.spooler.ack_batch(len(batch))
+                if isinstance(unprocessed, list) and len(unprocessed) > 0:
+                    self.spooler.enqueue(unprocessed)
+                    total_flushed += max(0, len(batch) - len(unprocessed))
+                    break
+
                 total_flushed += len(batch)
         except Exception as exc:
             logger.debug("[DataStack] Spool drain paused: %s", exc)
@@ -869,6 +882,12 @@ class DataStackClient:
                 file_name=file_name,
                 allow_spool=allow_spool,
             )
+            left_unprocessed = left_res.get("unprocessedItems") or []
+            right_unprocessed = right_res.get("unprocessedItems") or []
+            combined_unprocessed = [
+                *(left_unprocessed if isinstance(left_unprocessed, list) else []),
+                *(right_unprocessed if isinstance(right_unprocessed, list) else []),
+            ]
             return {
                 "success": bool(
                     left_res.get("success", True)
@@ -884,15 +903,16 @@ class DataStackClient:
                 + int(right_res.get("spooledCount", 0)),
                 "transport": right_res.get("transport")
                 or left_res.get("transport"),
+                **(
+                    {"unprocessedItems": combined_unprocessed}
+                    if len(combined_unprocessed) > 0
+                    else {}
+                ),
             }
 
         # Handle partial-batch rate limiting (`rateLimitedEventIds`) so zero rows are dropped
         rate_limited_ids = res.get("rateLimitedEventIds")
-        if (
-            isinstance(rate_limited_ids, list)
-            and len(rate_limited_ids) > 0
-            and self.config.max_retries > 0
-        ):
+        if isinstance(rate_limited_ids, list) and len(rate_limited_ids) > 0:
             pending_id_set = {str(eid) for eid in rate_limited_ids}
             remaining_items = [
                 item
@@ -904,56 +924,79 @@ class DataStackClient:
             total_spooled = int(res.get("spooledCount", 0))
             last_transport = res.get("transport")
 
-            for retry_round in range(1, self.config.max_retries + 2):
-                if not remaining_items:
-                    break
-                # Wait slightly over 1.0s so the server's 1-second rate-limit window resets
-                wait_delay = max(1.05, self.config.retry_backoff_base_sec) + random.uniform(
-                    0.0, 0.15
-                )
-                time.sleep(wait_delay)
+            if self.config.max_retries > 0:
+                for _retry_round in range(1, self.config.max_retries + 2):
+                    if not remaining_items:
+                        break
+                    # Wait slightly over 1.0s so the server's 1-second rate-limit window resets
+                    wait_delay = max(
+                        1.05, self.config.retry_backoff_base_sec
+                    ) + random.uniform(0.0, 0.15)
+                    time.sleep(wait_delay)
 
-                sub_http_payload: Dict[str, Any] = (
-                    {"fileName": file_name, "records": remaining_items}
-                    if file_name
-                    else {"batch": remaining_items}
-                )
-                sub_res = self._execute_with_retry_and_fallback(
-                    ws_event="batch_sync",
-                    ws_payload=remaining_items,
-                    http_payload=sub_http_payload,
-                    spool_items=remaining_items,
-                    timeout=timeout,
-                    allow_spool=allow_spool,
-                )
-                total_processed += int(sub_res.get("processed", 0))
-                total_duplicates += int(sub_res.get("duplicates", 0))
-                total_spooled += int(sub_res.get("spooledCount", 0))
-                last_transport = sub_res.get("transport") or last_transport
+                    sub_http_payload: Dict[str, Any] = (
+                        {"fileName": file_name, "records": remaining_items}
+                        if file_name
+                        else {"batch": remaining_items}
+                    )
+                    sub_res = self._execute_with_retry_and_fallback(
+                        ws_event="batch_sync",
+                        ws_payload=remaining_items,
+                        http_payload=sub_http_payload,
+                        spool_items=remaining_items,
+                        timeout=timeout,
+                        allow_spool=allow_spool,
+                    )
+                    total_processed += int(sub_res.get("processed", 0))
+                    total_duplicates += int(sub_res.get("duplicates", 0))
+                    total_spooled += int(sub_res.get("spooledCount", 0))
+                    last_transport = sub_res.get("transport") or last_transport
 
-                next_rl_ids = sub_res.get("rateLimitedEventIds")
-                if not isinstance(next_rl_ids, list) or len(next_rl_ids) == 0:
-                    remaining_items = []
-                    break
-                next_set = {str(eid) for eid in next_rl_ids}
-                remaining_items = [
-                    item
-                    for item in remaining_items
-                    if str(item.get("eventId")) in next_set
-                ]
+                    if sub_res.get("spooled"):
+                        remaining_items = []
+                        break
+
+                    next_rl_ids = sub_res.get("rateLimitedEventIds")
+                    if (
+                        not isinstance(next_rl_ids, list)
+                        or len(next_rl_ids) == 0
+                    ):
+                        remaining_items = []
+                        break
+                    next_set = {str(eid) for eid in next_rl_ids}
+                    remaining_items = [
+                        item
+                        for item in remaining_items
+                        if str(item.get("eventId")) in next_set
+                    ]
+
+            # If any items still remain rate-limited after retries and spooling is allowed, spool them so zero data is lost
+            if (
+                remaining_items
+                and allow_spool
+                and self.config.offline_spool_enabled
+            ):
+                spooled_now = self.spooler.enqueue(remaining_items)
+                total_spooled += spooled_now
+                remaining_items = []
 
             oversized_ids = res.get("oversizedEventIds")
             final_rejected = len(remaining_items) + (
                 len(oversized_ids) if isinstance(oversized_ids, list) else 0
             )
-            return {
-                "success": final_rejected == 0 or total_processed > 0,
+            out: Dict[str, Any] = {
+                "success": final_rejected == 0
+                or total_processed > 0
+                or total_spooled > 0,
                 "processed": total_processed,
                 "rejected": final_rejected,
                 "duplicates": total_duplicates,
                 "spooledCount": total_spooled,
                 "transport": last_transport,
             }
+            if remaining_items:
+                out["unprocessedItems"] = remaining_items
+            return out
 
         return res
 

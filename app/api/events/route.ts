@@ -58,12 +58,34 @@ export async function GET(req: NextRequest) {
     const limit = Math.min(200, Math.max(1, Number(searchParams.get('limit')) || 50));
 
     const bufferedEvents = DataBufferEngine.getRecentEvents(limit, clientId);
+    let socketBufferedEvents: DataEvent[] = [];
+    const ingestionBaseUrl = (
+      process.env.INGESTION_INTERNAL_URL || 'http://127.0.0.1:4000'
+    ).replace(/\/$/, '');
+
+    try {
+      const qs = new URLSearchParams({ limit: String(limit) });
+      if (clientId) qs.set('clientId', clientId);
+      const res = await fetch(`${ingestionBaseUrl}/internal/recent?${qs.toString()}`, {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(1000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.events)) {
+          socketBufferedEvents = data.events;
+        }
+      }
+    } catch {
+      // Port 4000 may not be running in isolated single-process dev mode
+    }
+
     const storedEvents = await getRecentStoredEvents(limit, clientId);
 
     const seenIds = new Set<string>();
     const merged: DataEvent[] = [];
 
-    for (const evt of [...bufferedEvents, ...storedEvents]) {
+    for (const evt of [...bufferedEvents, ...socketBufferedEvents, ...storedEvents]) {
       if (!evt.eventId || seenIds.has(evt.eventId)) continue;
       seenIds.add(evt.eventId);
       merged.push(evt);

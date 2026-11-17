@@ -30,8 +30,8 @@ export class SecurityEngine {
    * ClientId + EventId must be unique.
    * Duplicate events are dropped silently or tagged.
    */
-  public static checkIdempotency(clientId: string, eventId: string): boolean {
-    if (!eventId) return true; // If no eventId generated, pass through
+  public static hasDuplicate(clientId: string, eventId: string): boolean {
+    if (!eventId) return false;
     const key = `${clientId}:${eventId}`;
     const now = Date.now();
 
@@ -47,12 +47,24 @@ export class SecurityEngine {
     if (this.idempotencySet.has(key)) {
       const storedTime = this.idempotencySet.get(key) || 0;
       if (now - storedTime < this.IDEMPOTENCY_TTL_MS) {
-        return false; // Duplicate detected
+        return true;
       }
     }
 
-    this.idempotencySet.set(key, now);
-    return true; // Unique, allowed
+    return false;
+  }
+
+  public static recordIdempotency(clientId: string, eventId: string): void {
+    if (!eventId) return;
+    this.idempotencySet.set(`${clientId}:${eventId}`, Date.now());
+  }
+
+  public static checkIdempotency(clientId: string, eventId: string): boolean {
+    if (this.hasDuplicate(clientId, eventId)) {
+      return false;
+    }
+    this.recordIdempotency(clientId, eventId);
+    return true;
   }
 
   /**
@@ -81,7 +93,8 @@ export class SecurityEngine {
 
   /**
    * Validates incoming event payload:
-   * Checks max byte size and JSON structure.
+   * Checks duplicate idempotency (read-only), max byte size, and rate limit,
+   * and records the idempotency key ONLY after all checks pass.
    */
   public static validateEvent(
     clientId: string,
@@ -89,10 +102,8 @@ export class SecurityEngine {
     payload: unknown,
     clientMaxRate = 100,
   ): ValidationResult {
-    // 1. Check idempotency
-    const isUnique =
-      !this.enableIdempotency || this.checkIdempotency(clientId, eventId);
-    if (!isUnique) {
+    // 1. Check idempotency (read-only so rate-limited retries are not burned)
+    if (this.enableIdempotency && this.hasDuplicate(clientId, eventId)) {
       return {
         allowed: false,
         reason: "Duplicate event dropped silently",
@@ -100,18 +111,7 @@ export class SecurityEngine {
       };
     }
 
-    // 2. Check rate limit
-    const effectiveRateLimit = Math.min(clientMaxRate, this.maxEventsPerSec);
-    const withinLimit = this.checkRateLimit(clientId, effectiveRateLimit);
-    if (!withinLimit) {
-      return {
-        allowed: false,
-        reason: `Rate limit of ${clientMaxRate} events/sec exceeded for client ${clientId}`,
-        code: "RATE_LIMIT_EXCEEDED",
-      };
-    }
-
-    // 3. Check payload size
+    // 2. Check payload size before consuming rate-limit quota
     const payloadStr =
       typeof payload === "string" ? payload : JSON.stringify(payload);
     const byteLength = Buffer.byteLength(payloadStr, "utf8");
@@ -122,6 +122,22 @@ export class SecurityEngine {
         reason: `Payload size (${(byteLength / 1024).toFixed(1)} KB) exceeds limit of ${this.maxPayloadSizeBytes / 1024} KB`,
         code: "PAYLOAD_TOO_LARGE",
       };
+    }
+
+    // 3. Check rate limit
+    const effectiveRateLimit = Math.min(clientMaxRate, this.maxEventsPerSec);
+    const withinLimit = this.checkRateLimit(clientId, effectiveRateLimit);
+    if (!withinLimit) {
+      return {
+        allowed: false,
+        reason: `Rate limit of ${clientMaxRate} events/sec exceeded for client ${clientId}`,
+        code: "RATE_LIMIT_EXCEEDED",
+      };
+    }
+
+    // 4. Record idempotency key ONLY after event is accepted
+    if (this.enableIdempotency && eventId) {
+      this.recordIdempotency(clientId, eventId);
     }
 
     return { allowed: true };

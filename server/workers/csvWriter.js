@@ -74,7 +74,13 @@ class CsvWriterWorker {
     for (const [key, batch] of grouped.entries()) {
       const [clientId, date] = key.split(':::');
       const targetPath = this.getTargetFilePath(clientId, date);
-      const fileExists = fs.existsSync(targetPath);
+      let hasContent = false;
+      try {
+        hasContent =
+          fs.existsSync(targetPath) && fs.statSync(targetPath).size > 0;
+      } catch {
+        hasContent = false;
+      }
 
       const cleanBatch = batch.map((item) => ({
         clientId: item.clientId,
@@ -83,10 +89,10 @@ class CsvWriterWorker {
         payload: typeof item.payload === 'string' ? item.payload : JSON.stringify(item.payload),
       }));
 
-      const parser = new Parser({ fields, header: !fileExists, eol: '\n' });
+      const parser = new Parser({ fields, header: !hasContent, eol: '\n' });
       const csv = parser.parse(cleanBatch);
 
-      if (fileExists) {
+      if (hasContent) {
         fs.appendFileSync(targetPath, '\n' + csv, 'utf8');
       } else {
         fs.writeFileSync(targetPath, csv, 'utf8');

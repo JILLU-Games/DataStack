@@ -113,6 +113,37 @@ export async function GET(request: NextRequest) {
       addIfMatching({ ...event, status: "buffered" });
     }
 
+    const ingestionBaseUrl = (
+      process.env.INGESTION_INTERNAL_URL || "http://127.0.0.1:4000"
+    ).replace(/\/$/, "");
+    try {
+      const res = await fetch(`${ingestionBaseUrl}/internal/recent?limit=200`, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(1000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.events)) {
+          for (const evt of data.events) {
+            if (evt && evt.eventId) {
+              addIfMatching({
+                clientId: String(evt.clientId || ""),
+                eventId: String(evt.eventId),
+                timestamp: String(evt.timestamp || new Date().toISOString()),
+                payload:
+                  typeof evt.payload === "string"
+                    ? evt.payload
+                    : JSON.stringify(evt.payload ?? {}),
+                status: "buffered",
+              });
+            }
+          }
+        }
+      }
+    } catch {
+      // Port 4000 may not be running in isolated single-process dev mode
+    }
+
     return NextResponse.json({
       events: selectedRows.slice(offset),
       total,

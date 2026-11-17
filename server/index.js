@@ -289,6 +289,18 @@ app.post('/internal/flush', async (_req, res) => {
   }
 });
 
+// Internal endpoint to expose Port 4000 buffered events before CSV flush
+app.get('/internal/recent', (req, res) => {
+  const clientId = req.query.clientId ? String(req.query.clientId) : '';
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+  const filtered =
+    clientId && clientId !== 'all'
+      ? bufferQueue.filter((evt) => evt.clientId === clientId)
+      : bufferQueue;
+  const recent = filtered.slice(-limit).reverse();
+  res.json({ events: recent, count: recent.length });
+});
+
 setupSocketHandlers(io, bufferQueue, writer, {
   getRuntimeConfig: () => runtimeConfig,
   verifyClientInDb,

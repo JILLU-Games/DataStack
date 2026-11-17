@@ -91,7 +91,13 @@ export class CSVStorageManager {
     for (const [key, batch] of grouped.entries()) {
       const [clientId, date] = key.split(':::');
       const targetPath = this.getTargetFilePath(clientId, date);
-      const fileExists = fs.existsSync(targetPath);
+      let hasContent = false;
+      try {
+        hasContent =
+          fs.existsSync(targetPath) && fs.statSync(targetPath).size > 0;
+      } catch {
+        hasContent = false;
+      }
 
       // Format payload as JSON string if not already
       const cleanBatch = batch.map((item) => ({
@@ -101,10 +107,10 @@ export class CSVStorageManager {
         payload: typeof item.payload === 'string' ? item.payload : JSON.stringify(item.payload),
       }));
 
-      const parser = new Parser({ fields, header: !fileExists, eol: '\n' });
+      const parser = new Parser({ fields, header: !hasContent, eol: '\n' });
       const csvData = parser.parse(cleanBatch);
 
-      if (fileExists) {
+      if (hasContent) {
         fs.appendFileSync(targetPath, '\n' + csvData, 'utf8');
       } else {
         fs.writeFileSync(targetPath, csvData, 'utf8');

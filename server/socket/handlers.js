@@ -65,10 +65,10 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
     const now = Date.now();
     cleanupMaps(now);
 
-    // 1. Idempotency check (with 5-minute TTL)
+    // 1. Idempotency check (read-only check first; record only after rate-limit & payload checks pass)
+    const idempotencyKey = `${clientId}:${eventId}`;
     if (config.enableIdempotency && eventId) {
-      const key = `${clientId}:${eventId}`;
-      const existingTime = idempotencyMap.get(key);
+      const existingTime = idempotencyMap.get(idempotencyKey);
       if (existingTime && now - existingTime < IDEMPOTENCY_TTL_MS) {
         return {
           allowed: false,
@@ -77,10 +77,23 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
           reason: "Duplicate event dropped",
         };
       }
-      idempotencyMap.set(key, now);
     }
 
-    // 2. Rate limit check
+    // 2. Payload byte size check (before consuming rate-limit quota)
+    const payloadStr =
+      typeof rawData === "string" ? rawData : JSON.stringify(rawData ?? {});
+    const byteLength = Buffer.byteLength(payloadStr, "utf8");
+    const maxBytes = Number(config.maxPayloadSizeBytes) || 100 * 1024;
+    if (byteLength > maxBytes) {
+      return {
+        allowed: false,
+        duplicate: false,
+        code: "PAYLOAD_TOO_LARGE",
+        reason: `PAYLOAD_TOO_LARGE: Payload (${(byteLength / 1024).toFixed(1)} KB) exceeds limit of ${(maxBytes / 1024).toFixed(0)} KB`,
+      };
+    }
+
+    // 3. Rate limit check
     const effectiveLimit = Math.min(
       Number(clientRateLimit) || 100,
       Number(config.maxEventsPerSec) || 100,
@@ -99,18 +112,9 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
       rl.count += 1;
     }
 
-    // 3. Payload byte size check
-    const payloadStr =
-      typeof rawData === "string" ? rawData : JSON.stringify(rawData ?? {});
-    const byteLength = Buffer.byteLength(payloadStr, "utf8");
-    const maxBytes = Number(config.maxPayloadSizeBytes) || 100 * 1024;
-    if (byteLength > maxBytes) {
-      return {
-        allowed: false,
-        duplicate: false,
-        code: "PAYLOAD_TOO_LARGE",
-        reason: `PAYLOAD_TOO_LARGE: Payload (${(byteLength / 1024).toFixed(1)} KB) exceeds limit of ${(maxBytes / 1024).toFixed(0)} KB`,
-      };
+    // 4. Record idempotency key ONLY after event passes all checks
+    if (config.enableIdempotency && eventId) {
+      idempotencyMap.set(idempotencyKey, now);
     }
 
     return { allowed: true, payloadStr };
