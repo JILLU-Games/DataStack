@@ -1,8 +1,23 @@
 const encoder = new TextEncoder();
 
-interface AdminSessionPayload {
+const DEV_DEFAULT_SESSION_SECRET =
+  "datastack-admin-session-default-secret-32-chars";
+
+export interface AdminSessionPayload {
   email: string;
   expiresAt: number;
+  tokenVersion: number;
+}
+
+export function getAdminSessionSecret(): string | null {
+  const configured = process.env.DATASTACK_ADMIN_SESSION_SECRET?.trim() || "";
+  if (process.env.NODE_ENV === "production") {
+    return configured.length >= 32 ? configured : null;
+  }
+  if (configured.length > 0) {
+    return configured.length >= 32 ? configured : null;
+  }
+  return DEV_DEFAULT_SESSION_SECRET;
 }
 
 function encodeBase64Url(bytes: Uint8Array) {
@@ -34,9 +49,14 @@ export async function createAdminSessionToken(
   email: string,
   secret: string,
   expiresAt: number,
+  tokenVersion = 1,
 ) {
+  const safeVersion =
+    Number.isInteger(tokenVersion) && tokenVersion >= 1 ? tokenVersion : 1;
   const payload = encodeBase64Url(
-    encoder.encode(JSON.stringify({ email, expiresAt })),
+    encoder.encode(
+      JSON.stringify({ email, expiresAt, tokenVersion: safeVersion }),
+    ),
   );
   const signature = await crypto.subtle.sign(
     "HMAC",
@@ -50,6 +70,7 @@ export async function getAdminSessionPayload(
   token: string,
   secret: string,
 ): Promise<AdminSessionPayload | null> {
+  if (!secret || secret.length < 32) return null;
   const [payload, signature, extra] = token.split(".");
   if (!payload || !signature || extra) return null;
 
@@ -68,7 +89,10 @@ export async function getAdminSessionPayload(
     if (
       typeof session.email === "string" &&
       typeof session.expiresAt === "number" &&
-      session.expiresAt > Date.now()
+      session.expiresAt > Date.now() &&
+      typeof session.tokenVersion === "number" &&
+      Number.isInteger(session.tokenVersion) &&
+      session.tokenVersion >= 1
     ) {
       return session;
     }

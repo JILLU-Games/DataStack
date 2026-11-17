@@ -1,3 +1,38 @@
+import { createHash } from "node:crypto";
+import { AuthService } from "../auth/jwt";
+
+export function resolveInternalIngestionSecret(
+  jwtSecretOverride?: string,
+): string {
+  const explicit = (process.env.DATASTACK_INTERNAL_SECRET || "").trim();
+  const isProd = process.env.NODE_ENV === "production";
+  if (isProd) {
+    if (explicit.length >= 32) return explicit;
+    if (explicit.length > 0) return "";
+  } else if (explicit.length > 0) {
+    return explicit;
+  }
+
+  const activeJwt = String(
+    jwtSecretOverride ?? AuthService.getSecret() ?? "",
+  ).trim();
+  const minJwtLen = isProd ? 32 : 1;
+  if (activeJwt.length < minJwtLen) {
+    return "";
+  }
+
+  return createHash("sha256")
+    .update(`datastack-internal:${activeJwt}`)
+    .digest("hex");
+}
+
+export function getInternalIngestionHeaders(
+  jwtSecretOverride?: string,
+): Record<string, string> {
+  const secret = resolveInternalIngestionSecret(jwtSecretOverride);
+  return secret ? { "x-datastack-internal-secret": secret } : {};
+}
+
 export interface ValidationResult {
   allowed: boolean;
   reason?: string;
@@ -130,7 +165,7 @@ export class SecurityEngine {
     if (!withinLimit) {
       return {
         allowed: false,
-        reason: `Rate limit of ${clientMaxRate} events/sec exceeded for client ${clientId}`,
+        reason: `Rate limit of ${effectiveRateLimit} events/sec exceeded for client ${clientId}`,
         code: "RATE_LIMIT_EXCEEDED",
       };
     }
@@ -144,6 +179,18 @@ export class SecurityEngine {
   }
 
   public static getStats() {
+    const now = Date.now();
+    for (const [k, timestamp] of this.idempotencySet.entries()) {
+      if (now - timestamp > this.IDEMPOTENCY_TTL_MS) {
+        this.idempotencySet.delete(k);
+      }
+    }
+    for (const [clientId, entry] of this.rateLimitMap.entries()) {
+      if (now - entry.windowStart > 10000) {
+        this.rateLimitMap.delete(clientId);
+      }
+    }
+
     return {
       activeIdempotencyKeys: this.idempotencySet.size,
       rateLimitedClientsCount: this.rateLimitMap.size,

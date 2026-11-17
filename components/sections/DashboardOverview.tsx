@@ -9,6 +9,7 @@ import {
   Table,
   TableBody,
   TableCell,
+  TableEmpty,
   TableHead,
   TableHeader,
   TableRow,
@@ -26,6 +27,7 @@ type EventItem = {
 };
 
 type DashboardMetrics = {
+  activeSockets?: number;
   activeClients: number;
   totalClients: number;
   bufferStats: {
@@ -62,6 +64,7 @@ export const DashboardOverview: React.FC = () => {
     getCached<StorageFile[]>('vcon:storage-files', [])
   );
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [fetchError, setFetchError] = useState('');
 
   const refresh = useCallback(async () => {
     setIsRefreshing(true);
@@ -74,25 +77,58 @@ export const DashboardOverview: React.FC = () => {
           fetch('/api/clients', { cache: 'no-store' }),
         ]);
 
+      if (
+        metricsResponse.status === 401 ||
+        eventsResponse.status === 401 ||
+        storageResponse.status === 401 ||
+        clientsResponse.status === 401
+      ) {
+        window.location.assign('/vcon/login');
+        return;
+      }
+
+      const errors: string[] = [];
+
       if (metricsResponse.ok) {
         const nextMetrics = await metricsResponse.json();
         setMetrics(setCached('vcon:metrics', nextMetrics));
+      } else {
+        errors.push('metrics');
       }
+
       if (eventsResponse.ok) {
         const data = await eventsResponse.json();
         setEvents(setCached('vcon:dashboard-events', data.events ?? []));
+      } else {
+        errors.push('events');
       }
+
       if (storageResponse.ok) {
         const data = await storageResponse.json();
         setFiles(setCached('vcon:storage-files', data.files ?? []));
         if (data.stats) setCached('vcon:storage-stats', data.stats);
+      } else {
+        errors.push('storage');
       }
+
       if (clientsResponse.ok) {
         const data = await clientsResponse.json();
         setClients(setCached('vcon:clients', data.clients ?? []));
+      } else {
+        errors.push('clients');
+      }
+
+      if (errors.length > 0) {
+        setFetchError(
+          `Partial telemetry refresh failed (${errors.join(', ')}). Showing last available snapshot.`
+        );
+      } else {
+        setFetchError('');
       }
     } catch {
-      // Keep the last successful dashboard snapshot when one request fails.
+      setFetchError(
+        'Unable to reach telemetry endpoints. Showing last available snapshot.'
+      );
     } finally {
       setIsRefreshing(false);
     }
@@ -108,18 +144,21 @@ export const DashboardOverview: React.FC = () => {
   const storedRecordsToday = files
     .filter((file) => file.date === today)
     .reduce((total, file) => total + file.linesCount, 0);
-  const eventsToday =
-    storedRecordsToday + (metrics?.bufferStats.currentBufferSize ?? 0);
+  const bufferedCount = metrics?.bufferStats.currentBufferSize ?? 0;
+  const eventsToday = storedRecordsToday + bufferedCount;
   const activeClients =
     metrics?.activeClients ??
     clients.filter((client) => client.status === 'active').length;
   const totalClients = metrics?.totalClients ?? clients.length;
+  const activeSockets = metrics?.activeSockets ?? 0;
   const totalStorage = metrics?.storageStats.totalMB ?? '0.00';
   const totalStorageBytes = metrics?.storageStats.totalBytes ?? 0;
   const storageValue =
-    totalStorageBytes < 1024 * 1024
-      ? String(Math.max(1, Math.round(totalStorageBytes / 1024)))
-      : totalStorage;
+    totalStorageBytes === 0
+      ? '0'
+      : totalStorageBytes < 1024 * 1024
+        ? String(Math.max(1, Math.round(totalStorageBytes / 1024)))
+        : totalStorage;
   const storageUnit = totalStorageBytes < 1024 * 1024 ? 'KB' : 'MB';
   const totalFiles = metrics?.storageStats.totalFiles ?? files.length;
   const totalRows =
@@ -153,13 +192,22 @@ export const DashboardOverview: React.FC = () => {
         </>
       }
     >
+      {fetchError && (
+        <div
+          role="alert"
+          className="mb-3 border border-[var(--danger)] bg-[var(--danger-soft)] px-3 py-2 text-[11.5px] text-[var(--text)]"
+        >
+          {fetchError}
+        </div>
+      )}
+
       <StatStrip
         items={[
           { label: 'Events today', value: eventsToday.toLocaleString() },
           {
-            label: 'Active clients',
-            value: `${activeClients} / ${totalClients}`,
-            dot: activeClients > 0 ? 'ok' : 'off',
+            label: 'Active clients · Sockets',
+            value: `${activeClients} / ${totalClients} · ${activeSockets} ws`,
+            dot: activeClients > 0 || activeSockets > 0 ? 'ok' : 'off',
           },
           { label: 'Storage used', value: `${storageValue} ${storageUnit}` },
           { label: 'Stored rows', value: totalRows.toLocaleString() },
@@ -169,7 +217,11 @@ export const DashboardOverview: React.FC = () => {
       <div className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1.85fr)_minmax(0,1fr)]">
         <Panel
           title="Recent events"
-          meta={`${events.length}`}
+          meta={
+            bufferedCount > 0
+              ? `${events.length} · ${bufferedCount} buffered`
+              : `${events.length}`
+          }
           action={
             <Link
               href="/vcon/data"
@@ -190,24 +242,28 @@ export const DashboardOverview: React.FC = () => {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {events.map((event) => (
-                  <TableRow key={event.eventId}>
-                    <TableCell className="font-mono tabular-nums text-[var(--text-faint)]">
-                      {event.timestamp.includes('T')
-                        ? new Date(event.timestamp).toLocaleTimeString()
-                        : event.timestamp}
-                    </TableCell>
-                    <TableCell className="font-mono text-[var(--accent)]">
-                      {event.clientId}
-                    </TableCell>
-                    <TableCell className="max-w-[380px] truncate font-mono text-[var(--text)]">
-                      {event.payload}
-                    </TableCell>
-                    <TableCell className="text-right font-mono tabular-nums text-[var(--text-faint)]">
-                      {new TextEncoder().encode(event.payload).length} B
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {events.length === 0 ? (
+                  <TableEmpty colSpan={4} message="No recent events" />
+                ) : (
+                  events.map((event) => (
+                    <TableRow key={event.eventId}>
+                      <TableCell className="font-mono tabular-nums text-[var(--text-faint)]">
+                        {event.timestamp.includes('T')
+                          ? new Date(event.timestamp).toLocaleTimeString()
+                          : event.timestamp}
+                      </TableCell>
+                      <TableCell className="font-mono text-[var(--accent)]">
+                        {event.clientId}
+                      </TableCell>
+                      <TableCell className="max-w-[380px] truncate font-mono text-[var(--text)]">
+                        {event.payload}
+                      </TableCell>
+                      <TableCell className="text-right font-mono tabular-nums text-[var(--text-faint)]">
+                        {new TextEncoder().encode(event.payload).length} B
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
               </TableBody>
             </Table>
           </TableWrap>

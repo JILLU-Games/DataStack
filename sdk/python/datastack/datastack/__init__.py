@@ -5,6 +5,7 @@ Socket.IO ingestion (Port 4000), automatic Heartbeat HTTP fallback (Port 3000),
 offline disk spooling, and direct `.csv` / `.json` / `.jsonl` file streaming.
 """
 
+from .client import DataStack, DataStackClient
 from .config import DataStackConfig, load_config
 from .exceptions import (
     DataStackAuthError,
@@ -16,13 +17,8 @@ from .exceptions import (
     DataStackPayloadTooLargeError,
     DataStackRateLimitError,
 )
+from .heartbeat import ConnectionState, HeartbeatMonitor
 from .spool import DiskSpooler
-
-try:
-    from .client import DataStack, DataStackClient
-except ImportError:
-    DataStack = None  # type: ignore
-    DataStackClient = None  # type: ignore
 
 __version__ = "2.2.0"
 
@@ -31,6 +27,8 @@ __all__ = [
     "DataStackClient",
     "DataStackConfig",
     "load_config",
+    "ConnectionState",
+    "HeartbeatMonitor",
     "DiskSpooler",
     "DataStackError",
     "DataStackConfigError",

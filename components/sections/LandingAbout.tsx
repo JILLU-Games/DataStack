@@ -1,4 +1,4 @@
-import { Button } from '@/components/ui/Button';
+import { buttonClassNames } from '@/components/ui/Button';
 import Link from 'next/link';
 import React from 'react';
 
@@ -8,8 +8,8 @@ export const LandingAbout: React.FC = () => (
       <h2 className="mb-1 text-[20px] font-medium text-[var(--text)]">Ready to simplify your data workflow?</h2>
       <p className="text-[13px] text-[var(--text-muted)]">Start with the SDK guide and make the workspace your own.</p>
     </div>
-    <Link href="#sdk">
-      <Button variant="primary" size="sm">View Python SDK</Button>
+    <Link href="/#sdk" className={buttonClassNames({ variant: 'primary', size: 'sm' })}>
+      View Python SDK
     </Link>
   </section>
 );

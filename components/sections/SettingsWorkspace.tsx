@@ -4,6 +4,7 @@ import { PageShell } from '@/components/layout/PageShell';
 import { Button } from '@/components/ui/Button';
 import { FormSwitch } from '@/components/ui/Form';
 import { Input } from '@/components/ui/Input';
+import { Modal } from '@/components/ui/Modal';
 import {
   SettingsField,
   SettingsFooter,
@@ -14,7 +15,7 @@ import {
 import { StatStrip } from '@/components/ui/StatStrip';
 import { useToast } from '@/components/ui/Toast';
 import { getCached, setCached } from '@/lib/vconCache';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 interface EditableSettings {
   maxEventsPerSec: number;
@@ -50,6 +51,7 @@ const TABS = [
 ];
 
 type TabId = (typeof TABS)[number]['id'];
+type SocketHealthState = 'idle' | 'checking' | 'online' | 'offline';
 
 export function SettingsWorkspace() {
   const { success, error } = useToast();
@@ -61,11 +63,15 @@ export function SettingsWorkspace() {
   );
   const [activeTab, setActiveTab] = useState<TabId>('general');
   const [jwtSecret, setJwtSecret] = useState('');
+  const [jwtError, setJwtError] = useState('');
+  const [confirmRotateOpen, setConfirmRotateOpen] = useState(false);
   const [storagePath, setStoragePath] = useState(() =>
     getCached<string>('vcon:storage-path', '')
   );
   const [baseUrl, setBaseUrl] = useState('');
   const [webSocketUrl, setWebSocketUrl] = useState('');
+  const [socketStatus, setSocketStatus] = useState<SocketHealthState>('idle');
+  const [activeSockets, setActiveSockets] = useState<number>(0);
   const [serverPort, setServerPort] = useState(() =>
     getCached<number>('vcon:server-port', 4000)
   );
@@ -74,26 +80,60 @@ export function SettingsWorkspace() {
   );
   const [saving, setSaving] = useState(false);
 
+  const probeSocketServer = useCallback(async (port: number) => {
+    setSocketStatus('checking');
+    const isLocalDev = window.location.port === '3000';
+    const httpHost = isLocalDev
+      ? `${window.location.hostname}:${port}`
+      : window.location.host;
+    const healthUrl = `${window.location.protocol}//${httpHost}/health`;
+
+    try {
+      const response = await fetch(healthUrl, {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(1500),
+      });
+      setSocketStatus(response.ok ? 'online' : 'offline');
+    } catch {
+      setSocketStatus('offline');
+    }
+  }, []);
+
   useEffect(() => {
     setBaseUrl(window.location.origin);
     const isLocalDev = window.location.port === '3000';
     const socketProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
     const socketHost = isLocalDev
-      ? `${window.location.hostname}:4000`
+      ? `${window.location.hostname}:${serverPort}`
       : window.location.host;
     setWebSocketUrl(`${socketProtocol}://${socketHost}`);
 
     Promise.all([
-      fetch('/api/settings').then(async (response) => {
+      fetch('/api/settings', { cache: 'no-store' }).then(async (response) => {
+        if (response.status === 401) {
+          window.location.assign('/vcon/login');
+          return null;
+        }
         if (!response.ok) throw new Error('Unable to load settings');
         return response.json();
       }),
-      fetch('/api/storage').then(async (response) => {
+      fetch('/api/storage', { cache: 'no-store' }).then(async (response) => {
+        if (response.status === 401) {
+          window.location.assign('/vcon/login');
+          return null;
+        }
         if (!response.ok) throw new Error('Unable to load storage information');
         return response.json();
       }),
+      fetch('/api/metrics', { cache: 'no-store' })
+        .then(async (response) => (response.ok ? response.json() : null))
+        .catch(() => null),
     ])
-      .then(([settingsData, storageData]) => {
+      .then(([settingsData, storageData, metricsData]) => {
+        if (!settingsData || !storageData) return;
+        const loadedPort = Number(
+          (settingsData.settings as PublicSettings).serverPort ?? 4000
+        );
         const loaded: EditableSettings = {
           maxEventsPerSec: Number(
             settingsData.settings.maxEventsPerSec ??
@@ -126,25 +166,26 @@ export function SettingsWorkspace() {
         };
         setSettings(setCached('vcon:settings', loaded));
         setSavedSettings(loaded);
-        setServerPort(
-          setCached(
-            'vcon:server-port',
-            Number((settingsData.settings as PublicSettings).serverPort ?? 4000)
-          )
-        );
+        setServerPort(setCached('vcon:server-port', loadedPort));
         setStoragePath(
           setCached(
             'vcon:storage-path',
             String(storageData.stats?.storageDirectory ?? '')
           )
         );
+        if (metricsData && typeof metricsData.activeSockets === 'number') {
+          setActiveSockets(metricsData.activeSockets);
+          if (metricsData.activeSockets > 0) {
+            setSocketStatus('online');
+          }
+        }
         setCached('vcon:settings-loaded', true);
       })
       .catch(() => {
         error('Settings load failed', 'Using default runtime settings.');
       })
       .finally(() => setLoading(false));
-  }, [error]);
+  }, [error, serverPort]);
 
   const isDirty = useMemo(
     () =>
@@ -157,9 +198,9 @@ export function SettingsWorkspace() {
     setSettings((current) => ({ ...current, [key]: Number(value) || 0 }));
   };
 
-  const saveSettings = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const normalized: EditableSettings = {
+  const buildNormalizedSettings = (): EditableSettings => {
+    const parsedPrune = Number(settings.autoPruneDays);
+    return {
       maxEventsPerSec: Math.max(
         1,
         Math.min(
@@ -187,11 +228,16 @@ export function SettingsWorkspace() {
         settings.fileRotationMb || DEFAULT_SETTINGS.fileRotationMb
       ),
       enableIdempotency: settings.enableIdempotency,
-      autoPruneDays: Math.max(
-        1,
-        Math.min(365, settings.autoPruneDays || DEFAULT_SETTINGS.autoPruneDays)
-      ),
+      autoPruneDays: Number.isFinite(parsedPrune)
+        ? Math.max(0, Math.min(365, Math.floor(parsedPrune)))
+        : DEFAULT_SETTINGS.autoPruneDays,
     };
+  };
+
+  const executeSave = async () => {
+    const normalized = buildNormalizedSettings();
+    const trimmedSecret = jwtSecret.trim();
+    setConfirmRotateOpen(false);
     setSaving(true);
     try {
       const response = await fetch('/api/settings', {
@@ -199,15 +245,25 @@ export function SettingsWorkspace() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...normalized,
-          ...(jwtSecret.trim() ? { jwtSecret: jwtSecret.trim() } : {}),
+          ...(trimmedSecret ? { jwtSecret: trimmedSecret } : {}),
         }),
       });
+      if (response.status === 401) {
+        window.location.assign('/vcon/login');
+        return;
+      }
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Settings update failed');
       setSettings(setCached('vcon:settings', normalized));
       setSavedSettings(normalized);
       setJwtSecret('');
-      success('Settings saved', 'Runtime settings updated.');
+      setJwtError('');
+      success(
+        'Settings saved',
+        trimmedSecret
+          ? 'Runtime settings saved and client JWT credentials rotated.'
+          : 'Runtime settings updated.'
+      );
     } catch (saveError) {
       error(
         'Save failed',
@@ -220,9 +276,30 @@ export function SettingsWorkspace() {
     }
   };
 
+  const handleFormSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const trimmedSecret = jwtSecret.trim();
+    if (trimmedSecret.length > 0 && trimmedSecret.length < 32) {
+      const message = 'JWT secret must be at least 32 characters.';
+      setJwtError(message);
+      setActiveTab('security');
+      error('Invalid JWT secret', message);
+      return;
+    }
+
+    setJwtError('');
+    if (trimmedSecret.length >= 32) {
+      setConfirmRotateOpen(true);
+      return;
+    }
+
+    await executeSave();
+  };
+
   const discardChanges = () => {
     setSettings(savedSettings);
     setJwtSecret('');
+    setJwtError('');
   };
 
   return (
@@ -237,7 +314,9 @@ export function SettingsWorkspace() {
           },
           {
             label: 'CSV rotation',
-            value: `${settings.fileRotationMb}MB · ${settings.autoPruneDays}d`,
+            value: `${settings.fileRotationMb}MB · ${
+              settings.autoPruneDays === 0 ? 'Keep all' : `${settings.autoPruneDays}d`
+            }`,
           },
         ]}
       />
@@ -249,7 +328,7 @@ export function SettingsWorkspace() {
           onChange={(tab) => setActiveTab(tab as TabId)}
         />
 
-        <form onSubmit={saveSettings} className="w-full">
+        <form onSubmit={handleFormSubmit} className="w-full">
           <SettingsPanel
             id={`settings-panel-${activeTab}`}
             role="tabpanel"
@@ -307,6 +386,40 @@ export function SettingsWorkspace() {
             {activeTab === 'connections' && (
               <>
                 <SettingsGroup title="WebSocket server">
+                  <SettingsField label="Live health">
+                    <div className="flex items-center justify-between gap-2 border border-[var(--border)] bg-[var(--surface-2)] px-2.5 py-1.5">
+                      <span className="inline-flex items-center gap-1.5 font-mono text-[11.5px] text-[var(--text)]">
+                        <span
+                          aria-hidden="true"
+                          className={`h-1.5 w-1.5 ${
+                            socketStatus === 'online'
+                              ? 'bg-[var(--accent)]'
+                              : socketStatus === 'checking'
+                                ? 'bg-[var(--warning)]'
+                                : socketStatus === 'offline'
+                                  ? 'bg-[var(--danger)]'
+                                  : 'bg-[var(--text-faint)]'
+                          }`}
+                        />
+                        {socketStatus === 'online'
+                          ? `Online (Port ${serverPort} · ${activeSockets} active)`
+                          : socketStatus === 'checking'
+                            ? 'Probing ingestion server...'
+                            : socketStatus === 'offline'
+                              ? `Offline (Port ${serverPort} unreachable)`
+                              : `Port ${serverPort} · ${activeSockets} active socket(s)`}
+                      </span>
+                      <Button
+                        type="button"
+                        size="xs"
+                        variant="ghost"
+                        icon="RefreshCw"
+                        onClick={() => void probeSocketServer(serverPort)}
+                      >
+                        Probe
+                      </Button>
+                    </div>
+                  </SettingsField>
                   <SettingsField label="WebSocket URL">
                     <Input
                       compact
@@ -378,11 +491,11 @@ export function SettingsWorkspace() {
                       className="font-mono"
                     />
                   </SettingsField>
-                  <SettingsField label="Retention">
+                  <SettingsField label="Retention (0 = never prune)">
                     <Input
                       compact
                       type="number"
-                      min="1"
+                      min="0"
                       max="365"
                       suffix="days"
                       value={settings.autoPruneDays}
@@ -408,14 +521,21 @@ export function SettingsWorkspace() {
 
             {activeTab === 'security' && (
               <SettingsGroup title="Authentication">
-                <SettingsField label="JWT secret">
+                <SettingsField label="JWT secret (min 32 chars)">
                   <Input
                     compact
                     type="password"
                     autoComplete="new-password"
                     value={jwtSecret}
-                    onChange={(event) => setJwtSecret(event.target.value)}
-                    placeholder="New secret..."
+                    error={jwtError}
+                    onChange={(event) => {
+                      const val = event.target.value;
+                      setJwtSecret(val);
+                      if (!val.trim() || val.trim().length >= 32) {
+                        setJwtError('');
+                      }
+                    }}
+                    placeholder="Minimum 32 characters to rotate..."
                   />
                 </SettingsField>
                 <SettingsField label="Payload size limit">
@@ -471,6 +591,39 @@ export function SettingsWorkspace() {
           </SettingsPanel>
         </form>
       </div>
+
+      <Modal
+        isOpen={confirmRotateOpen}
+        onClose={() => !saving && setConfirmRotateOpen(false)}
+        title="Confirm JWT secret rotation"
+        maxWidth="xs"
+        footer={
+          <>
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              disabled={saving}
+              onClick={() => setConfirmRotateOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="danger"
+              size="xs"
+              loading={saving}
+              onClick={() => void executeSave()}
+            >
+              Rotate & Save
+            </Button>
+          </>
+        }
+      >
+        <p className="text-[12px] text-[var(--text-muted)]">
+          Rotating the signing JWT secret will immediately re-sign registered client tokens and invalidate all older SDK JWT tokens and active WebSocket sessions. Continue?
+        </p>
+      </Modal>
     </PageShell>
   );
 }

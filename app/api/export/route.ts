@@ -1,4 +1,6 @@
+import { SettingsManager } from "@/core/adminSettings/settingsManager";
 import { DataBufferEngine } from "@/core/data/buffer";
+import { getInternalIngestionHeaders } from "@/core/Security/security";
 import {
   CSVStorageManager,
   type StorageFileMeta,
@@ -6,6 +8,7 @@ import {
 import { parse } from "csv-parse";
 import { NextRequest, NextResponse } from "next/server";
 import { createReadStream } from "node:fs";
+import path from "node:path";
 
 type ExportFormat = "csv" | "json";
 type CsvRecord = Record<string, string>;
@@ -108,19 +111,26 @@ function streamFile(file: StorageFileMeta) {
 
 export async function GET(request: NextRequest) {
   try {
-    await DataBufferEngine.flush();
-    const ingestionBaseUrl =
-      process.env.INGESTION_INTERNAL_URL || "http://127.0.0.1:4000";
-    try {
-      await fetch(`${ingestionBaseUrl}/internal/flush`, {
-        method: "POST",
-        signal: AbortSignal.timeout(1500),
-      });
-    } catch {
-      // Port 4000 may not be running in isolated single-process dev mode
+    const { searchParams } = new URL(request.url);
+    const shouldFlush = searchParams.get("flush") !== "false";
+
+    await SettingsManager.getSettingsAsync();
+    if (shouldFlush) {
+      await DataBufferEngine.flush();
+      const ingestionBaseUrl = (
+        process.env.INGESTION_INTERNAL_URL || "http://127.0.0.1:4000"
+      ).replace(/\/$/, "");
+      try {
+        await fetch(`${ingestionBaseUrl}/internal/flush`, {
+          method: "POST",
+          headers: getInternalIngestionHeaders(),
+          signal: AbortSignal.timeout(1500),
+        });
+      } catch {
+        // Port 4000 may not be running in isolated single-process dev mode
+      }
     }
 
-    const { searchParams } = new URL(request.url);
     const clientId = searchParams.get("clientId") || "all";
     const filename = searchParams.get("filename");
     const from = searchParams.get("from") || "";
@@ -129,17 +139,33 @@ export async function GET(request: NextRequest) {
       searchParams.get("format") === "json" ? "json" : "csv";
     const includeHeader = searchParams.get("includeHeader") !== "false";
 
-    let files = CSVStorageManager.listAllFiles();
+    let files = await CSVStorageManager.listAllFilesAsync();
     if (clientId !== "all")
       files = files.filter((file) => file.clientId === clientId);
 
     if (filename) {
-      const file = files.find((candidate) => candidate.filename === filename);
-      if (!file)
+      const safeFilename = path.basename(filename);
+      const matches = files.filter(
+        (candidate) => candidate.filename === safeFilename,
+      );
+      if (matches.length === 0) {
         return NextResponse.json(
           { error: "CSV file not found" },
           { status: 404 },
         );
+      }
+      if (matches.length > 1) {
+        return NextResponse.json(
+          {
+            error:
+              "Ambiguous filename matches multiple clients. Specify clientId.",
+            code: "AMBIGUOUS_FILENAME",
+            matchingClients: matches.map((m) => m.clientId),
+          },
+          { status: 400 },
+        );
+      }
+      const file = matches[0];
       return new NextResponse(streamFile(file), {
         status: 200,
         headers: {

@@ -11,8 +11,10 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
       : () => ({
           jwtSecret:
             options.jwtSecret ||
-            process.env.DATASTACK_JWT_SECRET ||
-            "datastack-jwt-default-secret-key-32-chars-long",
+            (process.env.DATASTACK_JWT_SECRET || "").trim() ||
+            (process.env.NODE_ENV === "production"
+              ? ""
+              : "datastack-jwt-default-secret-key-32-chars-long"),
           maxEventsPerSec: 100,
           maxPayloadSizeBytes: 100 * 1024,
           batchFlushThreshold: 500,
@@ -38,8 +40,9 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
   const rateLimitMap = new Map();
   let lastCleanupAt = Date.now();
 
-  function cleanupMaps(now) {
+  function cleanupMaps(now, force = false) {
     if (
+      !force &&
       now - lastCleanupAt < CLEANUP_INTERVAL_MS &&
       idempotencyMap.size <= IDEMPOTENCY_MAX_ENTRIES
     ) {
@@ -58,6 +61,16 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
         rateLimitMap.delete(clientId);
       }
     }
+  }
+
+  function getSecurityStats() {
+    cleanupMaps(Date.now(), true);
+    const config = getRuntimeConfig();
+    return {
+      activeIdempotencyKeys: idempotencyMap.size,
+      rateLimitedClientsCount: rateLimitMap.size,
+      maxPayloadSizeBytes: Number(config.maxPayloadSizeBytes) || 100 * 1024,
+    };
   }
 
   function validateSingleEvent(clientId, eventId, rawData, clientRateLimit) {
@@ -136,10 +149,19 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
         ? String(authHeader).slice(7).trim()
         : String(authHeader).trim();
       const config = getRuntimeConfig();
+      const minSecretLen = process.env.NODE_ENV === "production" ? 32 : 1;
+      if (!config.jwtSecret || config.jwtSecret.length < minSecretLen) {
+        return next(
+          new Error("AUTH_UNAVAILABLE: DATASTACK_JWT_SECRET is not configured"),
+        );
+      }
       const decoded = jwt.verify(cleanToken, config.jwtSecret);
 
+      const normalizedClientId = String(decoded.clientId || "")
+        .trim()
+        .toLowerCase();
       const dbCheck = await verifyClientInDb(
-        decoded.clientId,
+        normalizedClientId,
         cleanToken,
         true,
       );
@@ -147,7 +169,7 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
         return next(new Error(dbCheck.reason || "CLIENT_REVOKED"));
       }
 
-      socket.data.clientId = decoded.clientId;
+      socket.data.clientId = normalizedClientId;
       socket.data.token = cleanToken;
       socket.data.rateLimit =
         dbCheck.rateLimit || decoded.rateLimit || config.maxEventsPerSec || 100;
@@ -156,6 +178,22 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
       next(new Error(`AUTH_INVALID: ${err.message}`));
     }
   });
+
+  const ENVELOPE_KEYS = new Set(["eventId", "timestamp", "data", "clientId"]);
+  function extractBatchItemData(safeItem) {
+    if (
+      safeItem &&
+      typeof safeItem === "object" &&
+      !Array.isArray(safeItem) &&
+      safeItem.data !== undefined
+    ) {
+      const keys = Object.keys(safeItem);
+      if (keys.every((k) => ENVELOPE_KEYS.has(k))) {
+        return safeItem.data;
+      }
+    }
+    return safeItem;
+  }
 
   io.on("connection", (socket) => {
     const clientId = socket.data.clientId;
@@ -274,8 +312,7 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
             safeItem.eventId ||
             `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
           const timestamp = safeItem.timestamp || new Date().toISOString();
-          const rawData =
-            safeItem.data !== undefined ? safeItem.data : safeItem;
+          const rawData = extractBatchItemData(safeItem);
 
           const check = validateSingleEvent(
             clientId,
@@ -403,6 +440,10 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
       }
     });
   });
+
+  return {
+    getSecurityStats,
+  };
 }
 
 module.exports = { setupSocketHandlers };

@@ -3,7 +3,10 @@
 import { PageShell } from '@/components/layout/PageShell';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
+import { CodeBlock } from '@/components/ui/CodeBlock';
+import { CopyButton } from '@/components/ui/CopyButton';
 import { Input, Select } from '@/components/ui/Input';
+import { Modal } from '@/components/ui/Modal';
 import { Panel } from '@/components/ui/Panel';
 import { Pill } from '@/components/ui/Pill';
 import {
@@ -34,6 +37,18 @@ interface Client {
 
 const PAGE_SIZE = 12;
 
+function formatEventPayload(raw: string): string {
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2);
+  } catch {
+    return raw;
+  }
+}
+
+function getPayloadBytes(raw: string): number {
+  return new TextEncoder().encode(raw).length;
+}
+
 export function DataBrowser() {
   const router = useRouter();
   const [events, setEvents] = useState<StreamEvent[]>([]);
@@ -54,6 +69,7 @@ export function DataBrowser() {
   const [filtersReady, setFiltersReady] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [selectedEvent, setSelectedEvent] = useState<StreamEvent | null>(null);
 
   const fetchEvents = useCallback(async () => {
     try {
@@ -65,7 +81,11 @@ export function DataBrowser() {
         page: String(page),
         pageSize: String(PAGE_SIZE),
       });
-      const response = await fetch(`/api/data?${params}`);
+      const response = await fetch(`/api/data?${params}`, { cache: 'no-store' });
+      if (response.status === 401) {
+        window.location.assign('/vcon/login');
+        return;
+      }
       if (!response.ok) throw new Error('Unable to load events');
       const data = await response.json();
       setEvents(data.events || []);
@@ -78,8 +98,14 @@ export function DataBrowser() {
   }, [appliedFilters, page]);
 
   useEffect(() => {
-    fetch('/api/clients')
-      .then((response) => (response.ok ? response.json() : { clients: [] }))
+    fetch('/api/clients', { cache: 'no-store' })
+      .then((response) => {
+        if (response.status === 401) {
+          window.location.assign('/vcon/login');
+          return { clients: [] };
+        }
+        return response.ok ? response.json() : { clients: [] };
+      })
       .then((data) => setClients(data.clients || []))
       .catch(() => setClients([]));
   }, []);
@@ -130,6 +156,10 @@ export function DataBrowser() {
     await fetchEvents();
     setRefreshing(false);
   };
+
+  const formattedSelectedPayload = selectedEvent
+    ? formatEventPayload(selectedEvent.payload)
+    : '';
 
   return (
     <PageShell
@@ -238,7 +268,11 @@ export function DataBrowser() {
                 <TableEmpty colSpan={6} message="No matching events" />
               ) : (
                 events.map((event) => (
-                  <TableRow key={event.eventId}>
+                  <TableRow
+                    key={`${event.clientId}:${event.eventId}`}
+                    className="cursor-pointer"
+                    onClick={() => setSelectedEvent(event)}
+                  >
                     <TableCell className="font-mono tabular-nums text-[var(--text)]">
                       {new Date(event.timestamp).toLocaleTimeString([], {
                         hour: '2-digit',
@@ -257,13 +291,34 @@ export function DataBrowser() {
                       {event.payload}
                     </TableCell>
                     <TableCell className="hidden font-mono tabular-nums md:table-cell">
-                      {new TextEncoder().encode(event.payload).length} B
+                      {getPayloadBytes(event.payload)} B
                     </TableCell>
                     <TableCell className="text-right">
-                      <span className="inline-flex items-center gap-1.5 text-[var(--text-muted)]">
-                        <span className="h-1.5 w-1.5 bg-[var(--accent)]" />
-                        {event.status}
-                      </span>
+                      <div className="inline-flex items-center gap-2">
+                        <span className="inline-flex items-center gap-1.5 text-[var(--text-muted)]">
+                          <span
+                            className={`h-1.5 w-1.5 ${
+                              event.status === 'buffered'
+                                ? 'bg-[var(--warning)]'
+                                : 'bg-[var(--accent)]'
+                            }`}
+                          />
+                          {event.status}
+                        </span>
+                        <Button
+                          type="button"
+                          variant="icon"
+                          size="icon"
+                          icon="Eye"
+                          className="h-5 w-5 border border-transparent hover:border-[var(--border)] hover:bg-[var(--surface-2)]"
+                          title={`Inspect event ${event.eventId}`}
+                          aria-label={`Inspect event ${event.eventId}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedEvent(event);
+                          }}
+                        />
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))
@@ -338,6 +393,69 @@ export function DataBrowser() {
           </nav>
         </footer>
       </Panel>
+
+      <Modal
+        isOpen={Boolean(selectedEvent)}
+        onClose={() => setSelectedEvent(null)}
+        title={`Event payload: ${selectedEvent?.eventId || ''}`}
+        maxWidth="lg"
+        footer={
+          <Button type="button" size="xs" onClick={() => setSelectedEvent(null)}>
+            Close
+          </Button>
+        }
+      >
+        {selectedEvent && (
+          <div className="flex flex-col gap-3">
+            <div className="grid grid-cols-2 gap-px border border-[var(--border)] bg-[var(--border)] sm:grid-cols-4">
+              <div className="bg-[var(--surface)] p-2">
+                <div className="text-[9.5px] uppercase tracking-wider text-[var(--text-faint)]">
+                  Client
+                </div>
+                <div className="truncate font-mono text-[11.5px] text-[var(--accent)]">
+                  {selectedEvent.clientId}
+                </div>
+              </div>
+              <div className="bg-[var(--surface)] p-2">
+                <div className="text-[9.5px] uppercase tracking-wider text-[var(--text-faint)]">
+                  Status
+                </div>
+                <div className="font-mono text-[11.5px] text-[var(--text)]">
+                  {selectedEvent.status}
+                </div>
+              </div>
+              <div className="bg-[var(--surface)] p-2">
+                <div className="text-[9.5px] uppercase tracking-wider text-[var(--text-faint)]">
+                  Size
+                </div>
+                <div className="font-mono text-[11.5px] tabular-nums text-[var(--text)]">
+                  {getPayloadBytes(selectedEvent.payload)} B
+                </div>
+              </div>
+              <div className="bg-[var(--surface)] p-2">
+                <div className="text-[9.5px] uppercase tracking-wider text-[var(--text-faint)]">
+                  Timestamp
+                </div>
+                <div className="truncate font-mono text-[11px] tabular-nums text-[var(--text-muted)]">
+                  {selectedEvent.timestamp}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] uppercase tracking-wider text-[var(--text-faint)]">
+                  JSON / Raw Payload
+                </span>
+                <CopyButton value={formattedSelectedPayload} />
+              </div>
+              <CodeBlock className="max-h-[340px] border border-[var(--border)] text-[11px]">
+                {formattedSelectedPayload}
+              </CodeBlock>
+            </div>
+          </div>
+        )}
+      </Modal>
     </PageShell>
   );
 }

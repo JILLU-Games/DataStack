@@ -171,6 +171,11 @@ class HeartbeatMonitor:
             with self._lock:
                 if self._closed or self._state == ConnectionState.STOPPED:
                     break
+                if (
+                    self._state == ConnectionState.CONNECTED_IDLE
+                    or not self._wake_event.is_set()
+                ):
+                    continue
                 self._recovery_attempts += 1
 
             try:

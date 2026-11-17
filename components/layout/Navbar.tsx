@@ -1,6 +1,7 @@
 'use client';
 
-import { Button } from '@/components/ui/Button';
+import { PWAInstallButton } from '@/components/pwa/PwaLifecycle';
+import { Button, buttonClassNames } from '@/components/ui/Button';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import React, { useEffect, useState } from 'react';
@@ -95,12 +96,14 @@ export const Navbar: React.FC<NavbarProps> = ({
       </div>
 
       <nav className="hidden sm:flex items-center gap-5 text-[12px]">
-        <Link href="#features" className="text-[var(--text-muted)] hover:text-[var(--text)] whitespace-nowrap shrink-0">Features</Link>
-        <Link href="#sdk" className="text-[var(--text-muted)] hover:text-[var(--text)] whitespace-nowrap shrink-0">SDK</Link>
-        <Link href="#about" className="text-[var(--text-muted)] hover:text-[var(--text)] whitespace-nowrap shrink-0">About</Link>
+        <Link href="/#features" className="text-[var(--text-muted)] hover:text-[var(--text)] whitespace-nowrap shrink-0">Features</Link>
+        <Link href="/#sdk" className="text-[var(--text-muted)] hover:text-[var(--text)] whitespace-nowrap shrink-0">SDK</Link>
+        <Link href="/#about" className="text-[var(--text-muted)] hover:text-[var(--text)] whitespace-nowrap shrink-0">About</Link>
       </nav>
 
       <div className="flex items-center gap-2 shrink-0">
+        <PWAInstallButton />
+
         <Button
           type="button"
           variant="icon"
@@ -112,10 +115,11 @@ export const Navbar: React.FC<NavbarProps> = ({
           className="h-7 w-7 border border-[var(--border)] bg-[var(--bg-elevated)]"
         />
 
-        <Link href="/vcon/dashboard">
-          <Button size="xs" variant="primary">
-            Console
-          </Button>
+        <Link
+          href="/vcon/dashboard"
+          className={buttonClassNames({ size: 'xs', variant: 'primary' })}
+        >
+          Console
         </Link>
       </div>
     </header>

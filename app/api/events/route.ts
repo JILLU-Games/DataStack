@@ -1,9 +1,12 @@
 import { SettingsManager } from '@/core/adminSettings/settingsManager';
-import { verifyAdminSessionToken } from '@/core/auth/adminSession';
+import { verifyRequestAdminSession } from '@/core/auth/adminUsers';
 import { AuthService } from '@/core/auth/jwt';
 import { DataBufferEngine } from '@/core/data/buffer';
 import { SDKManager } from '@/core/sdk/sdkManager';
-import { SecurityEngine } from '@/core/Security/security';
+import {
+  SecurityEngine,
+  getInternalIngestionHeaders,
+} from '@/core/Security/security';
 import { CSVStorageManager, type DataEvent } from '@/core/Storage/csvStorage';
 import { parse } from 'csv-parse';
 import { NextRequest, NextResponse } from 'next/server';
@@ -15,14 +18,15 @@ async function getRecentStoredEvents(
   limit: number,
   clientId?: string,
 ): Promise<DataEvent[]> {
-  const files = CSVStorageManager.listAllFiles()
+  const allFiles = await CSVStorageManager.listAllFilesAsync();
+  const files = allFiles
     .filter((f) => !clientId || clientId === 'all' || f.clientId === clientId)
     .slice(0, 5);
 
   const collected: DataEvent[] = [];
 
   for (const file of files) {
-    const fileEvents: DataEvent[] = [];
+    const fileTail: DataEvent[] = [];
     const parser = createReadStream(file.filePath).pipe(
       parse({ columns: true, skip_empty_lines: true, bom: true }),
     );
@@ -32,7 +36,10 @@ async function getRecentStoredEvents(
         Record<string, string>
       >) {
         if (!record.eventId) continue;
-        fileEvents.push({
+        if (fileTail.length >= limit) {
+          fileTail.shift();
+        }
+        fileTail.push({
           clientId: record.clientId || file.clientId,
           eventId: record.eventId,
           timestamp: record.timestamp || `${file.date}T00:00:00.000Z`,
@@ -43,8 +50,8 @@ async function getRecentStoredEvents(
       parser.destroy();
     }
 
-    if (fileEvents.length > 0) {
-      collected.push(...fileEvents.slice(-limit));
+    if (fileTail.length > 0) {
+      collected.push(...fileTail);
     }
   }
 
@@ -55,9 +62,10 @@ export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
     const clientId = searchParams.get('clientId') || undefined;
-    const limit = Math.min(200, Math.max(1, Number(searchParams.get('limit')) || 50));
+    const limit = Math.min(2000, Math.max(1, Number(searchParams.get('limit')) || 50));
 
-    const bufferedEvents = DataBufferEngine.getRecentEvents(limit, clientId);
+    await SettingsManager.getSettingsAsync();
+    const bufferedEvents = await DataBufferEngine.getRecentEventsAsync(limit, clientId);
     let socketBufferedEvents: DataEvent[] = [];
     const ingestionBaseUrl = (
       process.env.INGESTION_INTERNAL_URL || 'http://127.0.0.1:4000'
@@ -67,6 +75,7 @@ export async function GET(req: NextRequest) {
       const qs = new URLSearchParams({ limit: String(limit) });
       if (clientId) qs.set('clientId', clientId);
       const res = await fetch(`${ingestionBaseUrl}/internal/recent?${qs.toString()}`, {
+        headers: getInternalIngestionHeaders(),
         cache: 'no-store',
         signal: AbortSignal.timeout(1000),
       });
@@ -86,8 +95,10 @@ export async function GET(req: NextRequest) {
     const merged: DataEvent[] = [];
 
     for (const evt of [...bufferedEvents, ...socketBufferedEvents, ...storedEvents]) {
-      if (!evt.eventId || seenIds.has(evt.eventId)) continue;
-      seenIds.add(evt.eventId);
+      if (!evt.eventId) continue;
+      const dedupeKey = `${evt.clientId}:${evt.eventId}`;
+      if (seenIds.has(dedupeKey)) continue;
+      seenIds.add(dedupeKey);
       merged.push(evt);
     }
 
@@ -107,9 +118,6 @@ export async function POST(req: NextRequest) {
 
     // Verify either Client Bearer JWT or Admin Session Cookie
     const authHeader = req.headers.get('authorization');
-    const sessionSecret =
-      process.env.DATASTACK_ADMIN_SESSION_SECRET ||
-      'datastack-admin-session-default-secret-32-chars';
     const sessionCookie = req.cookies.get(SESSION_COOKIE)?.value;
 
     let tokenClientId: string | null = null;
@@ -128,20 +136,30 @@ export async function POST(req: NextRequest) {
       tokenClientId = verified.payload.clientId;
       tokenRateLimit = verified.payload.rateLimit;
     } else {
-      const isAdmin = Boolean(
-        sessionSecret &&
-          sessionCookie &&
-          (await verifyAdminSessionToken(sessionCookie, sessionSecret)),
-      );
-      if (!isAdmin) {
+      const auth = await verifyRequestAdminSession(sessionCookie);
+      if (!auth.valid) {
         return NextResponse.json(
-          { error: 'Authentication required. Provide a valid Client Bearer JWT or Admin Session.' },
-          { status: 401 },
+          {
+            error:
+              auth.reason === 'UNAUTHORIZED'
+                ? 'Authentication required. Provide a valid Client Bearer JWT or Admin Session.'
+                : 'Admin authentication is temporarily unavailable.',
+          },
+          { status: auth.reason === 'UNAUTHORIZED' ? 401 : 503 },
         );
       }
     }
 
-    const body = await req.json();
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json(
+        { error: 'Invalid JSON request payload.', code: 'INVALID_JSON' },
+        { status: 400 },
+      );
+    }
+
     const bodyObj =
       body && typeof body === 'object' && !Array.isArray(body)
         ? (body as Record<string, unknown>)
@@ -154,7 +172,27 @@ export async function POST(req: NextRequest) {
       .toLowerCase()
       .replace(/[^a-z0-9_-]/g, '_');
 
+    if (await SDKManager.isClientDeletedAsync(clientId)) {
+      return NextResponse.json(
+        {
+          error: `CLIENT_REVOKED: Client '${clientId}' has been deleted by administrator.`,
+          code: 'CLIENT_REVOKED',
+        },
+        { status: 403 },
+      );
+    }
+
     const registeredClient = await SDKManager.getClientAsync(clientId);
+    if (rawBearerToken && !registeredClient) {
+      return NextResponse.json(
+        {
+          error: `CLIENT_REVOKED: Client '${clientId}' registration not found or has been deleted.`,
+          code: 'CLIENT_REVOKED',
+        },
+        { status: 403 },
+      );
+    }
+
     if (registeredClient) {
       if (registeredClient.status === 'revoked') {
         return NextResponse.json(
@@ -196,6 +234,7 @@ export async function POST(req: NextRequest) {
           : null;
 
     if (batchItems !== null) {
+      const envelopeKeys = new Set(['eventId', 'timestamp', 'data', 'clientId']);
       let processed = 0;
       let rejected = 0;
       let duplicates = 0;
@@ -204,6 +243,8 @@ export async function POST(req: NextRequest) {
       const rateLimitedEventIds: string[] = [];
       const oversizedEventIds: string[] = [];
       const errors: string[] = [];
+
+      const batchEvents: DataEvent[] = [];
 
       for (const item of batchItems) {
         const safeItem =
@@ -221,8 +262,10 @@ export async function POST(req: NextRequest) {
             ? safeItem.timestamp.trim()
             : new Date().toISOString();
 
-        const itemData =
-          safeItem.data !== undefined ? safeItem.data : safeItem;
+        const isEnvelope =
+          safeItem.data !== undefined &&
+          Object.keys(safeItem).every((k) => envelopeKeys.has(k));
+        const itemData = isEnvelope ? safeItem.data : safeItem;
 
         const val = SecurityEngine.validateEvent(
           clientId,
@@ -251,16 +294,18 @@ export async function POST(req: NextRequest) {
           continue;
         }
 
-        const event: DataEvent = {
+        batchEvents.push({
           clientId,
           eventId: itemEventId,
           timestamp: itemTimestamp,
           payload:
             typeof itemData === 'string' ? itemData : JSON.stringify(itemData),
-        };
-
-        DataBufferEngine.push(event);
+        });
         processed += 1;
+      }
+
+      if (batchEvents.length > 0) {
+        await DataBufferEngine.pushBatchAsync(batchEvents);
       }
 
       if (processed > 0) {
@@ -347,7 +392,7 @@ export async function POST(req: NextRequest) {
       payload: typeof data === 'string' ? data : JSON.stringify(data),
     };
 
-    DataBufferEngine.push(event);
+    await DataBufferEngine.pushAsync(event);
     SDKManager.incrementEventCount(clientId, 1);
 
     return NextResponse.json({ success: true, eventId, event });

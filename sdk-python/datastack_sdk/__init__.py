@@ -1,10 +1,29 @@
 """
-DataStack Python SDK (`datastack_sdk`)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Official Python client library for DataStack — Self-Hosted Real-Time Telemetry & Event Logging Platform.
+DataStack Python SDK Compatibility Alias (`datastack_sdk`).
+Re-exports all canonical symbols from `sdk/python/datastack` (`datastack`)
+so both `from datastack import DataStack` and legacy
+`from datastack_sdk import DataStackClient` share a single source of truth.
 """
 
-from .client import (
+import sys
+from pathlib import Path
+
+
+def _ensure_canonical_datastack_on_path() -> None:
+    try:
+        import datastack  # noqa: F401
+        return
+    except ImportError:
+        repo_canonical = (
+            Path(__file__).resolve().parents[2] / "sdk" / "python" / "datastack"
+        )
+        if repo_canonical.is_dir() and str(repo_canonical) not in sys.path:
+            sys.path.insert(0, str(repo_canonical))
+
+
+_ensure_canonical_datastack_on_path()
+
+from datastack import (  # noqa: E402, F401
     ConnectionState,
     DataStack,
     DataStackAuthError,
@@ -19,10 +38,9 @@ from .client import (
     DataStackRateLimitError,
     DiskSpooler,
     HeartbeatMonitor,
+    __version__,
     load_config,
 )
-
-__version__ = "2.2.0"
 
 __all__ = [
     "DataStack",

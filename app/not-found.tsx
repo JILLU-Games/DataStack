@@ -1,5 +1,5 @@
 import { MainLayout } from '@/components/layout/MainLayout';
-import { Button } from '@/components/ui/Button';
+import { buttonClassNames } from '@/components/ui/Button';
 import Link from 'next/link';
 
 export default function NotFound() {
@@ -11,10 +11,11 @@ export default function NotFound() {
           The requested page or route does not exist on DataStack.
         </p>
         <div className="flex items-center gap-2 pt-2">
-          <Link href="/">
-            <Button variant="secondary" size="sm">
-              Return Home
-            </Button>
+          <Link href="/" className={buttonClassNames({ variant: 'primary', size: 'sm' })}>
+            Return Home
+          </Link>
+          <Link href="/vcon/dashboard" className={buttonClassNames({ variant: 'secondary', size: 'sm' })}>
+            Open Console
           </Link>
         </div>
       </div>

@@ -1,4 +1,6 @@
+import { SettingsManager } from "@/core/adminSettings/settingsManager";
 import { DataBufferEngine } from "@/core/data/buffer";
+import { getInternalIngestionHeaders } from "@/core/Security/security";
 import { CSVStorageManager } from "@/core/Storage/csvStorage";
 import { parse } from "csv-parse";
 import { NextRequest, NextResponse } from "next/server";
@@ -31,18 +33,25 @@ export async function GET(request: NextRequest) {
     let total = 0;
 
     const addIfMatching = (event: DataEvent) => {
-      const eventDate = event.timestamp.slice(0, 10);
+      const eventDate = CSVStorageManager.extractSafePartitionDate(event.timestamp);
+      const dedupeKey = `${event.clientId}:${event.eventId}`;
+      const matchesSearch =
+        !search ||
+        event.payload.toLowerCase().includes(search) ||
+        event.eventId.toLowerCase().includes(search) ||
+        event.clientId.toLowerCase().includes(search);
+
       if (
         (clientId !== "all" && event.clientId !== clientId) ||
         (from && eventDate < from) ||
         (to && eventDate > to) ||
-        (search && !event.payload.toLowerCase().includes(search)) ||
-        eventIds.has(event.eventId)
+        !matchesSearch ||
+        eventIds.has(dedupeKey)
       ) {
         return;
       }
 
-      eventIds.add(event.eventId);
+      eventIds.add(dedupeKey);
       total += 1;
 
       let low = 0;
@@ -109,7 +118,16 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    for (const event of DataBufferEngine.getRecentEvents(200)) {
+    const settings = await SettingsManager.getSettingsAsync();
+    const recentWindowLimit = Math.min(
+      2000,
+      Math.max(200, settings.batchFlushThreshold || 500),
+    );
+
+    for (const event of await DataBufferEngine.getRecentEventsAsync(
+      recentWindowLimit,
+      clientId,
+    )) {
       addIfMatching({ ...event, status: "buffered" });
     }
 
@@ -117,10 +135,18 @@ export async function GET(request: NextRequest) {
       process.env.INGESTION_INTERNAL_URL || "http://127.0.0.1:4000"
     ).replace(/\/$/, "");
     try {
-      const res = await fetch(`${ingestionBaseUrl}/internal/recent?limit=200`, {
-        cache: "no-store",
-        signal: AbortSignal.timeout(1000),
-      });
+      const qs = new URLSearchParams({ limit: String(recentWindowLimit) });
+      if (clientId && clientId !== "all") {
+        qs.set("clientId", clientId);
+      }
+      const res = await fetch(
+        `${ingestionBaseUrl}/internal/recent?${qs.toString()}`,
+        {
+          headers: getInternalIngestionHeaders(),
+          cache: "no-store",
+          signal: AbortSignal.timeout(1000),
+        },
+      );
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.events)) {

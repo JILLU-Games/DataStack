@@ -11,15 +11,25 @@ import { useToast } from '@/components/ui/Toast';
 import { getCached, setCached } from '@/lib/vconCache';
 import { useEffect, useState } from 'react';
 
+interface SdkClientItem {
+  clientId: string;
+  name: string;
+  status?: 'active' | 'revoked';
+  tokenPreview?: string;
+  token?: string;
+}
+
 export default function SdkGuidePage() {
-  const { success } = useToast();
-  const [clients, setClients] = useState<any[]>(() =>
-    getCached<any[]>('vcon:clients', [])
+  const { success, error } = useToast();
+  const [clients, setClients] = useState<SdkClientItem[]>(() =>
+    getCached<SdkClientItem[]>('vcon:clients', [])
   );
   const [selectedClientId, setSelectedClientId] = useState<string>(() => {
-    const cached = getCached<any[]>('vcon:clients', []);
-    return cached[0]?.clientId ?? '';
+    const cached = getCached<SdkClientItem[]>('vcon:clients', []);
+    return cached.find((c) => c.status !== 'revoked')?.clientId ?? cached[0]?.clientId ?? '';
   });
+  const [selectedClientToken, setSelectedClientToken] = useState<string>('');
+  const [loadingToken, setLoadingToken] = useState<boolean>(false);
   const [serverUrl, setServerUrl] = useState<string>('http://localhost:4000');
   const [apiUrl, setApiUrl] = useState<string>('http://localhost:3000');
 
@@ -34,33 +44,81 @@ export default function SdkGuidePage() {
 
     async function loadClients() {
       try {
-        const res = await fetch('/api/clients');
+        const res = await fetch('/api/clients', { cache: 'no-store' });
+        if (res.status === 401) {
+          window.location.assign('/vcon/login');
+          return;
+        }
         if (res.ok) {
           const data = await res.json();
-          const list = setCached('vcon:clients', data.clients || []);
+          const list = setCached<SdkClientItem[]>('vcon:clients', data.clients || []);
           setClients(list);
           if (list.length > 0) {
             setSelectedClientId((prev) =>
-              list.some((c: any) => c.clientId === prev) ? prev : list[0].clientId
+              list.some((c) => c.clientId === prev)
+                ? prev
+                : list.find((c) => c.status !== 'revoked')?.clientId ?? list[0].clientId
             );
           }
         }
       } catch {
-        // ignore
+        // Retain cached list on transient network error
       }
     }
-    loadClients();
+    void loadClients();
   }, []);
+
+  useEffect(() => {
+    if (!selectedClientId) {
+      setSelectedClientToken('');
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingToken(true);
+
+    async function fetchToken() {
+      try {
+        const res = await fetch(
+          `/api/clients/${encodeURIComponent(selectedClientId)}?includeToken=true`,
+          { cache: 'no-store' }
+        );
+        if (res.status === 401) {
+          window.location.assign('/vcon/login');
+          return;
+        }
+        if (res.ok) {
+          const data = await res.json();
+          if (!cancelled) {
+            setSelectedClientToken(String(data?.client?.token || ''));
+          }
+        } else if (!cancelled) {
+          setSelectedClientToken('');
+        }
+      } catch {
+        if (!cancelled) setSelectedClientToken('');
+      } finally {
+        if (!cancelled) setLoadingToken(false);
+      }
+    }
+
+    void fetchToken();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedClientId]);
 
   const activeClient =
     clients.find((c) => c.clientId === selectedClientId) || clients[0];
-  const sampleToken = activeClient?.token || 'YOUR_SIGNED_CLIENT_JWT_TOKEN';
+  const resolvedToken = selectedClientToken || activeClient?.token || '';
+  const sampleToken = resolvedToken || 'YOUR_SIGNED_CLIENT_JWT_TOKEN';
 
   const configSnippet = `# config.datastack.py — Place in your Python project root
 DATASTACK_CONFIG = {
     "SERVER_URL": "${serverUrl}",
     "API_URL": "${apiUrl}",
     "CLIENT_TOKEN": "${sampleToken}",
+    "CLIENT_ID": "${activeClient?.clientId || ''}",
     "AUTO_CONNECT": True,
     "ENABLE_HTTP_FALLBACK": True,
     "HEARTBEAT_INTERVAL_SEC": 5.0,
@@ -99,9 +157,21 @@ print("SDK Status:", client.status())
 
 client.disconnect()`;
 
-  const copySnippet = (text: string, label: string) => {
-    navigator.clipboard.writeText(text);
-    success('Copied', `${label} copied`);
+  const copySnippet = async (text: string, label: string) => {
+    try {
+      if (!navigator?.clipboard?.writeText) {
+        throw new Error('Clipboard API unavailable in this browser context');
+      }
+      await navigator.clipboard.writeText(text);
+      success('Copied', `${label} copied`);
+    } catch (copyErr) {
+      error(
+        'Copy failed',
+        copyErr instanceof Error
+          ? copyErr.message
+          : 'Unable to copy to clipboard. Copy manually from the code block.'
+      );
+    }
   };
 
   return (
@@ -109,12 +179,13 @@ client.disconnect()`;
       title="Python SDK"
       actions={
         <>
-          {activeClient?.token && (
+          {resolvedToken && (
             <Button
               size="xs"
               variant="secondary"
               icon="Key"
-              onClick={() => copySnippet(activeClient.token, 'Client JWT token')}
+              disabled={loadingToken}
+              onClick={() => void copySnippet(resolvedToken, 'Client JWT token')}
             >
               Copy Token
             </Button>
@@ -123,7 +194,7 @@ client.disconnect()`;
             size="xs"
             variant="secondary"
             icon="FileCode"
-            onClick={() => copySnippet(configSnippet, 'config.datastack.py')}
+            onClick={() => void copySnippet(configSnippet, 'config.datastack.py')}
           >
             Copy Config
           </Button>
@@ -131,7 +202,7 @@ client.disconnect()`;
             size="xs"
             variant="secondary"
             icon="Copy"
-            onClick={() => copySnippet(pythonSnippet, 'Python SDK snippet')}
+            onClick={() => void copySnippet(pythonSnippet, 'Python SDK snippet')}
           >
             Copy Code
           </Button>
@@ -161,8 +232,9 @@ client.disconnect()`;
           size="xs"
           variant="ghost"
           icon="Copy"
+          aria-label="Copy pip install command"
           onClick={() =>
-            copySnippet('pip install ./sdk/python/datastack', 'Pip command')
+            void copySnippet('pip install ./sdk/python/datastack', 'Pip command')
           }
         />
       </Card>
@@ -176,6 +248,7 @@ client.disconnect()`;
               <div className="w-[190px]">
                 <Select
                   compact
+                  aria-label="Select SDK client"
                   value={selectedClientId}
                   onChange={(e) => setSelectedClientId(e.target.value)}
                 >
@@ -191,7 +264,8 @@ client.disconnect()`;
               size="xs"
               variant="ghost"
               icon="Copy"
-              onClick={() => copySnippet(configSnippet, 'config.datastack.py')}
+              aria-label="Copy config.datastack.py"
+              onClick={() => void copySnippet(configSnippet, 'config.datastack.py')}
             />
           </div>
         }
@@ -207,7 +281,8 @@ client.disconnect()`;
             size="xs"
             variant="ghost"
             icon="Copy"
-            onClick={() => copySnippet(pythonSnippet, 'Python SDK snippet')}
+            aria-label="Copy Python SDK snippet"
+            onClick={() => void copySnippet(pythonSnippet, 'Python SDK snippet')}
           />
         }
       >

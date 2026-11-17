@@ -6,12 +6,13 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export default async function LoginPage() {
-  if (process.env.DATABASE_URL) {
-    const isConfigured = await isAdminSetupComplete().catch(() => false);
-    if (!isConfigured) redirect('/vcon/setup');
-  }
+  const isConfigured = await isAdminSetupComplete().catch(() => false);
+  if (!isConfigured) redirect('/vcon/setup');
 
-  const showDemoHint = !process.env.DATABASE_URL && process.env.NODE_ENV !== 'production';
+  const showDemoHint =
+    !process.env.DATABASE_URL &&
+    process.env.NODE_ENV !== 'production' &&
+    process.env.DATASTACK_ALLOW_DEMO_ADMIN !== 'false';
 
   return <AdminLogin showDemoHint={showDemoHint} />;
 }

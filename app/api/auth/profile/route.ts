@@ -1,11 +1,11 @@
 import {
   createAdminSessionToken,
-  getAdminSessionPayload,
   getSessionCookieOptions,
 } from "@/core/auth/adminSession";
 import {
   getAdminAccountInfo,
   updateAdminAccount,
+  verifyRequestAdminSession,
 } from "@/core/auth/adminUsers";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -17,51 +17,69 @@ function validEmail(email: string) {
 }
 
 export async function GET(request: NextRequest) {
-  const sessionSecret =
-    process.env.DATASTACK_ADMIN_SESSION_SECRET ||
-    "datastack-admin-session-default-secret-32-chars";
-  const token = request.cookies.get(SESSION_COOKIE)?.value || "";
-  const session = await getAdminSessionPayload(token, sessionSecret);
+  const token = request.cookies.get(SESSION_COOKIE)?.value;
+  const auth = await verifyRequestAdminSession(token);
 
-  if (!session) {
-    return NextResponse.json(
-      { error: "Authentication required." },
-      { status: 401 },
-    );
+  if (!auth.valid) {
+    const status = auth.reason === "UNAUTHORIZED" ? 401 : 503;
+    const message =
+      auth.reason === "UNAUTHORIZED"
+        ? "Authentication required."
+        : "Admin authentication is temporarily unavailable.";
+    return NextResponse.json({ error: message }, { status });
   }
 
-  const account = await getAdminAccountInfo(session.email);
-  return NextResponse.json({
-    profile: {
-      email: account.email,
-      role: "Owner",
-      storageMode: account.storageMode,
-      createdAt: account.createdAt,
-      sessionExpiresAt: new Date(session.expiresAt).toISOString(),
-    },
-  });
+  try {
+    const account = await getAdminAccountInfo(auth.session.email);
+    return NextResponse.json({
+      profile: {
+        email: account.email,
+        role: "Owner",
+        storageMode: account.storageMode,
+        createdAt: account.createdAt,
+        sessionExpiresAt: new Date(auth.session.expiresAt).toISOString(),
+      },
+    });
+  } catch {
+    return NextResponse.json(
+      { error: "Unable to load admin profile." },
+      { status: 503 },
+    );
+  }
 }
 
 export async function PUT(request: NextRequest) {
-  const sessionSecret =
-    process.env.DATASTACK_ADMIN_SESSION_SECRET ||
-    "datastack-admin-session-default-secret-32-chars";
-  const token = request.cookies.get(SESSION_COOKIE)?.value || "";
-  const session = await getAdminSessionPayload(token, sessionSecret);
+  const token = request.cookies.get(SESSION_COOKIE)?.value;
+  const auth = await verifyRequestAdminSession(token);
 
-  if (!session) {
+  if (!auth.valid) {
+    const status = auth.reason === "UNAUTHORIZED" ? 401 : 503;
+    const message =
+      auth.reason === "UNAUTHORIZED"
+        ? "Authentication required."
+        : "Admin authentication is temporarily unavailable.";
+    return NextResponse.json({ error: message }, { status });
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    const parsed = await request.json();
+    body =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : {};
+  } catch {
     return NextResponse.json(
-      { error: "Authentication required." },
-      { status: 401 },
+      { error: "Invalid profile payload." },
+      { status: 400 },
     );
   }
 
   try {
-    const body = await request.json();
     const nextEmail =
       typeof body.email === "string"
         ? body.email.trim().toLowerCase()
-        : session.email;
+        : auth.session.email;
     const currentPassword =
       typeof body.currentPassword === "string" ? body.currentPassword : "";
     const newPassword =
@@ -88,7 +106,7 @@ export async function PUT(request: NextRequest) {
       );
     }
 
-    const account = await getAdminAccountInfo(session.email);
+    const account = await getAdminAccountInfo(auth.session.email);
     const result = await updateAdminAccount({
       currentEmail: account.email,
       currentPassword,
@@ -103,13 +121,14 @@ export async function PUT(request: NextRequest) {
     // Preserve remaining session duration (e.g., 30-day "Remember me" session)
     const remainingSeconds = Math.max(
       SESSION_SECONDS,
-      Math.ceil((session.expiresAt - Date.now()) / 1000),
+      Math.ceil((auth.session.expiresAt - Date.now()) / 1000),
     );
     const expiresAt = Date.now() + remainingSeconds * 1000;
     const nextToken = await createAdminSessionToken(
       result.email,
-      sessionSecret,
+      auth.sessionSecret,
       expiresAt,
+      result.tokenVersion,
     );
 
     const response = NextResponse.json({
@@ -133,7 +152,7 @@ export async function PUT(request: NextRequest) {
   } catch {
     return NextResponse.json(
       { error: "Unable to update profile." },
-      { status: 400 },
+      { status: 500 },
     );
   }
 }

@@ -56,6 +56,7 @@ export function ExportWorkspace() {
   const [files, setFiles] = useState<StorageFile[]>(() =>
     getCached<StorageFile[]>('vcon:storage-files', [])
   );
+  const [bufferedCount, setBufferedCount] = useState<number>(0);
   const [selectedClient, setSelectedClient] = useState('all');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
@@ -69,19 +70,33 @@ export function ExportWorkspace() {
 
   useEffect(() => {
     Promise.all([
-      fetch('/api/clients').then(async (response) => {
+      fetch('/api/clients', { cache: 'no-store' }).then(async (response) => {
+        if (response.status === 401) {
+          window.location.assign('/vcon/login');
+          return { clients: [] };
+        }
         if (!response.ok) throw new Error('Unable to load clients');
         return response.json();
       }),
-      fetch('/api/storage').then(async (response) => {
+      fetch('/api/storage', { cache: 'no-store' }).then(async (response) => {
+        if (response.status === 401) {
+          window.location.assign('/vcon/login');
+          return { files: [] };
+        }
         if (!response.ok) throw new Error('Unable to load stored files');
         return response.json();
       }),
+      fetch('/api/metrics', { cache: 'no-store' })
+        .then(async (response) => (response.ok ? response.json() : null))
+        .catch(() => null),
     ])
-      .then(([clientData, storageData]) => {
+      .then(([clientData, storageData, metricsData]) => {
         setClients(setCached('vcon:clients', clientData.clients || []));
         setFiles(setCached('vcon:storage-files', storageData.files || []));
         if (storageData.stats) setCached('vcon:storage-stats', storageData.stats);
+        if (metricsData?.bufferStats) {
+          setBufferedCount(Number(metricsData.bufferStats.currentBufferSize) || 0);
+        }
         setLoadError('');
       })
       .catch((fetchError) => {
@@ -162,15 +177,24 @@ export function ExportWorkspace() {
     return `/api/export?${params.toString()}`;
   }, [format, fromDate, selectedClient, toDate]);
 
+  const invalidRange = Boolean(fromDate && toDate && fromDate > toDate);
+  const nothingToExport = preview.rows === 0 && bufferedCount === 0;
+
   const downloadExport = () => {
-    if (fromDate && toDate && fromDate > toDate) {
+    if (invalidRange) {
       error('Invalid date range', 'Start date must be on or before end date.');
+      return;
+    }
+    if (nothingToExport) {
+      error('Nothing to export', 'No stored rows or buffered events match the selected filters.');
       return;
     }
     window.location.assign(exportUrl);
     info(
       'Export started',
-      `${format.toUpperCase()} download for ${preview.rows.toLocaleString()} rows.`
+      bufferedCount > 0
+        ? `${format.toUpperCase()} download (${preview.rows.toLocaleString()} stored + ${bufferedCount} buffered auto-flushed).`
+        : `${format.toUpperCase()} download for ${preview.rows.toLocaleString()} rows.`
     );
   };
 
@@ -307,15 +331,28 @@ export function ExportWorkspace() {
                 </strong>{' '}
                 files
               </span>
+              {bufferedCount > 0 && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="text-[var(--warning)]">
+                    +{bufferedCount} buffered (flushed on export)
+                  </span>
+                </>
+              )}
             </div>
             {loadError && (
-              <p role="alert" className="text-[11px] text-[var(--text-muted)]">
+              <p role="alert" className="text-[11px] text-[var(--danger)]">
                 {loadError}
               </p>
             )}
-            {fromDate && toDate && fromDate > toDate && (
-              <p role="alert" className="text-[11px] text-[var(--text-muted)]">
+            {invalidRange && (
+              <p role="alert" className="text-[11px] text-[var(--danger)]">
                 Start date must be on or before end date.
+              </p>
+            )}
+            {!loading && !invalidRange && nothingToExport && (
+              <p role="status" className="text-[11px] text-[var(--text-faint)]">
+                No stored rows or buffered events match the selected filters.
               </p>
             )}
           </div>
@@ -328,7 +365,7 @@ export function ExportWorkspace() {
               variant="primary"
               size="xs"
               icon="Download"
-              disabled={loading || Boolean(fromDate && toDate && fromDate > toDate)}
+              disabled={loading || invalidRange || nothingToExport}
               onClick={downloadExport}
             >
               Download {format.toUpperCase()}

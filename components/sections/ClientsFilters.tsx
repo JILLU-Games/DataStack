@@ -17,6 +17,7 @@ const FILTERS: { key: ClientStatusFilter; label: string }[] = [
   { key: 'online', label: 'Online' },
   { key: 'offline', label: 'Offline' },
   { key: 'pending', label: 'Pending' },
+  { key: 'revoked', label: 'Revoked' },
 ];
 
 export function ClientsFilters({

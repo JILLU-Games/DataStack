@@ -13,6 +13,7 @@ Features:
   and lossless partial-batch rate-limit retry (`429 RATE_LIMIT_EXCEEDED`).
 """
 
+import base64
 import csv
 import hashlib
 import json
@@ -44,6 +45,7 @@ from .exceptions import (
     DataStackConnectionError,
     DataStackError,
     DataStackFileError,
+    DataStackOfflineSpoolError,
     DataStackPayloadTooLargeError,
     DataStackRateLimitError,
 )
@@ -72,6 +74,23 @@ def _make_deterministic_file_event_id(
     return f"file_{safe_stem}_{row_index}_{digest}"
 
 
+def _decode_jwt_client_id(token: str) -> str:
+    """Safely extracts `clientId` or `sub` claim from an unverified JWT payload string."""
+    try:
+        parts = (token or "").split(".")
+        if len(parts) != 3:
+            return ""
+        payload_b64 = parts[1]
+        padding = "=" * (-len(payload_b64) % 4)
+        raw = base64.urlsafe_b64decode(payload_b64 + padding).decode("utf-8")
+        claims = json.loads(raw)
+        if isinstance(claims, dict):
+            return str(claims.get("clientId") or claims.get("sub") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
 class DataStackClient:
     """
     Production-grade DataStack Python Client with `config.datastack.py` auto-loading,
@@ -87,6 +106,7 @@ class DataStackClient:
         auto_connect: Optional[bool] = None,
         reconnection_attempts: Optional[int] = None,
         reconnection_delay: Optional[float] = None,
+        client_id: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
         if reconnection_attempts is not None and "MAX_RETRIES" not in kwargs:
@@ -105,6 +125,7 @@ class DataStackClient:
             SERVER_URL=server_url,
             CLIENT_TOKEN=token,
             API_URL=api_url,
+            CLIENT_ID=client_id,
             AUTO_CONNECT=auto_connect,
             **kwargs,
         )
@@ -112,6 +133,20 @@ class DataStackClient:
         self.server_url = self.config.server_url
         self.api_url = self.config.api_url
         self.token = self.config.client_token
+
+        configured_client_id = (self.config.client_id or "").strip()
+        token_client_id = _decode_jwt_client_id(self.token)
+        if (
+            configured_client_id
+            and token_client_id
+            and configured_client_id != token_client_id
+        ):
+            raise DataStackConfigError(
+                f"Configured CLIENT_ID '{configured_client_id}' does not match "
+                f"CLIENT_TOKEN subject '{token_client_id}'."
+            )
+        self.client_id: str = configured_client_id or token_client_id
+
         self.is_connected = False
         self._lock = threading.RLock()
         self._is_draining_spool = False
@@ -311,8 +346,11 @@ class DataStackClient:
                     raise DataStackAuthError(msg) from exc
                 return False
 
-        # Verify handshake & PostgreSQL client status via `ping_verify`
-        return self._verify_websocket_handshake(timeout=effective_timeout)
+            # Verify handshake & PostgreSQL client status via `ping_verify` while still serialized under RLock
+            verified = self._verify_websocket_handshake(timeout=effective_timeout)
+            if not verified:
+                self.is_connected = False
+            return verified
 
     def _verify_websocket_handshake(
         self, timeout: Optional[float] = None
@@ -424,6 +462,8 @@ class DataStackClient:
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+        if self.client_id:
+            headers["X-DataStack-Client-Id"] = self.client_id
 
         if requests is not None:
             resp = requests.request(
@@ -735,10 +775,14 @@ class DataStackClient:
                 ):
                     break
 
-                self.spooler.ack_batch(len(batch))
-                if isinstance(unprocessed, list) and len(unprocessed) > 0:
-                    self.spooler.enqueue(unprocessed)
-                    total_flushed += max(0, len(batch) - len(unprocessed))
+                unprocessed_list = (
+                    unprocessed if isinstance(unprocessed, list) else []
+                )
+                self.spooler.ack_and_requeue_front(
+                    len(batch), unprocessed_list
+                )
+                if unprocessed_list:
+                    total_flushed += max(0, len(batch) - len(unprocessed_list))
                     break
 
                 total_flushed += len(batch)
@@ -767,11 +811,13 @@ class DataStackClient:
         """
         resolved_id = (event_id or "").strip() or _make_event_id()
         resolved_ts = (timestamp or "").strip() or _utc_now_iso()
-        envelope = {
+        envelope: Dict[str, Any] = {
             "eventId": resolved_id,
             "timestamp": resolved_ts,
             "data": data,
         }
+        if self.client_id:
+            envelope["clientId"] = self.client_id
         return self._execute_with_retry_and_fallback(
             ws_event="sync_data",
             ws_payload=envelope,
@@ -810,6 +856,7 @@ class DataStackClient:
         if not isinstance(source_list, list) or len(source_list) == 0:
             return {"success": True, "processed": 0, "rejected": 0}
 
+        envelope_keys = {"eventId", "timestamp", "data", "clientId"}
         formatted: List[Dict[str, Any]] = []
         for item in source_list:
             safe_item = item if isinstance(item, dict) else {"value": item}
@@ -819,14 +866,21 @@ class DataStackClient:
             evt_ts = (
                 str(safe_item.get("timestamp") or "").strip() or _utc_now_iso()
             )
-            evt_data = safe_item.get("data", safe_item)
-            formatted.append(
-                {
-                    "eventId": evt_id,
-                    "timestamp": evt_ts,
-                    "data": evt_data,
-                }
+            is_envelope = "data" in safe_item and set(safe_item.keys()).issubset(
+                envelope_keys
             )
+            evt_data = safe_item["data"] if is_envelope else safe_item
+            evt_client_id = (
+                str(safe_item.get("clientId") or "").strip() or self.client_id
+            )
+            entry: Dict[str, Any] = {
+                "eventId": evt_id,
+                "timestamp": evt_ts,
+                "data": evt_data,
+            }
+            if evt_client_id:
+                entry["clientId"] = evt_client_id
+            formatted.append(entry)
 
         return self._send_formatted_batch_recursive(
             formatted,
@@ -1057,13 +1111,14 @@ class DataStackClient:
             )
             evt_ts = existing_ts or _utc_now_iso()
 
-            buffer.append(
-                {
-                    "eventId": evt_id,
-                    "timestamp": evt_ts,
-                    "data": enriched,
-                }
-            )
+            file_entry: Dict[str, Any] = {
+                "eventId": evt_id,
+                "timestamp": evt_ts,
+                "data": enriched,
+            }
+            if self.client_id:
+                file_entry["clientId"] = self.client_id
+            buffer.append(file_entry)
             if len(buffer) >= effective_chunk:
                 res = self.send_batch(buffer, file_name=path.name)
                 total_processed += int(res.get("processed", 0))
@@ -1162,6 +1217,7 @@ class DataStackClient:
         hb = self.heartbeat.status_snapshot()
         return {
             "connectedWebSocket": self.is_connected,
+            "clientId": self.client_id or None,
             "serverUrl": self.server_url,
             "apiUrl": self.api_url,
             "configSource": self.config.config_source_path,
@@ -1176,3 +1232,21 @@ class DataStackClient:
 
 # Convenient alias so developers can write `from datastack import DataStack`
 DataStack = DataStackClient
+
+__all__ = [
+    "DataStack",
+    "DataStackClient",
+    "DataStackConfig",
+    "load_config",
+    "ConnectionState",
+    "HeartbeatMonitor",
+    "DiskSpooler",
+    "DataStackError",
+    "DataStackConfigError",
+    "DataStackAuthError",
+    "DataStackConnectionError",
+    "DataStackRateLimitError",
+    "DataStackPayloadTooLargeError",
+    "DataStackFileError",
+    "DataStackOfflineSpoolError",
+]

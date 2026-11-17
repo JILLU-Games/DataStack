@@ -6,6 +6,7 @@ export interface ClientItem {
   totalEvents: number;
   lastActive?: string;
   createdAt: string;
+  tokenPreview?: string;
 }
 
 export interface ClientCredentials extends ClientItem {
@@ -13,4 +14,9 @@ export interface ClientCredentials extends ClientItem {
   token: string;
 }
 
-export type ClientStatusFilter = "all" | "online" | "offline" | "pending";
+export type ClientStatusFilter =
+  | "all"
+  | "online"
+  | "offline"
+  | "pending"
+  | "revoked";

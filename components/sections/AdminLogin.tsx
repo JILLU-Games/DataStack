@@ -19,8 +19,8 @@ export function AdminLogin({
 }: {
   showDemoHint?: boolean;
 }) {
-  const [email, setEmail] = useState(showDemoHint ? 'admin@datastack.dev' : '');
-  const [password, setPassword] = useState(showDemoHint ? 'admin12345678' : '');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [remember, setRemember] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);

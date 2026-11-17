@@ -1,12 +1,28 @@
+import { verifyRequestAdminSession } from "@/core/auth/adminUsers";
 import { SDKManager } from "@/core/sdk/sdkManager";
 import { NextRequest, NextResponse } from "next/server";
 
-export async function GET() {
+const SESSION_COOKIE = "datastack_admin_session";
+
+export async function GET(req: NextRequest) {
+  const auth = await verifyRequestAdminSession(
+    req.cookies.get(SESSION_COOKIE)?.value,
+  );
+  if (!auth.valid) {
+    return NextResponse.json(
+      { error: "Authentication required." },
+      { status: auth.reason === "UNAUTHORIZED" ? 401 : 503 },
+    );
+  }
+
   try {
     const allClients = await SDKManager.listClientsAsync();
-    const clients = allClients.map(({ secret, ...client }) => {
+    const clients = allClients.map(({ secret, token, ...client }) => {
       void secret;
-      return client;
+      return {
+        ...client,
+        tokenPreview: token ? `${token.slice(0, 12)}...` : "",
+      };
     });
     return NextResponse.json({ clients, count: clients.length });
   } catch (err: unknown) {
@@ -17,8 +33,31 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const auth = await verifyRequestAdminSession(
+    req.cookies.get(SESSION_COOKIE)?.value,
+  );
+  if (!auth.valid) {
+    return NextResponse.json(
+      { error: "Authentication required." },
+      { status: auth.reason === "UNAUTHORIZED" ? 401 : 503 },
+    );
+  }
+
+  let body: Record<string, unknown>;
   try {
-    const body = await req.json();
+    const parsed = await req.json();
+    body =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : {};
+  } catch {
+    return NextResponse.json(
+      { error: "Invalid request payload." },
+      { status: 400 },
+    );
+  }
+
+  try {
     const { clientId, name, rateLimit } = body;
 
     if (!clientId || !name) {

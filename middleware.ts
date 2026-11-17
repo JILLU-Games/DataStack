@@ -1,4 +1,7 @@
-import { verifyAdminSessionToken } from "@/core/auth/adminSession";
+import {
+  getAdminSessionSecret,
+  verifyAdminSessionToken,
+} from "@/core/auth/adminSession";
 import { NextRequest, NextResponse } from "next/server";
 
 const SESSION_COOKIE = "datastack_admin_session";
@@ -13,26 +16,35 @@ function isProtectedApi(pathname: string, method: string) {
   return pathname.startsWith("/api/");
 }
 
-function isSameOriginRequest(request: NextRequest) {
-  const originHeader = request.headers.get("origin");
+function matchesRequestHost(candidateUrl: string, request: NextRequest) {
   const requestHost = request.headers.get("host");
   const forwardedHost = request.headers
     .get("x-forwarded-host")
     ?.split(",")[0]
     ?.trim();
-  if (!originHeader || (!requestHost && !forwardedHost)) return false;
+  if (!requestHost && !forwardedHost) return false;
 
   try {
-    const origin = new URL(originHeader);
-    const originHost = origin.host.toLowerCase();
-    const matchesHost =
-      (requestHost && originHost === requestHost.toLowerCase()) ||
-      (forwardedHost && originHost === forwardedHost.toLowerCase());
-
-    return Boolean(matchesHost);
+    const parsedHost = new URL(candidateUrl).host.toLowerCase();
+    return Boolean(
+      (requestHost && parsedHost === requestHost.toLowerCase()) ||
+        (forwardedHost && parsedHost === forwardedHost.toLowerCase()),
+    );
   } catch {
     return false;
   }
+}
+
+export function isSameOriginRequest(request: NextRequest) {
+  const originHeader = request.headers.get("origin");
+  if (originHeader) {
+    return matchesRequestHost(originHeader, request);
+  }
+  const refererHeader = request.headers.get("referer");
+  if (refererHeader) {
+    return matchesRequestHost(refererHeader, request);
+  }
+  return false;
 }
 
 export async function middleware(request: NextRequest) {
@@ -73,14 +85,19 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  const sessionSecret =
-    process.env.DATASTACK_ADMIN_SESSION_SECRET ||
-    "datastack-admin-session-default-secret-32-chars";
+  const sessionSecret = getAdminSessionSecret();
+  if (!sessionSecret && isAdminApi) {
+    return NextResponse.json(
+      { error: "Admin authentication is not configured." },
+      { status: 503 },
+    );
+  }
+
   const token = request.cookies.get(SESSION_COOKIE)?.value;
   const authenticated = Boolean(
     sessionSecret &&
-    token &&
-    (await verifyAdminSessionToken(token, sessionSecret)),
+      token &&
+      (await verifyAdminSessionToken(token, sessionSecret)),
   );
 
   if (isLoginPage) {

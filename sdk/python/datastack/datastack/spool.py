@@ -9,7 +9,7 @@ import json
 import os
 import threading
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .exceptions import DataStackOfflineSpoolError
 
@@ -136,6 +136,49 @@ class DiskSpooler:
                     fh.flush()
                 os.replace(str(tmp_file), str(self.spool_file))
                 return count
+            except Exception:
+                return 0
+
+    def ack_and_requeue_front(
+        self,
+        acked_count: int,
+        unprocessed: Optional[List[Dict[str, Any]]] = None,
+    ) -> int:
+        """
+        Atomically removes `acked_count` head lines from `spool.jsonl` while
+        preserving any `unprocessed` events at the FRONT of the queue in a single
+        atomic `os.replace()` write (FIFO safe, zero crash-window data loss).
+        """
+        if not self.enabled or acked_count <= 0:
+            return 0
+
+        with self._lock:
+            if not self.spool_file.exists():
+                return 0
+
+            try:
+                with self.spool_file.open("r", encoding="utf-8") as fh:
+                    all_lines = [ln for ln in fh if ln.strip()]
+
+                consumed = min(acked_count, len(all_lines))
+                tail_lines = all_lines[consumed:]
+                head_lines = [
+                    json.dumps(evt, ensure_ascii=False) + "\n"
+                    for evt in (unprocessed or [])
+                ]
+                combined = head_lines + tail_lines
+
+                if not combined:
+                    self.spool_file.unlink(missing_ok=True)
+                    return consumed
+
+                self._ensure_dir()
+                tmp_file = self.spool_dir / "spool.jsonl.tmp"
+                with tmp_file.open("w", encoding="utf-8") as fh:
+                    fh.writelines(combined)
+                    fh.flush()
+                os.replace(str(tmp_file), str(self.spool_file))
+                return max(0, consumed - len(head_lines))
             except Exception:
                 return 0
 

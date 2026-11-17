@@ -1,5 +1,8 @@
+import { existsSync, rmSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import { AuthService } from "../auth/jwt";
 import { DatabaseEngine } from "../Database/database";
+import { getInternalIngestionHeaders } from "../Security/security";
 
 export interface ClientSDK {
   clientId: string;
@@ -15,7 +18,9 @@ export interface ClientSDK {
 
 type SDKDatabaseGlobals = typeof globalThis & {
   __dataStackClientsMap?: Map<string, ClientSDK>;
+  __dataStackDeletedClients?: Set<string>;
   __dataStackClientsHydrated?: boolean;
+  __dataStackSyncedSocketEvents?: Map<string, number>;
 };
 
 const globals = globalThis as SDKDatabaseGlobals;
@@ -25,6 +30,67 @@ function getClientsMap(): Map<string, ClientSDK> {
     globals.__dataStackClientsMap = new Map<string, ClientSDK>();
   }
   return globals.__dataStackClientsMap;
+}
+
+function getDeletedClientsSet(): Set<string> {
+  if (!globals.__dataStackDeletedClients) {
+    globals.__dataStackDeletedClients = new Set<string>();
+  }
+  return globals.__dataStackDeletedClients;
+}
+
+function getSyncedSocketEventsMap(): Map<string, number> {
+  if (!globals.__dataStackSyncedSocketEvents) {
+    globals.__dataStackSyncedSocketEvents = new Map<string, number>();
+  }
+  return globals.__dataStackSyncedSocketEvents;
+}
+
+function serializeSyncClient(client: ClientSDK) {
+  return {
+    clientId: client.clientId,
+    name: client.name,
+    status: client.status,
+    token: client.token,
+    rateLimit: client.rateLimit,
+  };
+}
+
+async function notifyIngestionClientSyncAsync(
+  clientId: string,
+  action: "deleted" | "revoked" | "updated" | "registered",
+  client?: ClientSDK,
+): Promise<void> {
+  const headers = getInternalIngestionHeaders();
+  if (!headers["x-datastack-internal-secret"]) return;
+  const ingestionBaseUrl = (
+    process.env.INGESTION_INTERNAL_URL || "http://127.0.0.1:4000"
+  ).replace(/\/$/, "");
+  try {
+    await fetch(`${ingestionBaseUrl}/internal/client-sync`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...headers,
+      },
+      body: JSON.stringify({
+        clientId,
+        action,
+        ...(client ? { client: serializeSyncClient(client) } : {}),
+      }),
+      signal: AbortSignal.timeout(1000),
+    });
+  } catch {
+    // Port 4000 may not be running in isolated single-process dev mode
+  }
+}
+
+function notifyIngestionClientSync(
+  clientId: string,
+  action: "deleted" | "revoked" | "updated" | "registered",
+  client?: ClientSDK,
+): void {
+  void notifyIngestionClientSyncAsync(clientId, action, client);
 }
 
 function mapRowToClient(row: Record<string, unknown>): ClientSDK {
@@ -54,11 +120,20 @@ export class SDKManager {
       const ready = await DatabaseEngine.ensureSchema();
       if (!ready) return null;
 
-      const result = await pool.query(
-        `SELECT client_id, name, secret, token, rate_limit, status, total_events, last_active, created_at
-         FROM client_sdks
-         ORDER BY created_at DESC`,
-      );
+      const [result, deletedResult] = await Promise.all([
+        pool.query(
+          `SELECT client_id, name, secret, token, rate_limit, status, total_events, last_active, created_at
+           FROM client_sdks
+           ORDER BY created_at DESC`,
+        ),
+        pool.query(`SELECT client_id FROM deleted_clients`),
+      ]);
+
+      const deletedSet = getDeletedClientsSet();
+      deletedSet.clear();
+      for (const row of deletedResult.rows) {
+        deletedSet.add(String(row.client_id).trim().toLowerCase());
+      }
 
       const map = getClientsMap();
       map.clear();
@@ -84,12 +159,91 @@ export class SDKManager {
     return Array.from(getClientsMap().values());
   }
 
+  public static async syncAllClientsToIngestionAsync(): Promise<void> {
+    const headers = getInternalIngestionHeaders();
+    if (!headers["x-datastack-internal-secret"]) return;
+    const ingestionBaseUrl = (
+      process.env.INGESTION_INTERNAL_URL || "http://127.0.0.1:4000"
+    ).replace(/\/$/, "");
+    const clients = Array.from(getClientsMap().values()).map(serializeSyncClient);
+    try {
+      await fetch(`${ingestionBaseUrl}/internal/client-sync`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...headers,
+        },
+        body: JSON.stringify({
+          action: "bulk_sync",
+          clients,
+        }),
+        signal: AbortSignal.timeout(1500),
+      });
+    } catch {
+      // Port 4000 may not be running in isolated single-process dev mode
+    }
+  }
+
   public static async listClientsAsync(): Promise<ClientSDK[]> {
     const fromDb = await this.syncFromDatabase();
     if (fromDb !== null) {
       return fromDb;
     }
-    return Array.from(getClientsMap().values());
+
+    const map = getClientsMap();
+    const headers = getInternalIngestionHeaders();
+    if (headers["x-datastack-internal-secret"]) {
+      const ingestionBaseUrl = (
+        process.env.INGESTION_INTERNAL_URL || "http://127.0.0.1:4000"
+      ).replace(/\/$/, "");
+      try {
+        const res = await fetch(`${ingestionBaseUrl}/internal/metrics`, {
+          headers,
+          cache: "no-store",
+          signal: AbortSignal.timeout(1000),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as {
+            hasSyncedInMemoryClients?: boolean;
+            clientActivity?: Record<
+              string,
+              { totalEvents?: number; lastActive?: string }
+            >;
+          };
+          if (data.hasSyncedInMemoryClients === false && map.size > 0) {
+            await this.syncAllClientsToIngestionAsync();
+          }
+          if (data.clientActivity && typeof data.clientActivity === "object") {
+            const syncedMap = getSyncedSocketEventsMap();
+            for (const [cid, activity] of Object.entries(data.clientActivity)) {
+              const client = map.get(cid);
+              if (!client) continue;
+              const remoteTotal = Math.max(0, Number(activity?.totalEvents) || 0);
+              const prevSynced = syncedMap.get(cid) || 0;
+              const delta =
+                remoteTotal >= prevSynced
+                  ? remoteTotal - prevSynced
+                  : remoteTotal;
+              if (delta > 0) {
+                client.totalEvents += delta;
+              }
+              syncedMap.set(cid, remoteTotal);
+              if (
+                activity?.lastActive &&
+                (!client.lastActive || activity.lastActive > client.lastActive)
+              ) {
+                client.lastActive = activity.lastActive;
+              }
+              map.set(cid, client);
+            }
+          }
+        }
+      } catch {
+        // Port 4000 may not be running in isolated single-process dev mode
+      }
+    }
+
+    return Array.from(map.values());
   }
 
   public static getClient(clientId: string): ClientSDK | undefined {
@@ -152,8 +306,10 @@ export class SDKManager {
       createdAt: new Date().toISOString(),
     };
 
+    getDeletedClientsSet().delete(safeClientId);
     getClientsMap().set(safeClientId, newClient);
     void this.persistNewClient(newClient);
+    notifyIngestionClientSync(safeClientId, "registered", newClient);
     return newClient;
   }
 
@@ -163,6 +319,10 @@ export class SDKManager {
 
     try {
       await DatabaseEngine.ensureSchema();
+      await pool.query(
+        `DELETE FROM deleted_clients WHERE client_id = $1`,
+        [client.clientId],
+      );
       await pool.query(
         `INSERT INTO client_sdks (client_id, name, secret, token, rate_limit, status, total_events, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
@@ -218,8 +378,10 @@ export class SDKManager {
       createdAt: new Date().toISOString(),
     };
 
+    getDeletedClientsSet().delete(safeClientId);
     getClientsMap().set(safeClientId, newClient);
     await this.persistNewClient(newClient);
+    await notifyIngestionClientSyncAsync(safeClientId, "registered", newClient);
     return newClient;
   }
 
@@ -227,16 +389,20 @@ export class SDKManager {
     const client = getClientsMap().get(clientId);
     if (!client) return null;
 
-    client.secret = `sec_${clientId}_${Math.random().toString(36).substring(2, 10)}`;
-    client.token = AuthService.generateClientToken({
-      clientId: client.clientId,
-      name: client.name,
-      rateLimit: client.rateLimit,
-    });
+    const updated: ClientSDK = {
+      ...client,
+      secret: `sec_${clientId}_${Math.random().toString(36).substring(2, 10)}`,
+      token: AuthService.generateClientToken({
+        clientId: client.clientId,
+        name: client.name,
+        rateLimit: client.rateLimit,
+      }),
+    };
 
-    getClientsMap().set(clientId, client);
-    void this.persistClientCredentials(client);
-    return client;
+    getClientsMap().set(clientId, updated);
+    void this.persistClientCredentials(updated);
+    notifyIngestionClientSync(clientId, "updated", updated);
+    return updated;
   }
 
   private static async persistClientCredentials(
@@ -264,16 +430,20 @@ export class SDKManager {
     const existing = await this.getClientAsync(clientId);
     if (!existing) return null;
 
-    existing.secret = `sec_${clientId}_${Math.random().toString(36).substring(2, 10)}`;
-    existing.token = AuthService.generateClientToken({
-      clientId: existing.clientId,
-      name: existing.name,
-      rateLimit: existing.rateLimit,
-    });
+    const updated: ClientSDK = {
+      ...existing,
+      secret: `sec_${clientId}_${Math.random().toString(36).substring(2, 10)}`,
+      token: AuthService.generateClientToken({
+        clientId: existing.clientId,
+        name: existing.name,
+        rateLimit: existing.rateLimit,
+      }),
+    };
 
-    getClientsMap().set(clientId, existing);
-    await this.persistClientCredentials(existing);
-    return existing;
+    getClientsMap().set(clientId, updated);
+    await this.persistClientCredentials(updated);
+    await notifyIngestionClientSyncAsync(clientId, "updated", updated);
+    return updated;
   }
 
   public static updateClient(
@@ -283,14 +453,23 @@ export class SDKManager {
     const client = getClientsMap().get(clientId);
     if (!client) return null;
 
-    if (updates.name !== undefined) client.name = updates.name.trim();
-    if (updates.rateLimit !== undefined)
-      client.rateLimit = Math.max(1, Number(updates.rateLimit) || 100);
-    if (updates.status !== undefined) client.status = updates.status;
+    const updated: ClientSDK = {
+      ...client,
+      ...(updates.name !== undefined ? { name: updates.name.trim() } : {}),
+      ...(updates.rateLimit !== undefined
+        ? { rateLimit: Math.max(1, Number(updates.rateLimit) || 100) }
+        : {}),
+      ...(updates.status !== undefined ? { status: updates.status } : {}),
+    };
 
-    getClientsMap().set(clientId, client);
-    void this.persistClientUpdates(client);
-    return client;
+    getClientsMap().set(clientId, updated);
+    void this.persistClientUpdates(updated);
+    notifyIngestionClientSync(
+      clientId,
+      updated.status === "revoked" ? "revoked" : "updated",
+      updated,
+    );
+    return updated;
   }
 
   private static async persistClientUpdates(client: ClientSDK): Promise<void> {
@@ -317,19 +496,67 @@ export class SDKManager {
     const client = await this.getClientAsync(clientId);
     if (!client) return null;
 
-    if (updates.name !== undefined) client.name = updates.name.trim();
-    if (updates.rateLimit !== undefined)
-      client.rateLimit = Math.max(1, Number(updates.rateLimit) || 100);
-    if (updates.status !== undefined) client.status = updates.status;
+    const updated: ClientSDK = {
+      ...client,
+      ...(updates.name !== undefined ? { name: updates.name.trim() } : {}),
+      ...(updates.rateLimit !== undefined
+        ? { rateLimit: Math.max(1, Number(updates.rateLimit) || 100) }
+        : {}),
+      ...(updates.status !== undefined ? { status: updates.status } : {}),
+    };
 
-    getClientsMap().set(clientId, client);
-    await this.persistClientUpdates(client);
-    return client;
+    getClientsMap().set(clientId, updated);
+    await this.persistClientUpdates(updated);
+    await notifyIngestionClientSyncAsync(
+      clientId,
+      updated.status === "revoked" ? "revoked" : "updated",
+      updated,
+    );
+    return updated;
+  }
+
+  public static isClientDeleted(clientId: string): boolean {
+    const normalized = String(clientId || "")
+      .trim()
+      .toLowerCase();
+    return getDeletedClientsSet().has(normalized);
+  }
+
+  public static async isClientDeletedAsync(clientId: string): Promise<boolean> {
+    const normalized = String(clientId || "")
+      .trim()
+      .toLowerCase();
+    if (!normalized) return false;
+    if (getDeletedClientsSet().has(normalized)) {
+      return true;
+    }
+
+    const pool = DatabaseEngine.getPool();
+    if (!pool) return false;
+
+    await DatabaseEngine.ensureSchema();
+    const res = await pool.query(
+      `SELECT 1 FROM deleted_clients WHERE client_id = $1`,
+      [normalized],
+    );
+    if (res.rowCount && res.rowCount > 0) {
+      getDeletedClientsSet().add(normalized);
+      return true;
+    }
+    return false;
   }
 
   public static deleteClient(clientId: string): boolean {
-    const deleted = getClientsMap().delete(clientId);
-    void this.deleteClientFromDb(clientId);
+    const normalized = String(clientId || "")
+      .trim()
+      .toLowerCase();
+    const deleted = getClientsMap().delete(normalized);
+    getSyncedSocketEventsMap().delete(normalized);
+    if (deleted) {
+      getDeletedClientsSet().add(normalized);
+    }
+    void this.deleteClientFromDb(normalized);
+    notifyIngestionClientSync(normalized, "deleted");
     return deleted;
   }
 
@@ -337,21 +564,62 @@ export class SDKManager {
     const pool = DatabaseEngine.getPool();
     if (!pool) return false;
 
+    await DatabaseEngine.ensureSchema();
+    const dbClient = await pool.connect();
     try {
-      await DatabaseEngine.ensureSchema();
-      const res = await pool.query(
+      await dbClient.query("BEGIN");
+      const res = await dbClient.query(
         `DELETE FROM client_sdks WHERE client_id = $1`,
         [clientId],
       );
-      return Boolean(res.rowCount && res.rowCount > 0);
-    } catch {
+      if (res.rowCount && res.rowCount > 0) {
+        await dbClient.query(
+          `INSERT INTO deleted_clients (client_id, deleted_at)
+           VALUES ($1, NOW())
+           ON CONFLICT (client_id) DO UPDATE SET deleted_at = NOW()`,
+          [clientId],
+        );
+        await dbClient.query("COMMIT");
+        return true;
+      }
+      await dbClient.query("ROLLBACK");
       return false;
+    } catch {
+      await dbClient.query("ROLLBACK").catch(() => undefined);
+      return false;
+    } finally {
+      dbClient.release();
     }
   }
 
-  public static async deleteClientAsync(clientId: string): Promise<boolean> {
-    const existedInMem = getClientsMap().delete(clientId);
-    const deletedFromDb = await this.deleteClientFromDb(clientId);
+  private static purgeClientStorageDir(clientId: string): void {
+    const safeId = clientId.replace(/[^a-z0-9_-]/gi, "_");
+    if (!safeId) return;
+    const storageRoot = resolve(process.cwd(), "storage", "data");
+    const targetDir = resolve(storageRoot, safeId);
+    if (!targetDir.startsWith(`${storageRoot}${sep}`)) return;
+    if (existsSync(targetDir)) {
+      rmSync(targetDir, { recursive: true, force: true });
+    }
+  }
+
+  public static async deleteClientAsync(
+    clientId: string,
+    options?: { purgeFiles?: boolean },
+  ): Promise<boolean> {
+    const normalized = String(clientId || "")
+      .trim()
+      .toLowerCase();
+    const existedInMem = getClientsMap().delete(normalized);
+    getSyncedSocketEventsMap().delete(normalized);
+    const deletedFromDb = await this.deleteClientFromDb(normalized);
+    if (existedInMem || deletedFromDb) {
+      getDeletedClientsSet().add(normalized);
+      if (options?.purgeFiles) {
+        this.purgeClientStorageDir(normalized);
+      }
+      await notifyIngestionClientSyncAsync(normalized, "deleted");
+    }
     return existedInMem || deletedFromDb;
   }
 

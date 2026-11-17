@@ -6,22 +6,22 @@
 
 Official Python client library for **DataStack — Self-Hosted Real-Time Telemetry & Event Logging Platform**, developed by **[Vib Tools](https://vib.tools/)**.
 
-`datastack-sdk` enables Python services, IoT sensor nodes, microservice workers, and research pipelines to stream structured JSON telemetry events to a DataStack server over Socket.IO with deterministic `threading.Event` acknowledgments.
+`datastack-sdk` is a compatibility alias for the canonical **`datastack`** package located at [`../sdk/python/datastack`](../sdk/python/datastack). Both `from datastack import DataStack` and `from datastack_sdk import DataStackClient` share a single source of truth with `config.datastack.py` auto-discovery, `CLIENT_ID` wiring, Socket.IO streaming, automatic HTTP fallback, offline disk spooling, and direct `.csv`/`.json`/`.jsonl` file streaming.
 
 ---
 
 ## Installation
 
-Install directly from the `sdk-python` directory:
+Install the canonical package directly from `sdk/python/datastack`:
+
+```bash
+pip install ./sdk/python/datastack
+```
+
+Or install the compatibility alias from `sdk-python`:
 
 ```bash
 pip install ./sdk-python
-```
-
-For editable development mode:
-
-```bash
-cd sdk-python && pip install -e .
 ```
 
 ---
@@ -34,10 +34,12 @@ from datastack_sdk import DataStackClient
 # 1. Initialize the client with a signed JWT token from /vcon/clients or /vcon/sdk
 client = DataStackClient(
     server_url="http://localhost:4000",
+    api_url="http://localhost:3000",
     token="YOUR_CLIENT_JWT_TOKEN",
+    client_id="YOUR_CLIENT_ID",  # optional (auto-derived from JWT sub/clientId)
 )
 
-# 2. Connect to the DataStack Socket.IO server
+# 2. Connect to the DataStack Socket.IO server (or auto HTTP fallback)
 if client.connect():
     # 3. Stream a single structured event and wait for server acknowledgment
     res = client.sync(

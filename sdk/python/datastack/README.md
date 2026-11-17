@@ -33,6 +33,7 @@ DATASTACK_CONFIG = {
     "SERVER_URL": "http://localhost:4000",        # Port 4000 Socket.IO Ingestion Service
     "API_URL": "http://localhost:3000",           # Port 3000 HTTP Fallback & File Ingestion API
     "CLIENT_TOKEN": "YOUR_CLIENT_JWT_TOKEN",      # Provisioned in /vcon/clients
+    "CLIENT_ID": "",                              # Optional override (defaults to JWT sub/clientId)
     "AUTO_CONNECT": True,
     "ENABLE_HTTP_FALLBACK": True,
     "HEARTBEAT_INTERVAL_SEC": 5.0,

@@ -8,21 +8,41 @@ export interface ClientTokenPayload {
   exp?: number;
 }
 
-const DEFAULT_SECRET =
-  process.env.DATASTACK_JWT_SECRET ||
+const DEV_DEFAULT_JWT_SECRET =
   "datastack-jwt-default-secret-key-32-chars-long";
 
+export function resolveDefaultJwtSecret(): string {
+  const configured = process.env.DATASTACK_JWT_SECRET?.trim() || "";
+  if (process.env.NODE_ENV === "production") {
+    return configured.length >= 32 ? configured : "";
+  }
+  if (configured.length > 0) {
+    return configured.length >= 32 ? configured : "";
+  }
+  return DEV_DEFAULT_JWT_SECRET;
+}
+
 export class AuthService {
-  private static secret: string = DEFAULT_SECRET;
+  private static secret: string = resolveDefaultJwtSecret();
 
   public static setSecret(newSecret: string) {
-    if (newSecret && newSecret.trim().length > 0) {
-      this.secret = newSecret.trim();
+    const trimmed = newSecret ? newSecret.trim() : "";
+    if (trimmed.length >= 32) {
+      this.secret = trimmed;
+    } else if (process.env.NODE_ENV !== "production" && trimmed.length > 0) {
+      this.secret = trimmed;
+    } else if (process.env.NODE_ENV === "production") {
+      this.secret = "";
     }
   }
 
   public static getSecret(): string {
     return this.secret;
+  }
+
+  public static isConfigured(): boolean {
+    const minLen = process.env.NODE_ENV === "production" ? 32 : 1;
+    return this.secret.length >= minLen;
   }
 
   /**
@@ -32,9 +52,9 @@ export class AuthService {
     payload: { clientId: string; name?: string; rateLimit?: number },
     expiresIn = "30d",
   ): string {
-    if (!this.secret) {
+    if (!this.isConfigured()) {
       throw new Error(
-        "DATASTACK_JWT_SECRET must be configured before generating client tokens.",
+        "DATASTACK_JWT_SECRET (>= 32 characters) must be configured before generating client tokens.",
       );
     }
 
@@ -50,15 +70,18 @@ export class AuthService {
   }
 
   /**
-   * Verifies and decodes incoming token from Socket.IO handshake.
+   * Verifies and decodes incoming token from Socket.IO handshake or HTTP ingestion.
    */
   public static verifyClientToken(token: string): {
     valid: boolean;
     payload?: ClientTokenPayload;
     error?: string;
   } {
-    if (!this.secret) {
-      return { valid: false, error: "DATASTACK_JWT_SECRET is not configured." };
+    if (!this.isConfigured()) {
+      return {
+        valid: false,
+        error: "DATASTACK_JWT_SECRET (>= 32 characters) is not configured.",
+      };
     }
 
     try {

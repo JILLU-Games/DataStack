@@ -1,5 +1,6 @@
 import {
   createAdminSessionToken,
+  getAdminSessionSecret,
   getSessionCookieOptions,
 } from "@/core/auth/adminSession";
 import {
@@ -20,9 +21,7 @@ function validEmail(email: string) {
 }
 
 export async function POST(request: NextRequest) {
-  const sessionSecret =
-    process.env.DATASTACK_ADMIN_SESSION_SECRET ||
-    "datastack-admin-session-default-secret-32-chars";
+  const sessionSecret = getAdminSessionSecret();
   if (!sessionSecret || sessionSecret.length < 32) {
     return NextResponse.json(
       { error: "Admin session configuration is unavailable." },
@@ -30,8 +29,21 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  let body: Record<string, unknown>;
   try {
-    const body = await request.json();
+    const parsed = await request.json();
+    body =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : {};
+  } catch {
+    return NextResponse.json(
+      { error: "Invalid setup request payload." },
+      { status: 400 },
+    );
+  }
+
+  try {
     const email =
       typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
     const password = typeof body.password === "string" ? body.password : "";
@@ -74,6 +86,7 @@ export async function POST(request: NextRequest) {
       email,
       sessionSecret,
       Date.now() + SESSION_SECONDS * 1000,
+      1,
     );
     const response = NextResponse.json({ success: true });
     response.cookies.set(

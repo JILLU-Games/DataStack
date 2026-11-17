@@ -1,5 +1,13 @@
-const CACHE_NAME = 'datastack-cache-v1';
-const STATIC_ASSETS = ['/', '/vcon/dashboard', '/manifest.json'];
+const CACHE_NAME = 'datastack-cache-v2';
+const STATIC_ASSETS = [
+  '/',
+  '/manifest.json',
+  '/icon.svg',
+  '/icon-192.png',
+  '/icon-512.png',
+  '/icon-maskable-512.png',
+  '/apple-touch-icon.png',
+];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -22,13 +30,43 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
-  // Let WebSocket and API requests pass through
-  if (event.request.url.includes('/socket.io/') || event.request.url.includes('/api/')) {
+  const { request } = event;
+  if (request.method !== 'GET') return;
+
+  let url;
+  try {
+    url = new URL(request.url);
+  } catch {
     return;
   }
+
+  // Only handle same-origin GET requests; never intercept WebSocket, HMR, or API routes
+  if (url.origin !== self.location.origin) return;
+  if (
+    url.pathname.startsWith('/socket.io/') ||
+    url.pathname.startsWith('/api/') ||
+    url.pathname.startsWith('/_next/webpack-hmr')
+  ) {
+    return;
+  }
+
   event.respondWith(
-    fetch(event.request).catch(() => {
-      return caches.match(event.request);
-    })
+    fetch(request)
+      .then((response) => {
+        if (response && response.ok && response.type === 'basic') {
+          const clone = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(request, clone)).catch(() => {});
+        }
+        return response;
+      })
+      .catch(async () => {
+        const cached = await caches.match(request);
+        if (cached) return cached;
+        return new Response('Offline — network unavailable.', {
+          status: 503,
+          statusText: 'Service Unavailable',
+          headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+        });
+      })
   );
 });

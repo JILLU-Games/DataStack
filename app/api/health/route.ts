@@ -23,7 +23,19 @@ export async function GET(req: NextRequest) {
         );
       }
 
-      const clientId = verified.payload.clientId;
+      const clientId = String(verified.payload.clientId || '')
+        .trim()
+        .toLowerCase();
+      if (SDKManager.isClientDeleted(clientId)) {
+        return NextResponse.json(
+          {
+            status: 'error',
+            code: 'CLIENT_REVOKED',
+            error: `CLIENT_REVOKED: Client '${clientId}' has been deleted by administrator.`,
+          },
+          { status: 403 },
+        );
+      }
       const registeredClient = await SDKManager.getClientAsync(clientId);
       if (registeredClient) {
         if (registeredClient.status === 'revoked') {

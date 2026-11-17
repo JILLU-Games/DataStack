@@ -1,5 +1,5 @@
 import { ActivityPreview } from '@/components/ui/ActivityPreview';
-import { Button } from '@/components/ui/Button';
+import { buttonClassNames } from '@/components/ui/Button';
 import Link from 'next/link';
 import React from 'react';
 
@@ -17,11 +17,11 @@ export const Hero: React.FC = () => (
       Keep activity organized, review the records that matter, and export them when you need them.
     </p>
     <div className="flex flex-wrap gap-2">
-      <Link href="#features">
-        <Button variant="primary" size="sm">Explore features</Button>
+      <Link href="/#features" className={buttonClassNames({ variant: 'primary', size: 'sm' })}>
+        Explore features
       </Link>
-      <Link href="#sdk">
-        <Button variant="secondary" size="sm">Python SDK</Button>
+      <Link href="/#sdk" className={buttonClassNames({ variant: 'secondary', size: 'sm' })}>
+        Python SDK
       </Link>
     </div>
     <ActivityPreview />

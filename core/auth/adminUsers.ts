@@ -6,15 +6,22 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
+import {
+  type AdminSessionPayload,
+  getAdminSessionPayload,
+  getAdminSessionSecret,
+} from "./adminSession";
 
 const PASSWORD_HASH_BYTES = 64;
 const PASSWORD_SALT_BYTES = 16;
 const DATABASE_LOCK_ID = "72025102501";
 const LOGIN_ATTEMPT_LIMIT = 5;
+const IP_LOGIN_ATTEMPT_LIMIT = 25;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_BLOCK_MS = 15 * 60 * 1000;
 const LOCAL_THROTTLE_MAX_ENTRIES = 5000;
 const LOCAL_THROTTLE_CLEANUP_MS = 60 * 1000;
+const DEV_DEFAULT_SETUP_KEY = "datastack-default-setup-key-32-chars";
 
 interface LoginThrottleEntry {
   windowStartedAt: number;
@@ -28,11 +35,17 @@ interface LoginThrottleDecision {
   retryAfterSeconds: number;
 }
 
+export interface LoginThrottleBucket {
+  keyHash: string;
+  limit: number;
+}
+
 interface InMemoryAdmin {
   id: number;
   email: string;
   passwordSalt: Buffer;
   passwordHash: Buffer;
+  tokenVersion: number;
   createdAt: Date;
 }
 
@@ -47,8 +60,12 @@ const localLoginThrottle = new Map<string, LoginThrottleEntry>();
 let lastLocalThrottleCleanup = 0;
 let lastDatabaseThrottleCleanup = 0;
 
+function isProductionEnv() {
+  return process.env.NODE_ENV === "production";
+}
+
 function getPool(): Pool | null {
-  const connectionString = process.env.DATABASE_URL;
+  const connectionString = process.env.DATABASE_URL?.trim();
   if (!connectionString) {
     return null;
   }
@@ -74,17 +91,24 @@ async function ensureAdminTable() {
   if (!pool) return;
 
   globals.__dataStackAdminSchema ??= Promise.all([
-    pool.query(
-      `
+    pool
+      .query(
+        `
       CREATE TABLE IF NOT EXISTS admin_users (
         id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
         email TEXT NOT NULL UNIQUE,
         password_salt BYTEA NOT NULL,
         password_hash BYTEA NOT NULL,
+        token_version INTEGER NOT NULL DEFAULT 1,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `,
-    ),
+      )
+      .then(() =>
+        pool.query(
+          `ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 1`,
+        ),
+      ),
     pool.query(
       `
       CREATE TABLE IF NOT EXISTS admin_login_attempts (
@@ -121,8 +145,41 @@ function matchesSecret(candidate: string, expected: string) {
   return timingSafeEqual(candidateHash, expectedHash);
 }
 
-function createLoginThrottleKeys(email: string, secret: string) {
-  return [createHmac("sha256", secret).update(`email:${email}`).digest("hex")];
+export function getAdminSetupKey(): string | null {
+  const configured = process.env.DATASTACK_ADMIN_SETUP_KEY?.trim() || "";
+  if (isProductionEnv()) {
+    return configured.length >= 32 ? configured : null;
+  }
+  if (configured.length > 0) {
+    return configured.length >= 32 ? configured : null;
+  }
+  return DEV_DEFAULT_SETUP_KEY;
+}
+
+export function createLoginThrottleBuckets(
+  email: string,
+  secret: string,
+  ip = "unknown",
+): LoginThrottleBucket[] {
+  const cleanEmail = email.trim().toLowerCase();
+  const cleanIp = ip.trim().toLowerCase() || "unknown";
+  const buckets: LoginThrottleBucket[] = [
+    {
+      keyHash: createHmac("sha256", secret)
+        .update(`ip_email:${cleanIp}:${cleanEmail}`)
+        .digest("hex"),
+      limit: LOGIN_ATTEMPT_LIMIT,
+    },
+  ];
+  if (cleanIp !== "unknown") {
+    buckets.push({
+      keyHash: createHmac("sha256", secret)
+        .update(`ip:${cleanIp}`)
+        .digest("hex"),
+      limit: IP_LOGIN_ATTEMPT_LIMIT,
+    });
+  }
+  return buckets;
 }
 
 function getAdvisoryLockId(keyHash: string) {
@@ -157,14 +214,14 @@ function cleanupLocalLoginThrottle(now: number) {
 }
 
 function consumeLocalLoginAttempt(
-  keyHashes: string[],
+  buckets: LoginThrottleBucket[],
   now: number,
 ): LoginThrottleDecision {
   cleanupLocalLoginThrottle(now);
 
-  const blockedUntil = keyHashes.reduce(
-    (latest, keyHash) =>
-      Math.max(latest, localLoginThrottle.get(keyHash)?.blockedUntil ?? 0),
+  const blockedUntil = buckets.reduce(
+    (latest, bucket) =>
+      Math.max(latest, localLoginThrottle.get(bucket.keyHash)?.blockedUntil ?? 0),
     0,
   );
   if (blockedUntil > now) {
@@ -174,16 +231,16 @@ function consumeLocalLoginAttempt(
     };
   }
 
-  for (const keyHash of keyHashes) {
-    const previous = localLoginThrottle.get(keyHash);
+  for (const bucket of buckets) {
+    const previous = localLoginThrottle.get(bucket.keyHash);
     const windowExpired =
       !previous || now - previous.windowStartedAt >= LOGIN_WINDOW_MS;
     const failedAttempts = windowExpired ? 1 : previous.failedAttempts + 1;
-    localLoginThrottle.set(keyHash, {
+    localLoginThrottle.set(bucket.keyHash, {
       windowStartedAt: windowExpired ? now : previous.windowStartedAt,
       failedAttempts,
       blockedUntil:
-        failedAttempts >= LOGIN_ATTEMPT_LIMIT ? now + LOGIN_BLOCK_MS : 0,
+        failedAttempts >= bucket.limit ? now + LOGIN_BLOCK_MS : 0,
       updatedAt: now,
     });
   }
@@ -192,12 +249,13 @@ function consumeLocalLoginAttempt(
 }
 
 async function consumeDatabaseLoginAttempt(
-  keyHashes: string[],
+  buckets: LoginThrottleBucket[],
   now: number,
 ): Promise<LoginThrottleDecision> {
   const pool = getPool();
-  if (!pool) return consumeLocalLoginAttempt(keyHashes, now);
+  if (!pool) return consumeLocalLoginAttempt(buckets, now);
   await ensureAdminTable();
+  const keyHashes = buckets.map((b) => b.keyHash);
   const client = await pool.connect();
 
   try {
@@ -229,8 +287,8 @@ async function consumeDatabaseLoginAttempt(
       };
     }
 
-    for (const keyHash of keyHashes) {
-      const previous = entries.get(keyHash);
+    for (const bucket of buckets) {
+      const previous = entries.get(bucket.keyHash);
       const windowStartedAt = previous
         ? new Date(previous.window_started_at as string | Date).getTime()
         : 0;
@@ -243,7 +301,7 @@ async function consumeDatabaseLoginAttempt(
         ? new Date(now)
         : new Date(windowStartedAt);
       const nextBlockedUntil =
-        failedAttempts >= LOGIN_ATTEMPT_LIMIT
+        failedAttempts >= bucket.limit
           ? new Date(now + LOGIN_BLOCK_MS)
           : null;
 
@@ -256,7 +314,7 @@ async function consumeDatabaseLoginAttempt(
            failed_attempts = EXCLUDED.failed_attempts,
            blocked_until = EXCLUDED.blocked_until,
            updated_at = NOW()`,
-        [keyHash, nextWindowStartedAt, failedAttempts, nextBlockedUntil],
+        [bucket.keyHash, nextWindowStartedAt, failedAttempts, nextBlockedUntil],
       );
     }
 
@@ -279,13 +337,20 @@ async function consumeDatabaseLoginAttempt(
 
 async function getOrInitInMemoryAdmin(): Promise<InMemoryAdmin> {
   if (!globals.__dataStackInMemoryAdmin) {
+    const envPassword = process.env.DATASTACK_ADMIN_PASSWORD;
+    const allowDemo =
+      !isProductionEnv() && process.env.DATASTACK_ALLOW_DEMO_ADMIN !== "false";
+
+    if (!envPassword && !allowDemo) {
+      throw new Error("Admin account has not completed initial setup.");
+    }
+
     const defaultEmail = (
       process.env.DATASTACK_ADMIN_EMAIL || "admin@datastack.dev"
     )
       .trim()
       .toLowerCase();
-    const defaultPassword =
-      process.env.DATASTACK_ADMIN_PASSWORD || "admin12345678";
+    const defaultPassword = envPassword || "admin12345678";
     const salt = randomBytes(PASSWORD_SALT_BYTES);
     const hash = await derivePasswordHash(defaultPassword, salt);
     globals.__dataStackInMemoryAdmin = {
@@ -293,6 +358,7 @@ async function getOrInitInMemoryAdmin(): Promise<InMemoryAdmin> {
       email: defaultEmail,
       passwordSalt: salt,
       passwordHash: hash,
+      tokenVersion: 1,
       createdAt: new Date(),
     };
   }
@@ -302,24 +368,26 @@ async function getOrInitInMemoryAdmin(): Promise<InMemoryAdmin> {
 export async function consumeAdminLoginAttempt(
   email: string,
   secret: string,
+  ip = "unknown",
 ): Promise<LoginThrottleDecision> {
-  const keyHashes = createLoginThrottleKeys(email, secret);
+  const buckets = createLoginThrottleBuckets(email, secret, ip);
   const now = Date.now();
 
   const pool = getPool();
   if (!pool) {
-    return consumeLocalLoginAttempt(keyHashes, now);
+    return consumeLocalLoginAttempt(buckets, now);
   }
 
-  try {
-    return await consumeDatabaseLoginAttempt(keyHashes, now);
-  } catch {
-    return consumeLocalLoginAttempt(keyHashes, now);
-  }
+  return await consumeDatabaseLoginAttempt(buckets, now);
 }
 
-export async function clearAdminLoginAttempts(email: string, secret: string) {
-  const keyHashes = createLoginThrottleKeys(email, secret);
+export async function clearAdminLoginAttempts(
+  email: string,
+  secret: string,
+  ip = "unknown",
+) {
+  const buckets = createLoginThrottleBuckets(email, secret, ip);
+  const keyHashes = buckets.map((b) => b.keyHash);
 
   const pool = getPool();
   if (!pool) {
@@ -327,50 +395,45 @@ export async function clearAdminLoginAttempts(email: string, secret: string) {
     return;
   }
 
+  await ensureAdminTable();
+  const client = await pool.connect();
   try {
-    await ensureAdminTable();
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      await lockLoginThrottleKeys(client, keyHashes);
-      await client.query(
-        "DELETE FROM admin_login_attempts WHERE key_hash = ANY($1::text[])",
-        [keyHashes],
-      );
-      await client.query("COMMIT");
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
-    }
-  } catch {
-    keyHashes.forEach((keyHash) => localLoginThrottle.delete(keyHash));
+    await client.query("BEGIN");
+    await lockLoginThrottleKeys(client, keyHashes);
+    await client.query(
+      "DELETE FROM admin_login_attempts WHERE key_hash = ANY($1::text[])",
+      [keyHashes],
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
   }
 }
 
 export function verifyAdminSetupKey(candidate: string) {
-  const expected =
-    process.env.DATASTACK_ADMIN_SETUP_KEY ||
-    "datastack-default-setup-key-32-chars";
-  if (!expected || expected.length < 32) return false;
+  const expected = getAdminSetupKey();
+  if (!expected || expected.length < 32 || !candidate) return false;
   return matchesSecret(candidate, expected);
 }
 
 export async function isAdminSetupComplete() {
   const pool = getPool();
   if (!pool) {
-    return true;
+    if (globals.__dataStackInMemoryAdmin) {
+      return true;
+    }
+    if (isProductionEnv()) {
+      return Boolean(process.env.DATASTACK_ADMIN_PASSWORD);
+    }
+    return process.env.DATASTACK_ALLOW_DEMO_ADMIN !== "false";
   }
-  try {
-    await ensureAdminTable();
-    const result = await pool.query(
-      "SELECT 1 FROM admin_users WHERE id = 1",
-    );
-    return result.rowCount === 1;
-  } catch {
-    return true;
-  }
+
+  await ensureAdminTable();
+  const result = await pool.query("SELECT 1 FROM admin_users WHERE id = 1");
+  return result.rowCount === 1;
 }
 
 export async function createInitialAdmin(email: string, password: string) {
@@ -380,134 +443,174 @@ export async function createInitialAdmin(email: string, password: string) {
   const pool = getPool();
 
   if (!pool) {
+    if (globals.__dataStackInMemoryAdmin) {
+      return false;
+    }
     globals.__dataStackInMemoryAdmin = {
       id: 1,
       email: cleanEmail,
       passwordSalt: salt,
       passwordHash,
+      tokenVersion: 1,
       createdAt: new Date(),
     };
     return true;
   }
 
+  await ensureAdminTable();
+  const client = await pool.connect();
+
   try {
-    await ensureAdminTable();
-    const client = await pool.connect();
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [
+      DATABASE_LOCK_ID,
+    ]);
 
-    try {
-      await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [
-        DATABASE_LOCK_ID,
-      ]);
-
-      const existing = await client.query(
-        "SELECT 1 FROM admin_users WHERE id = 1",
-      );
-      if (existing.rowCount) {
-        await client.query("ROLLBACK");
-        return false;
-      }
-
-      await client.query(
-        `INSERT INTO admin_users (id, email, password_salt, password_hash)
-         VALUES (1, $1, $2, $3)`,
-        [cleanEmail, salt, passwordHash],
-      );
-      await client.query("COMMIT");
-      return true;
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
+    const existing = await client.query(
+      "SELECT 1 FROM admin_users WHERE id = 1",
+    );
+    if (existing.rowCount) {
+      await client.query("ROLLBACK");
+      return false;
     }
-  } catch {
-    globals.__dataStackInMemoryAdmin = {
-      id: 1,
-      email: cleanEmail,
-      passwordSalt: salt,
-      passwordHash,
-      createdAt: new Date(),
-    };
+
+    await client.query(
+      `INSERT INTO admin_users (id, email, password_salt, password_hash, token_version)
+       VALUES (1, $1, $2, $3, 1)`,
+      [cleanEmail, salt, passwordHash],
+    );
+    await client.query("COMMIT");
     return true;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
   }
 }
 
-export async function verifyAdminCredentials(email: string, password: string) {
+export async function authenticateAdminCredentials(
+  email: string,
+  password: string,
+): Promise<{ authenticated: boolean; tokenVersion: number }> {
   const cleanEmail = email.trim().toLowerCase();
   const pool = getPool();
 
   if (pool) {
-    try {
-      await ensureAdminTable();
-      const result = await pool.query(
-        `SELECT email, password_salt, password_hash
-         FROM admin_users
-         WHERE id = 1`,
-      );
-      if (result.rowCount && result.rowCount > 0) {
-        const admin = result.rows[0] as {
-          email: string;
-          password_salt: Buffer;
-          password_hash: Buffer;
-        };
-        const emailMatches = matchesSecret(
-          cleanEmail,
-          admin.email.trim().toLowerCase(),
-        );
-        const actualHash = await derivePasswordHash(
-          password,
-          admin.password_salt,
-        );
-        const passwordMatches = timingSafeEqual(
-          actualHash,
-          admin.password_hash,
-        );
-        return emailMatches && passwordMatches;
-      }
-      if (!process.env.DATASTACK_ADMIN_PASSWORD) {
-        return false;
-      }
-    } catch {
-      // Database connection error, fall back to in-memory admin
+    await ensureAdminTable();
+    const result = await pool.query(
+      `SELECT email, password_salt, password_hash, COALESCE(token_version, 1) AS token_version
+       FROM admin_users
+       WHERE id = 1`,
+    );
+    if (!result.rowCount || result.rowCount === 0) {
+      return { authenticated: false, tokenVersion: 0 };
     }
+    const admin = result.rows[0] as {
+      email: string;
+      password_salt: Buffer;
+      password_hash: Buffer;
+      token_version: number;
+    };
+    const emailMatches = matchesSecret(
+      cleanEmail,
+      admin.email.trim().toLowerCase(),
+    );
+    const actualHash = await derivePasswordHash(password, admin.password_salt);
+    const passwordMatches = timingSafeEqual(actualHash, admin.password_hash);
+    return {
+      authenticated: emailMatches && passwordMatches,
+      tokenVersion: Number(admin.token_version) || 1,
+    };
   }
 
   const inMem = await getOrInitInMemoryAdmin();
   if (!matchesSecret(cleanEmail, inMem.email)) {
-    return false;
+    return { authenticated: false, tokenVersion: 0 };
   }
   const actualHash = await derivePasswordHash(password, inMem.passwordSalt);
-  return timingSafeEqual(actualHash, inMem.passwordHash);
+  const authenticated = timingSafeEqual(actualHash, inMem.passwordHash);
+  return {
+    authenticated,
+    tokenVersion: authenticated ? inMem.tokenVersion : 0,
+  };
+}
+
+export async function verifyAdminCredentials(email: string, password: string) {
+  const result = await authenticateAdminCredentials(email, password);
+  return result.authenticated;
 }
 
 export async function getAdminAccountInfo(fallbackEmail?: string) {
   const pool = getPool();
   if (pool) {
-    try {
-      await ensureAdminTable();
-      const result = await pool.query(
-        `SELECT email, created_at FROM admin_users WHERE id = 1`,
-      );
-      if (result.rowCount && result.rowCount > 0) {
-        const row = result.rows[0] as { email: string; created_at: Date | string };
-        return {
-          email: row.email,
-          createdAt: new Date(row.created_at).toISOString(),
-          storageMode: "PostgreSQL" as const,
-        };
-      }
-    } catch {
-      // Fall back to in-memory admin
+    await ensureAdminTable();
+    const result = await pool.query(
+      `SELECT email, created_at, COALESCE(token_version, 1) AS token_version
+       FROM admin_users
+       WHERE id = 1`,
+    );
+    if (result.rowCount && result.rowCount > 0) {
+      const row = result.rows[0] as {
+        email: string;
+        created_at: Date | string;
+        token_version: number;
+      };
+      return {
+        email: row.email,
+        createdAt: new Date(row.created_at).toISOString(),
+        tokenVersion: Number(row.token_version) || 1,
+        storageMode: "PostgreSQL" as const,
+      };
     }
+    throw new Error("Admin account is not initialized.");
   }
 
   const inMem = await getOrInitInMemoryAdmin();
   return {
     email: fallbackEmail || inMem.email,
     createdAt: inMem.createdAt.toISOString(),
+    tokenVersion: inMem.tokenVersion,
     storageMode: "In-Memory" as const,
   };
+}
+
+export async function verifyRequestAdminSession(
+  cookieToken: string | undefined,
+): Promise<
+  | { valid: true; session: AdminSessionPayload; sessionSecret: string }
+  | { valid: false; reason: "UNCONFIGURED" | "UNAUTHORIZED" | "UNAVAILABLE" }
+> {
+  const sessionSecret = getAdminSessionSecret();
+  if (!sessionSecret) {
+    return { valid: false, reason: "UNCONFIGURED" };
+  }
+  if (!cookieToken) {
+    return { valid: false, reason: "UNAUTHORIZED" };
+  }
+
+  const session = await getAdminSessionPayload(cookieToken, sessionSecret);
+  if (!session) {
+    return { valid: false, reason: "UNAUTHORIZED" };
+  }
+
+  try {
+    const account = await getAdminAccountInfo();
+    const emailMatches = matchesSecret(
+      session.email.trim().toLowerCase(),
+      account.email.trim().toLowerCase(),
+    );
+    if (!emailMatches || session.tokenVersion !== account.tokenVersion) {
+      return { valid: false, reason: "UNAUTHORIZED" };
+    }
+    return { valid: true, session, sessionSecret };
+  } catch (error) {
+    if (getPool()) {
+      return { valid: false, reason: "UNAVAILABLE" };
+    }
+    void error;
+    return { valid: false, reason: "UNAUTHORIZED" };
+  }
 }
 
 export async function updateAdminAccount({
@@ -534,29 +637,42 @@ export async function updateAdminAccount({
 
   const pool = getPool();
   if (pool) {
-    try {
-      await ensureAdminTable();
-      const updated = await pool.query(
-        `UPDATE admin_users
-         SET email = $1, password_salt = $2, password_hash = $3
-         WHERE id = 1`,
-        [cleanEmail, salt, passwordHash],
-      );
-      if (updated.rowCount && updated.rowCount > 0) {
-        return { ok: true as const, email: cleanEmail };
-      }
-    } catch {
-      // Fall back to in-memory update
+    await ensureAdminTable();
+    const updated = await pool.query(
+      `UPDATE admin_users
+       SET email = $1,
+           password_salt = $2,
+           password_hash = $3,
+           token_version = COALESCE(token_version, 1) + 1
+       WHERE id = 1
+       RETURNING token_version`,
+      [cleanEmail, salt, passwordHash],
+    );
+    if (!updated.rowCount || updated.rowCount === 0) {
+      return { ok: false as const, error: "Admin account not found." };
     }
+    return {
+      ok: true as const,
+      email: cleanEmail,
+      tokenVersion: Number(updated.rows[0].token_version) || 1,
+    };
   }
 
   const existing = await getOrInitInMemoryAdmin();
+  const nextVersion = existing.tokenVersion + 1;
   globals.__dataStackInMemoryAdmin = {
     id: 1,
     email: cleanEmail,
     passwordSalt: salt,
     passwordHash,
+    tokenVersion: nextVersion,
     createdAt: existing.createdAt,
   };
-  return { ok: true as const, email: cleanEmail };
+  return { ok: true as const, email: cleanEmail, tokenVersion: nextVersion };
+}
+
+export function resetAdminStateForTests() {
+  globals.__dataStackInMemoryAdmin = undefined;
+  localLoginThrottle.clear();
+  lastLocalThrottleCleanup = 0;
 }

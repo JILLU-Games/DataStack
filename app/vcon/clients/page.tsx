@@ -23,7 +23,11 @@ export default function ClientsPage() {
   const [now, setNow] = useState(() => Date.now());
 
   const fetchClients = useCallback(async () => {
-    const response = await fetch('/api/clients');
+    const response = await fetch('/api/clients', { cache: 'no-store' });
+    if (response.status === 401) {
+      window.location.assign('/vcon/login');
+      return;
+    }
     if (!response.ok) throw new Error('Unable to load clients');
     const data = await response.json();
     setClients(setCached('vcon:clients', data.clients || []));
@@ -49,16 +53,19 @@ export default function ClientsPage() {
         !query ||
         client.clientId.toLowerCase().includes(query) ||
         client.name.toLowerCase().includes(query);
+      const revoked = client.status === 'revoked';
       const online =
         client.status === 'active' &&
         Boolean(client.lastActive) &&
         now - new Date(client.lastActive!).getTime() < 60_000;
       const pending = client.status === 'active' && !client.lastActive;
+      const offline = client.status === 'active' && !online && !pending;
       const matchesStatus =
         statusFilter === 'all' ||
         (statusFilter === 'online' && online) ||
-        (statusFilter === 'offline' && !online && !pending) ||
-        (statusFilter === 'pending' && pending);
+        (statusFilter === 'offline' && offline) ||
+        (statusFilter === 'pending' && pending) ||
+        (statusFilter === 'revoked' && revoked);
       return matchesSearch && matchesStatus;
     });
   }, [clients, now, search, statusFilter]);
@@ -72,7 +79,10 @@ export default function ClientsPage() {
   const pendingCount = clients.filter(
     (client) => client.status === 'active' && !client.lastActive
   ).length;
-  const offlineCount = clients.length - onlineCount - pendingCount;
+  const revokedCount = clients.filter(
+    (client) => client.status === 'revoked'
+  ).length;
+  const offlineCount = clients.length - onlineCount - pendingCount - revokedCount;
 
   return (
     <PageShell
@@ -90,11 +100,13 @@ export default function ClientsPage() {
       }
     >
       <StatStrip
+        className="md:grid-cols-5"
         items={[
           { label: 'Total', value: clients.length },
           { label: 'Online', value: onlineCount, dot: 'ok' },
           { label: 'Offline', value: offlineCount, dot: 'off' },
           { label: 'Pending', value: pendingCount, dot: 'pending' },
+          { label: 'Revoked', value: revokedCount, dot: 'off' },
         ]}
       />
 
@@ -109,6 +121,7 @@ export default function ClientsPage() {
             online: onlineCount,
             offline: offlineCount,
             pending: pendingCount,
+            revoked: revokedCount,
           }}
         />
         <ClientsTable

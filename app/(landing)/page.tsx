@@ -9,10 +9,8 @@ import { redirect } from 'next/navigation';
 export const dynamic = 'force-dynamic';
 
 export default async function LandingPage() {
-  if (process.env.DATABASE_URL) {
-    const isConfigured = await isAdminSetupComplete().catch(() => false);
-    if (!isConfigured) redirect('/vcon/setup');
-  }
+  const isConfigured = await isAdminSetupComplete().catch(() => false);
+  if (!isConfigured) redirect('/vcon/setup');
 
   return (
     <MainLayout>

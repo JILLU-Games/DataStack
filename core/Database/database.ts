@@ -73,6 +73,31 @@ export class DatabaseEngine {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
       `),
+      pool.query(`
+        CREATE TABLE IF NOT EXISTS deleted_clients (
+          client_id TEXT PRIMARY KEY,
+          deleted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `),
+      pool.query(`
+        CREATE TABLE IF NOT EXISTS admin_users (
+          id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+          email TEXT NOT NULL UNIQUE,
+          password_salt BYTEA NOT NULL,
+          password_hash BYTEA NOT NULL,
+          token_version INTEGER NOT NULL DEFAULT 1,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `),
+      pool.query(`
+        CREATE TABLE IF NOT EXISTS admin_login_attempts (
+          key_hash TEXT PRIMARY KEY,
+          window_started_at TIMESTAMPTZ NOT NULL,
+          failed_attempts INTEGER NOT NULL,
+          blocked_until TIMESTAMPTZ,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `),
     ]).then(() => undefined);
 
     try {
