@@ -1,9 +1,8 @@
 # API Engine Manifest
 
 ## Purpose
-Core administrative API services supplying telemetry, aggregation metrics, and export data feeds to Next.js route handlers.
+Aggregates system health, buffer status, client statistics, and CSV storage metrics for the `/vcon/dashboard` administration console (`core/apiEngine/apiService.ts`).
 
 ## Responsibilities
-- Aggregate telemetry across Buffer, CSV Storage, Sockets, and Security
-- Filter and list CSV export datasets
-- Provide consolidated administrative health payloads
+- Queries the Port 4000 ingestion server (`${INGESTION_INTERNAL_URL}/health`) for live `activeSockets` and remote `bufferSize`.
+- Combines remote Socket.IO metrics with local `DataBufferEngine`, `CSVStorageManager`, `SDKManager`, `SecurityEngine`, and `DatabaseEngine` health states.

@@ -18,6 +18,7 @@ interface BufferGlobalState {
 
 type BufferGlobals = typeof globalThis & {
   __dataStackBufferState?: BufferGlobalState;
+  __dataStackBufferShutdownRegistered?: boolean;
 };
 
 const globals = globalThis as BufferGlobals;
@@ -65,6 +66,19 @@ export class DataBufferEngine {
       state.flushTimer = setInterval(() => {
         void this.flush();
       }, state.batchFlushIntervalMs);
+    }
+
+    if (
+      typeof process !== 'undefined' &&
+      typeof process.on === 'function' &&
+      !globals.__dataStackBufferShutdownRegistered
+    ) {
+      globals.__dataStackBufferShutdownRegistered = true;
+      const flushOnExit = () => {
+        void this.flush().catch(() => undefined);
+      };
+      process.on('SIGTERM', flushOnExit);
+      process.on('SIGINT', flushOnExit);
     }
   }
 

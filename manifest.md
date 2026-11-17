@@ -1,14 +1,21 @@
 # DataStack Platform Root Manifest
 
 ## Purpose
-Root level orchestration and system manifest for the DataStack Universal Realtime Data Collection Platform.
+Root directory manifest for **DataStack**, an open-source, self-hosted real-time telemetry and event logging platform developed by **[Vib Tools](https://vib.tools/)**.
 
-## Directory Index
-- `app/`: Next.js App Router providing `/` (Landing page) and `/vcon/*` (Admin Console)
-- `components/`: Single source of truth UI (`components/ui/`) and layout (`components/layout/`)
-- `core/`: Core backend modules (auth, connector, data, storage, sdk, security, settings, server)
-- `server/`: Dedicated Express + Socket.IO process on Port 4000
-- `storage/`: Persisted CSV files under `/storage/data/{clientId}/{YYYY-MM-DD}.csv`
-- `sdk-python/`: Pip-installable Python SDK (`datastack-sdk`)
-- `docker/`: Docker Compose and Dockerfile deployment specs
-- `nginx/`: Reverse proxy configuration for WebSocket and Web traffic
+## Directory & Governance Index
+- `app/`: Next.js 15 App Router serving `/` (public overview), `/vcon/*` (administration console), and `/api/*` (REST endpoints for auth, clients, events, data, storage, settings, and streaming export).
+- `components/`: Single-source-of-truth UI primitives (`components/ui/`), layout shells (`components/layout/`), and page sections (`components/sections/`).
+- `core/`: Backend TypeScript modules (`auth`, `data`, `Database`, `Storage`, `Security`, `sdk`, `adminSettings`, `apiEngine`).
+- `server/`: Dedicated Express + Socket.IO ingestion service on Port 4000 (`index.js`, `socket/handlers.js`, `workers/csvWriter.js`).
+- `storage/`: Partitioned CSV data directory (`/storage/data/{clientId}/{YYYY-MM-DD}.csv`).
+- `sdk-python/`: Official pip-installable Python client library (`datastack-sdk`).
+- `docker/`: Production Dockerfiles (`Dockerfile.web`, `Dockerfile.server`, `Dockerfile.proxy`), Nginx config, and `docker-compose.yml`.
+- `nginx/`: Local Nginx reverse proxy configuration (`default.conf`).
+- `README.md`: Comprehensive A–Z project documentation, quickstart, architecture, and deployment guide.
+- `AGENTS.md`: Architecture rules and engineering conventions.
+- `CONTRIBUTING.md`: Open-source contribution guidelines and local development workflow.
+- `SECURITY.md`: Built-in security architecture and vulnerability reporting policy (`support@vibtools.io`).
+- `CODE_OF_CONDUCT.md`: Community code of conduct.
+- `CHANGELOG.md`: Release history and version notes.
+- `LICENSE`: Open-source MIT License (`Copyright (c) 2026 Vib Tools`).

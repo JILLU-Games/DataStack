@@ -1,12 +1,14 @@
 # Database Engine Manifest
 
 ## Purpose
-Database layer managing PostgreSQL schema via Prisma ORM.
+Manages the shared PostgreSQL connection pool (`pg.Pool`), automatic metadata table initialization, and live database health probes (`core/Database/database.ts`).
 
-## Absolute Constraint
-PostgreSQL is utilized ONLY for:
-1. Client SDK registrations and API keys
-2. Admin settings and feature flags
-3. System audit logs
+## Managed PostgreSQL Tables
+PostgreSQL is dedicated strictly to platform metadata and security state:
+1. `admin_users`: Administrator account credentials (scrypt password hashes).
+2. `admin_login_attempts`: Brute-force login attempt counters and lockout timestamps.
+3. `client_sdks`: Registered SDK clients, signed JWT tokens, rate limits, status (`active` / `revoked`), and event counters.
+4. `admin_settings`: Global runtime settings (`max_events_per_sec`, `max_payload_size_kb`, `batch_flush_threshold`, `batch_flush_interval_ms`, `file_rotation_mb`, `jwt_secret`, `enable_idempotency`, `auto_prune_days`).
 
-**Collected realtime data is NEVER stored per-row in PostgreSQL.** It is stored exclusively in rotated CSV files at `/storage/data/{clientId}/{YYYY-MM-DD}.csv`.
+## Storage Separation Rule
+Collected event streams are **never** inserted per-row into PostgreSQL; they are written exclusively in batches to partitioned CSV files under `/storage/data/{clientId}/{YYYY-MM-DD}.csv`.

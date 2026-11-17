@@ -1,4 +1,4 @@
-# Nginx Proxy Manifest
+# Nginx Reverse Proxy Manifest (`nginx/`)
 
 ## Purpose
-Reverse proxy configuration mapping `/socket.io/` WebSocket traffic to the Express ingestion server on Port 4000, and HTTP web traffic to Next.js on Port 3000.
+Local and container reverse proxy configuration (`nginx/default.conf`) routing `/socket.io/` WebSocket connections to the Express + Socket.IO ingestion service on Port `4000` and standard HTTP requests to the Next.js server on Port `3000`.

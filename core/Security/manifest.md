@@ -1,12 +1,9 @@
 # Security Engine Manifest
 
 ## Purpose
-Enforces client rate-limiting, event idempotency verification, and payload size bounds.
+Enforces per-client sliding-window rate limits, payload size bounds, and event idempotency deduplication (`core/Security/security.ts`).
 
-## Key Logic
-- **Idempotency**: Drops duplicate `clientId + eventId` within a 5-minute TTL window.
-- **Rate Limit**: Sliding per-second window configurable per client or globally.
-- **Payload Guard**: Rejects payloads exceeding 100KB per event with explicit codes.
-
-## Dependencies
-- Native Node.js `Buffer`, `Map`
+## Key Responsibilities
+- **Idempotency Deduplication**: Rejects duplicate `clientId:eventId` pairs within a 5-minute TTL window.
+- **Sliding-Window Rate Limiter**: Enforces the lower of the client's configured `rateLimit` and the global `maxEventsPerSec` limit.
+- **Payload Size Guard**: Rejects individual event payloads exceeding `maxPayloadSizeBytes` (default `100 KB`).

@@ -159,9 +159,48 @@ function scheduleFlushTimer(intervalMs) {
 
 scheduleFlushTimer(runtimeConfig.batchFlushIntervalMs);
 
+async function ensureDatabaseSchema() {
+  if (!dbPool) return;
+  try {
+    await dbPool.query(`
+      CREATE TABLE IF NOT EXISTS client_sdks (
+        client_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        secret TEXT NOT NULL,
+        token TEXT NOT NULL,
+        rate_limit INTEGER NOT NULL DEFAULT 100,
+        status TEXT NOT NULL DEFAULT 'active',
+        total_events BIGINT NOT NULL DEFAULT 0,
+        last_active TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await dbPool.query(`
+      CREATE TABLE IF NOT EXISTS admin_settings (
+        id TEXT PRIMARY KEY DEFAULT 'default',
+        server_port INTEGER NOT NULL DEFAULT 4000,
+        web_port INTEGER NOT NULL DEFAULT 3000,
+        max_events_per_sec INTEGER NOT NULL DEFAULT 100,
+        max_payload_size_kb INTEGER NOT NULL DEFAULT 100,
+        batch_flush_threshold INTEGER NOT NULL DEFAULT 500,
+        batch_flush_interval_ms INTEGER NOT NULL DEFAULT 2000,
+        file_rotation_mb INTEGER NOT NULL DEFAULT 100,
+        jwt_secret TEXT NOT NULL,
+        enable_idempotency BOOLEAN NOT NULL DEFAULT true,
+        auto_prune_days INTEGER NOT NULL DEFAULT 30,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+  } catch {
+    // Ignore transient startup DB error; retried on next sync cycle
+  }
+}
+
 async function syncSettingsFromDatabase() {
   if (!dbPool) return;
   try {
+    await ensureDatabaseSchema();
     const res = await dbPool.query(
       `SELECT max_events_per_sec, max_payload_size_kb, batch_flush_threshold,
               batch_flush_interval_ms, file_rotation_mb, jwt_secret, enable_idempotency
@@ -196,13 +235,14 @@ async function syncSettingsFromDatabase() {
       scheduleFlushTimer(nextIntervalMs);
     }
   } catch {
-    // Keep existing runtimeConfig if table is not created yet
+    // Keep existing runtimeConfig if table is not ready yet
   }
 }
 
+let settingsSyncTimer = null;
 if (dbPool) {
   void syncSettingsFromDatabase();
-  setInterval(() => {
+  settingsSyncTimer = setInterval(() => {
     void syncSettingsFromDatabase();
   }, 3000);
 }
@@ -250,6 +290,47 @@ setupSocketHandlers(io, bufferQueue, writer, {
       void flushBuffer();
     }
   },
+});
+
+let isShuttingDown = false;
+async function gracefulShutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`[DataStack Ingestion Engine] Received ${signal}, flushing buffer before exit...`);
+
+  if (flushTimer) {
+    clearInterval(flushTimer);
+    flushTimer = null;
+  }
+  if (settingsSyncTimer) {
+    clearInterval(settingsSyncTimer);
+    settingsSyncTimer = null;
+  }
+
+  try {
+    await flushBuffer();
+  } catch {
+    // Best-effort flush on exit
+  }
+
+  try {
+    io.close();
+    server.close();
+    if (dbPool) {
+      await dbPool.end();
+    }
+  } catch {
+    // Ignore close errors
+  }
+
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => {
+  void gracefulShutdown('SIGTERM');
+});
+process.on('SIGINT', () => {
+  void gracefulShutdown('SIGINT');
 });
 
 server.listen(PORT, () => {

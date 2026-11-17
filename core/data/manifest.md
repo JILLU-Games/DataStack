@@ -1,12 +1,9 @@
-# Data Management Manifest
+# Data Buffer Engine Manifest
 
 ## Purpose
-In-memory and Redis buffer engine for high-throughput batching of collected events.
+In-memory event batching engine (`core/data/buffer.ts`) that queues incoming events and flushes them in batches to partitioned CSV files on disk.
 
-## Key Logic
-- Buffers events in memory to prevent per-event disk I/O.
-- Flushes batch to CSV Storage on threshold (500 items) or interval (2000ms).
-- Delivers live events to UI subscribers for real-time monitoring.
-
-## Dependencies
-- `core/Storage/csvStorage`
+## Key Responsibilities
+- Queues validated events in memory to avoid per-event disk I/O overhead.
+- Automatically flushes queued batches to `CSVStorageManager.appendBatch()` when the queue reaches `batchFlushThreshold` (`500` events) or when the periodic flush timer (`batchFlushIntervalMs`, default `2000ms`) fires.
+- Supports dynamic timer rescheduling via `setFlushInterval(intervalMs)` when updated in `/vcon/settings`.

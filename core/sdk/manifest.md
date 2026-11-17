@@ -1,12 +1,9 @@
-# SDK Management Manifest
+# SDK Management Engine Manifest
 
 ## Purpose
-Manages client SDK credentials, client registration, tokens, and client-level throughput rate limits.
+Manages Client SDK registrations, JWT credentials, throughput rate limits, and activity counters (`core/sdk/sdkManager.ts`) backed by PostgreSQL (`client_sdks`).
 
-## Key Logic
-- Generates API keys and signed JWT client tokens.
-- Tracks client registration status (active/revoked), event counters, and last-active timestamp.
-- Allows immediate token revocation or rate limit reconfiguration.
-
-## Dependencies
-- `core/auth/jwt`
+## Key Responsibilities
+- Registers new clients with unique secret keys and signed JWT tokens.
+- Persists client status (`active` / `revoked`), per-client `rateLimit`, `totalEvents`, and `lastActive` timestamps in PostgreSQL `client_sdks`.
+- Supports one-click credential rotation (`regenerateTokenAsync`), status toggling (`updateClientAsync`), permanent removal (`deleteClientAsync`), and bulk token re-signing (`resignAllClientTokensAsync`) when the platform JWT secret is updated.

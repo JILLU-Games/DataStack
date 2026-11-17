@@ -1,15 +1,14 @@
-# Core Backend Engine Manifest
+# Core Backend Modules Manifest
 
 ## Purpose
-Modular backend subsystems for DataStack:
-- `auth`: JWT verification and generation
-- `connector`: Socket.IO intake and handshake handling
-- `data`: In-memory and Redis buffer management
-- `Storage`: CSV file partition writing and rotation
-- `Security`: Rate limiter, payload validator, idempotency checker
-- `sdk`: Client SDK registry and credentials
-- `adminSettings`: Configuration state
-- `Database`: PostgreSQL / Prisma schema metadata
-- `notification`: System alerts and audit events
-- `Server`: Express + Socket.IO process (Port 4000)
-- `apiEngine`: Aggregated data providers for REST API
+Core TypeScript backend engines powering authentication, client SDK management, event buffering, CSV partition storage, and PostgreSQL metadata persistence.
+
+## Submodules
+- `auth/`: Client JWT signing/verification (`jwt.ts`), WebCrypto HMAC-SHA256 admin session tokens (`adminSession.ts`), and PostgreSQL scrypt admin user/lockout management (`adminUsers.ts`).
+- `Database/`: Shared PostgreSQL connection pool (`pg.Pool`), automatic schema initialization (`client_sdks`, `admin_settings`), and live `SELECT 1` health checks (`database.ts`).
+- `sdk/`: Client SDK registration, token rotation, status revocation, deletion, and event counters backed by PostgreSQL (`sdkManager.ts`).
+- `adminSettings/`: Platform runtime configuration store backed by PostgreSQL with live propagation to security, buffer, and storage engines (`settingsManager.ts`).
+- `data/`: In-memory event batching queue with configurable flush threshold and interval timer (`buffer.ts`).
+- `Storage/`: Partitioned CSV writer (`/storage/data/{clientId}/{YYYY-MM-DD}.csv`), size-based file rotation (`-part2.csv`), and retention pruning (`csvStorage.ts`).
+- `Security/`: Per-client sliding-window rate limiter, 5-minute TTL idempotency deduplication, and payload byte-size validation (`security.ts`).
+- `apiEngine/`: Consolidated dashboard metrics aggregator combining local storage stats with Port 4000 `/health` telemetry (`apiService.ts`).

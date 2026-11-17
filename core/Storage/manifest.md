@@ -1,14 +1,10 @@
-# Storage Engine Manifest
+# CSV Storage Engine Manifest
 
 ## Purpose
-File-based CSV storage engine. All collected data is persisted strictly to CSV files (zero per-row database inserts).
+Partitioned CSV file storage engine (`core/Storage/csvStorage.ts`) responsible for writing, rotating, inspecting, and pruning collected event datasets on disk.
 
-## Conventions
-- **Path**: `/storage/data/{clientId}/{YYYY-MM-DD}.csv`
-- **Schema**: `clientId, eventId, timestamp, payload`
-- **Rotation**: Rotates per-day or when single file reaches 100MB limit (`-part2.csv`).
-- **Batching**: Never writes per-event. Flushes buffered arrays using `json2csv` parser.
-
-## Dependencies
-- `json2csv`
-- Node.js `fs`, `path`
+## Storage Conventions
+- **Path Pattern**: `/storage/data/{clientId}/{YYYY-MM-DD}.csv`
+- **Columns**: `clientId,eventId,timestamp,payload`
+- **Size & Daily Rotation**: Creates a new daily file per client and rotates to `{YYYY-MM-DD}-part2.csv` when a file reaches `maxFileSizeBytes` (configurable via `fileRotationMb`, default `100MB`).
+- **Retention Pruning**: `pruneExpiredPartitions(autoPruneDays)` automatically removes daily CSV partitions older than the configured retention period.
