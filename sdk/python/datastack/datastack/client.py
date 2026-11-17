@@ -7,12 +7,14 @@ Features:
 - Automatic Heartbeat HTTP Fallback (`POST /api/events`) when WebSocket closes or disconnects.
 - Automatic WebSocket reconnection, handshake verification (`ping_verify`), and return to IDLE mode.
 - Offline Disk Spooling (`.datastack_spool/spool.jsonl`) when the client device loses internet,
-  with automatic replay when connectivity returns.
-- Direct `.csv`, `.json`, and `.jsonl` file ingestion (`send_file()`) with automatic batch chunking
-  (`413 PAYLOAD_TOO_LARGE` auto-splitting) and exponential backoff retries (`429 RATE_LIMIT_EXCEEDED`).
+  with automatic paced replay when connectivity returns.
+- Direct `.csv`, `.json`, and `.jsonl` file ingestion (`send_file()`) with deterministic SHA-256
+  `eventId` deduplication, automatic batch chunking (`413 PAYLOAD_TOO_LARGE` auto-splitting),
+  and lossless partial-batch rate-limit retry (`429 RATE_LIMIT_EXCEEDED`).
 """
 
 import csv
+import hashlib
 import json
 import logging
 import random
@@ -38,6 +40,7 @@ except ImportError:
 from .config import DataStackConfig, load_config
 from .exceptions import (
     DataStackAuthError,
+    DataStackConfigError,
     DataStackConnectionError,
     DataStackError,
     DataStackFileError,
@@ -58,6 +61,17 @@ def _make_event_id() -> str:
     return f"evt_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
 
 
+def _make_deterministic_file_event_id(
+    file_stem: str, row_index: int, record: Any
+) -> str:
+    raw = f"{file_stem}:{row_index}:{json.dumps(record, sort_keys=True, default=str, ensure_ascii=False)}"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+    safe_stem = "".join(
+        ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in file_stem
+    )[:32]
+    return f"file_{safe_stem}_{row_index}_{digest}"
+
+
 class DataStackClient:
     """
     Production-grade DataStack Python Client with `config.datastack.py` auto-loading,
@@ -71,8 +85,20 @@ class DataStackClient:
         api_url: Optional[str] = None,
         config_path: Optional[str] = None,
         auto_connect: Optional[bool] = None,
+        reconnection_attempts: Optional[int] = None,
+        reconnection_delay: Optional[float] = None,
         **kwargs: Any,
     ) -> None:
+        if reconnection_attempts is not None and "MAX_RETRIES" not in kwargs:
+            kwargs["MAX_RETRIES"] = reconnection_attempts
+        if (
+            reconnection_delay is not None
+            and "HEARTBEAT_INTERVAL_SEC" not in kwargs
+        ):
+            kwargs["HEARTBEAT_INTERVAL_SEC"] = reconnection_delay
+
+        # If legacy caller passes explicit server_url/token without auto_connect, default auto_connect to False
+        # ONLY if config.datastack.py was not used and auto_connect was not explicitly specified.
         self.config: DataStackConfig = load_config(
             config_path=config_path,
             require_token=False,
@@ -88,6 +114,7 @@ class DataStackClient:
         self.token = self.config.client_token
         self.is_connected = False
         self._lock = threading.RLock()
+        self._is_draining_spool = False
 
         # Offline Disk Spooler
         self.spooler = DiskSpooler(
@@ -115,8 +142,10 @@ class DataStackClient:
         if self.sio is not None:
             self._register_socket_events()
 
-        if self.config.auto_connect and self.token and (
-            self.token != "REPLACE_WITH_YOUR_CLIENT_JWT_TOKEN"
+        if (
+            self.config.auto_connect
+            and self.token
+            and self.token != "REPLACE_WITH_YOUR_CLIENT_JWT_TOKEN"
         ):
             try:
                 self.connect()
@@ -127,6 +156,23 @@ class DataStackClient:
                     "[DataStack] Initial connect entered fallback/recovery mode: %s",
                     exc,
                 )
+
+    def __enter__(self) -> "DataStackClient":
+        if (
+            not self.is_connected
+            and self.token
+            and self.token != "REPLACE_WITH_YOUR_CLIENT_JWT_TOKEN"
+        ):
+            try:
+                self.connect()
+            except DataStackAuthError:
+                raise
+            except Exception:
+                pass
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.disconnect()
 
     def _register_socket_events(self) -> None:
         if self.sio is None:
@@ -174,13 +220,11 @@ class DataStackClient:
 
     def _ensure_token_present(self) -> None:
         if not self.token or self.token == "REPLACE_WITH_YOUR_CLIENT_JWT_TOKEN":
-            from .exceptions import DataStackConfigError
-
             raise DataStackConfigError(
                 "Missing CLIENT_TOKEN. Set CLIENT_TOKEN in `config.datastack.py` or pass token='...'."
             )
 
-    def connect(self) -> bool:
+    def connect(self, wait_timeout: Optional[float] = None) -> bool:
         """
         Establishes the primary WebSocket connection on Port 4000 and verifies the
         handshake via `ping_verify`. If WebSocket is unavailable and `ENABLE_HTTP_FALLBACK`
@@ -191,7 +235,7 @@ class DataStackClient:
         self.heartbeat.start()
 
         try:
-            if self._connect_and_verify_websocket():
+            if self._connect_and_verify_websocket(wait_timeout=wait_timeout):
                 self._drain_offline_spool()
                 self.heartbeat.set_idle_connected()
                 return True
@@ -231,9 +275,17 @@ class DataStackClient:
                 except Exception:
                     pass
 
-    def _connect_and_verify_websocket(self) -> bool:
+    def _connect_and_verify_websocket(
+        self, wait_timeout: Optional[float] = None
+    ) -> bool:
         if self.sio is None:
             return False
+
+        effective_timeout = (
+            float(wait_timeout)
+            if wait_timeout is not None
+            else self.config.request_timeout_sec
+        )
 
         with self._lock:
             if self.sio.connected:
@@ -249,7 +301,7 @@ class DataStackClient:
                     auth={"token": self.token},
                     headers={"Authorization": f"Bearer {self.token}"},
                     transports=["websocket", "polling"],
-                    wait_timeout=self.config.request_timeout_sec,
+                    wait_timeout=effective_timeout,
                 )
                 self.is_connected = True
             except Exception as exc:
@@ -260,9 +312,11 @@ class DataStackClient:
                 return False
 
         # Verify handshake & PostgreSQL client status via `ping_verify`
-        return self._verify_websocket_handshake()
+        return self._verify_websocket_handshake(timeout=effective_timeout)
 
-    def _verify_websocket_handshake(self) -> bool:
+    def _verify_websocket_handshake(
+        self, timeout: Optional[float] = None
+    ) -> bool:
         if self.sio is None or not self.sio.connected:
             return False
 
@@ -274,15 +328,18 @@ class DataStackClient:
                 result_holder.update(resp)
             ack_event.set()
 
+        wait_sec = timeout or self.config.request_timeout_sec
         try:
             self.sio.emit("ping_verify", {}, callback=on_verify)
-            if not ack_event.wait(timeout=self.config.request_timeout_sec):
+            if not ack_event.wait(timeout=wait_sec):
                 return False
         except Exception:
             return False
 
         if not result_holder.get("success"):
-            err_msg = str(result_holder.get("error") or "Handshake verification failed")
+            err_msg = str(
+                result_holder.get("error") or "Handshake verification failed"
+            )
             if self._is_non_retryable_auth_error(err_msg):
                 raise DataStackAuthError(err_msg)
             return False
@@ -297,6 +354,7 @@ class DataStackClient:
            so `HeartbeatMonitor` transitions back to `CONNECTED_IDLE` (IDLE mode).
         3. If WebSocket is still down, checks if HTTP fallback (`Port 3000`) is online:
            - If HTTP is online, drains offline spooled events over HTTP and remains in `FALLBACK_HTTP`.
+           - If HTTP returns `401/403` auth revocation, stops Heartbeat immediately.
            - If HTTP is also unreachable, sets state to `OFFLINE_SPOOL`.
         """
         self.heartbeat.set_reconnecting()
@@ -311,11 +369,15 @@ class DataStackClient:
             pass
 
         # WebSocket still unavailable; check HTTP availability
-        if self.config.enable_http_fallback and self._check_http_health():
-            self.heartbeat.trigger_fallback(
-                reason="WebSocket still unavailable; HTTP fallback active"
-            )
-            self._drain_offline_spool()
+        try:
+            if self.config.enable_http_fallback and self._check_http_health():
+                self.heartbeat.trigger_fallback(
+                    reason="WebSocket still unavailable; HTTP fallback active"
+                )
+                self._drain_offline_spool()
+                return False
+        except DataStackAuthError as auth_err:
+            self.heartbeat.stop(reason=str(auth_err))
             return False
 
         self.heartbeat.trigger_offline(
@@ -324,12 +386,30 @@ class DataStackClient:
         return False
 
     def _check_http_health(self) -> bool:
+        """
+        Probes `GET {API_URL}/api/health` with the client's Bearer JWT token.
+        Raises `DataStackAuthError` and halts Heartbeat if client credentials were
+        revoked or rotated (`401` / `403`). Returns `True` ONLY on `2xx` with
+        `status == 'online'`.
+        """
         url = f"{self.api_url}/api/health"
         try:
-            status_code, _ = self._http_request("GET", url, payload=None, timeout=3.0)
-            return 200 <= status_code < 500
+            status_code, body = self._http_request(
+                "GET", url, payload=None, timeout=3.0
+            )
         except Exception:
             return False
+
+        err_code = str(body.get("code") or "")
+        err_msg = str(body.get("error") or f"HTTP {status_code}")
+
+        if status_code in (401, 403) or self._is_non_retryable_auth_error(
+            f"{err_code} {err_msg}"
+        ):
+            self.heartbeat.stop(reason=err_msg)
+            raise DataStackAuthError(err_msg, code=err_code or "AUTH_ERROR")
+
+        return 200 <= status_code < 300 and body.get("status") == "online"
 
     def _http_request(
         self,
@@ -357,7 +437,9 @@ class DataStackClient:
                 body = resp.json() if resp.text else {}
             except Exception:
                 body = {"error": resp.text}
-            return resp.status_code, body if isinstance(body, dict) else {"data": body}
+            return resp.status_code, (
+                body if isinstance(body, dict) else {"data": body}
+            )
 
         # Standard library urllib fallback when `requests` is not installed
         data_bytes = (
@@ -384,7 +466,9 @@ class DataStackClient:
                 parsed_err = {"error": raw_err or str(http_err)}
             return (
                 http_err.code,
-                parsed_err if isinstance(parsed_err, dict) else {"error": str(parsed_err)},
+                parsed_err
+                if isinstance(parsed_err, dict)
+                else {"error": str(parsed_err)},
             )
 
     def _send_via_http_fallback(
@@ -404,22 +488,31 @@ class DataStackClient:
                 "transport": "HTTP_FALLBACK",
             }
 
-        err_msg = str(body.get("error") or f"HTTP {status_code}")
+        errors_list = body.get("errors")
+        first_err = (
+            errors_list[0]
+            if isinstance(errors_list, list) and len(errors_list) > 0
+            else None
+        )
+        err_msg = str(body.get("error") or first_err or f"HTTP {status_code}")
         err_code = str(body.get("code") or "")
+        combined = f"{err_code} {err_msg}"
 
         if status_code in (401, 403) or self._is_non_retryable_auth_error(
-            f"{err_code} {err_msg}"
+            combined
         ):
             self.heartbeat.stop(reason=err_msg)
             raise DataStackAuthError(err_msg, code=err_code or "AUTH_ERROR")
 
-        if status_code == 413 or "PAYLOAD_TOO_LARGE" in f"{err_code} {err_msg}":
+        if status_code == 413 or "PAYLOAD_TOO_LARGE" in combined:
             raise DataStackPayloadTooLargeError(err_msg)
 
-        if status_code == 429 or "RATE_LIMIT_EXCEEDED" in f"{err_code} {err_msg}":
+        if status_code == 429 or "RATE_LIMIT_EXCEEDED" in combined:
             raise DataStackRateLimitError(err_msg)
 
-        raise DataStackConnectionError(f"HTTP fallback error ({status_code}): {err_msg}")
+        raise DataStackConnectionError(
+            f"HTTP fallback error ({status_code}): {err_msg}"
+        )
 
     def _emit_via_websocket(
         self,
@@ -428,7 +521,9 @@ class DataStackClient:
         timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         if self.sio is None or not self.is_connected or not self.sio.connected:
-            raise DataStackConnectionError("WebSocket is not currently connected")
+            raise DataStackConnectionError(
+                "WebSocket is not currently connected"
+            )
 
         ack_event = threading.Event()
         response_data: Dict[str, Any] = {}
@@ -442,8 +537,12 @@ class DataStackClient:
             self.sio.emit(event_name, payload, callback=ack_callback)
         except Exception as exc:
             self.is_connected = False
-            self.heartbeat.trigger_fallback(reason=f"WebSocket emit error: {exc}")
-            raise DataStackConnectionError(f"WebSocket emit failed: {exc}") from exc
+            self.heartbeat.trigger_fallback(
+                reason=f"WebSocket emit error: {exc}"
+            )
+            raise DataStackConnectionError(
+                f"WebSocket emit failed: {exc}"
+            ) from exc
 
         wait_sec = timeout or self.config.request_timeout_sec
         if not ack_event.wait(timeout=wait_sec):
@@ -456,15 +555,28 @@ class DataStackClient:
             )
 
         if not response_data.get("success", False):
-            err_msg = str(response_data.get("error") or "WebSocket event rejected")
-            if self._is_non_retryable_auth_error(err_msg):
+            errors_list = response_data.get("errors")
+            first_err = (
+                errors_list[0]
+                if isinstance(errors_list, list) and len(errors_list) > 0
+                else None
+            )
+            err_msg = str(
+                response_data.get("error")
+                or first_err
+                or "WebSocket event rejected"
+            )
+            err_code = str(response_data.get("code") or "")
+            combined = f"{err_code} {err_msg}"
+
+            if self._is_non_retryable_auth_error(combined):
                 self.heartbeat.stop(reason=err_msg)
-                raise DataStackAuthError(err_msg)
-            if "PAYLOAD_TOO_LARGE" in err_msg:
+                raise DataStackAuthError(err_msg, code=err_code or "AUTH_ERROR")
+            if "PAYLOAD_TOO_LARGE" in combined:
                 raise DataStackPayloadTooLargeError(err_msg)
-            if "RATE_LIMIT_EXCEEDED" in err_msg:
+            if "RATE_LIMIT_EXCEEDED" in combined:
                 raise DataStackRateLimitError(err_msg)
-            raise DataStackError(err_msg)
+            raise DataStackError(err_msg, code=err_code or "WS_REJECTED")
 
         return {
             **response_data,
@@ -478,6 +590,7 @@ class DataStackClient:
         http_payload: Dict[str, Any],
         spool_items: List[Dict[str, Any]],
         timeout: Optional[float] = None,
+        allow_spool: bool = True,
     ) -> Dict[str, Any]:
         """
         Core resilient dispatcher:
@@ -485,8 +598,8 @@ class DataStackClient:
         2. On WebSocket failure/disconnect, triggers `HeartbeatMonitor` (`FALLBACK_HTTP`)
            and automatically sends via HTTP `POST /api/events`.
         3. Applies exponential backoff with jitter on `RATE_LIMIT_EXCEEDED` or transient errors.
-        4. If both WebSocket and HTTP are unreachable (device offline), spools events to
-           `.datastack_spool/spool.jsonl` and triggers `OFFLINE_SPOOL`.
+        4. If both WebSocket and HTTP are unreachable (device offline) and `allow_spool` is True,
+           spools events to `.datastack_spool/spool.jsonl` and triggers `OFFLINE_SPOOL`.
         """
         self._ensure_token_present()
         max_attempts = max(1, self.config.max_retries + 1)
@@ -494,16 +607,29 @@ class DataStackClient:
 
         for attempt in range(max_attempts):
             if attempt > 0:
-                delay = self.config.retry_backoff_base_sec * (2 ** (attempt - 1))
-                jitter = random.uniform(0.0, 0.25 * delay)
+                # Use at least 1.0s delay when backing off from RATE_LIMIT_EXCEEDED so the 1s sliding window resets
+                base_delay = (
+                    max(1.0, self.config.retry_backoff_base_sec)
+                    if isinstance(last_exception, DataStackRateLimitError)
+                    else self.config.retry_backoff_base_sec
+                )
+                delay = base_delay * (2 ** (attempt - 1))
+                jitter = random.uniform(0.0, 0.2 * delay)
                 time.sleep(delay + jitter)
 
             # 1. Try Primary WebSocket if connected
             if self.is_connected and self.sio is not None and self.sio.connected:
                 try:
-                    return self._emit_via_websocket(
+                    res = self._emit_via_websocket(
                         ws_event, ws_payload, timeout=timeout
                     )
+                    if (
+                        allow_spool
+                        and not self._is_draining_spool
+                        and self.spooler.pending_count() > 0
+                    ):
+                        self._drain_offline_spool()
+                    return res
                 except (DataStackAuthError, DataStackPayloadTooLargeError):
                     raise
                 except DataStackRateLimitError as rl_err:
@@ -516,11 +642,21 @@ class DataStackClient:
             # 2. Try HTTP Fallback (`POST /api/events`)
             if self.config.enable_http_fallback:
                 try:
-                    if self.heartbeat.state == ConnectionState.CONNECTED_IDLE:
+                    res = self._send_via_http_fallback(http_payload)
+                    if self.heartbeat.state in (
+                        ConnectionState.CONNECTED_IDLE,
+                        ConnectionState.OFFLINE_SPOOL,
+                    ):
                         self.heartbeat.trigger_fallback(
                             reason="WebSocket not connected; routing via HTTP fallback"
                         )
-                    return self._send_via_http_fallback(http_payload)
+                    if (
+                        allow_spool
+                        and not self._is_draining_spool
+                        and self.spooler.pending_count() > 0
+                    ):
+                        self._drain_offline_spool()
+                    return res
                 except (DataStackAuthError, DataStackPayloadTooLargeError):
                     raise
                 except DataStackRateLimitError as rl_err:
@@ -531,12 +667,17 @@ class DataStackClient:
 
         # 3. If rate-limited or payload-rejected after all retries, raise directly
         if isinstance(
-            last_exception, (DataStackRateLimitError, DataStackPayloadTooLargeError)
+            last_exception,
+            (DataStackRateLimitError, DataStackPayloadTooLargeError),
         ):
             raise last_exception
 
         # 4. Device is offline (both WebSocket and HTTP failed): Spool to local disk
-        if self.config.offline_spool_enabled and spool_items:
+        if (
+            allow_spool
+            and self.config.offline_spool_enabled
+            and spool_items
+        ):
             spooled_count = self.spooler.enqueue(spool_items)
             self.heartbeat.trigger_offline(
                 reason=str(last_exception or "Network unreachable")
@@ -557,29 +698,42 @@ class DataStackClient:
         """
         Replays any offline spooled events from `.datastack_spool/spool.jsonl`
         once connectivity (WebSocket or HTTP fallback) is restored.
+        Routes batches through `_send_formatted_batch_recursive(..., allow_spool=False)`
+        so oversized or rate-limited spool batches automatically split and pace.
         """
         if not self.config.offline_spool_enabled:
             return 0
 
-        total_flushed = 0
-        while True:
-            batch = self.spooler.peek_batch(limit=self.config.batch_chunk_size)
-            if not batch:
-                break
+        with self._lock:
+            if self._is_draining_spool:
+                return 0
+            self._is_draining_spool = True
 
-            try:
-                if self.is_connected and self.sio is not None and self.sio.connected:
-                    self._emit_via_websocket("batch_sync", batch)
-                elif self.config.enable_http_fallback:
-                    self._send_via_http_fallback({"batch": batch})
-                else:
+        total_flushed = 0
+        try:
+            while True:
+                batch = self.spooler.peek_batch(
+                    limit=self.config.batch_chunk_size
+                )
+                if not batch:
+                    break
+
+                res = self._send_formatted_batch_recursive(
+                    batch,
+                    timeout=self.config.request_timeout_sec,
+                    file_name=None,
+                    allow_spool=False,
+                )
+                if not res.get("success", False):
                     break
 
                 self.spooler.ack_batch(len(batch))
                 total_flushed += len(batch)
-            except Exception as exc:
-                logger.debug("[DataStack] Spool drain paused: %s", exc)
-                break
+        except Exception as exc:
+            logger.debug("[DataStack] Spool drain paused: %s", exc)
+        finally:
+            with self._lock:
+                self._is_draining_spool = False
 
         return total_flushed
 
@@ -611,6 +765,7 @@ class DataStackClient:
             http_payload=envelope,
             spool_items=[envelope],
             timeout=timeout,
+            allow_spool=True,
         )
 
     def sync(
@@ -624,22 +779,33 @@ class DataStackClient:
 
     def send_batch(
         self,
-        events: List[Dict[str, Any]],
+        events: Optional[List[Dict[str, Any]]] = None,
         timeout: Optional[float] = None,
         file_name: Optional[str] = None,
+        *,
+        records: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
-        Sends a batch of events. If the batch triggers `413 PAYLOAD_TOO_LARGE`,
-        automatically splits the batch into smaller halves and retries.
+        Sends a batch of events (accepts either `events=[...]` or `records=[...]`).
+        - If the batch triggers `413 PAYLOAD_TOO_LARGE`, automatically splits the batch
+          in half recursively and retries.
+        - If a subset of events in the batch hits `429 RATE_LIMIT_EXCEEDED`
+          (`rateLimitedEventIds`), automatically backs off and retries the remaining
+          rate-limited events so zero records are dropped.
         """
-        if not isinstance(events, list) or len(events) == 0:
+        source_list = events if events is not None else records
+        if not isinstance(source_list, list) or len(source_list) == 0:
             return {"success": True, "processed": 0, "rejected": 0}
 
         formatted: List[Dict[str, Any]] = []
-        for item in events:
+        for item in source_list:
             safe_item = item if isinstance(item, dict) else {"value": item}
-            evt_id = str(safe_item.get("eventId") or "").strip() or _make_event_id()
-            evt_ts = str(safe_item.get("timestamp") or "").strip() or _utc_now_iso()
+            evt_id = (
+                str(safe_item.get("eventId") or "").strip() or _make_event_id()
+            )
+            evt_ts = (
+                str(safe_item.get("timestamp") or "").strip() or _utc_now_iso()
+            )
             evt_data = safe_item.get("data", safe_item)
             formatted.append(
                 {
@@ -650,22 +816,28 @@ class DataStackClient:
             )
 
         return self._send_formatted_batch_recursive(
-            formatted, timeout=timeout, file_name=file_name
+            formatted,
+            timeout=timeout,
+            file_name=file_name,
+            allow_spool=True,
         )
 
     def batch_sync(
         self,
-        events: List[Dict[str, Any]],
+        events: Optional[List[Dict[str, Any]]] = None,
         timeout: float = 10.0,
+        *,
+        records: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        """Alias for `send_batch()` preserving backward compatibility."""
-        return self.send_batch(events=events, timeout=timeout)
+        """Alias for `send_batch()` supporting both `events` and `records` kwargs."""
+        return self.send_batch(events=events, records=records, timeout=timeout)
 
     def _send_formatted_batch_recursive(
         self,
         formatted_batch: List[Dict[str, Any]],
         timeout: Optional[float] = None,
         file_name: Optional[str] = None,
+        allow_spool: bool = True,
     ) -> Dict[str, Any]:
         http_payload: Dict[str, Any] = (
             {"fileName": file_name, "records": formatted_batch}
@@ -673,35 +845,117 @@ class DataStackClient:
             else {"batch": formatted_batch}
         )
         try:
-            return self._execute_with_retry_and_fallback(
+            res = self._execute_with_retry_and_fallback(
                 ws_event="batch_sync",
                 ws_payload=formatted_batch,
                 http_payload=http_payload,
                 spool_items=formatted_batch,
                 timeout=timeout,
+                allow_spool=allow_spool,
             )
         except DataStackPayloadTooLargeError:
             if len(formatted_batch) <= 1:
                 raise
             mid = len(formatted_batch) // 2
             left_res = self._send_formatted_batch_recursive(
-                formatted_batch[:mid], timeout=timeout, file_name=file_name
+                formatted_batch[:mid],
+                timeout=timeout,
+                file_name=file_name,
+                allow_spool=allow_spool,
             )
             right_res = self._send_formatted_batch_recursive(
-                formatted_batch[mid:], timeout=timeout, file_name=file_name
+                formatted_batch[mid:],
+                timeout=timeout,
+                file_name=file_name,
+                allow_spool=allow_spool,
             )
             return {
                 "success": bool(
-                    left_res.get("success", True) and right_res.get("success", True)
+                    left_res.get("success", True)
+                    and right_res.get("success", True)
                 ),
                 "processed": int(left_res.get("processed", 0))
                 + int(right_res.get("processed", 0)),
                 "rejected": int(left_res.get("rejected", 0))
                 + int(right_res.get("rejected", 0)),
+                "duplicates": int(left_res.get("duplicates", 0))
+                + int(right_res.get("duplicates", 0)),
                 "spooledCount": int(left_res.get("spooledCount", 0))
                 + int(right_res.get("spooledCount", 0)),
-                "transport": right_res.get("transport") or left_res.get("transport"),
+                "transport": right_res.get("transport")
+                or left_res.get("transport"),
             }
+
+        # Handle partial-batch rate limiting (`rateLimitedEventIds`) so zero rows are dropped
+        rate_limited_ids = res.get("rateLimitedEventIds")
+        if (
+            isinstance(rate_limited_ids, list)
+            and len(rate_limited_ids) > 0
+            and self.config.max_retries > 0
+        ):
+            pending_id_set = {str(eid) for eid in rate_limited_ids}
+            remaining_items = [
+                item
+                for item in formatted_batch
+                if str(item.get("eventId")) in pending_id_set
+            ]
+            total_processed = int(res.get("processed", 0))
+            total_duplicates = int(res.get("duplicates", 0))
+            total_spooled = int(res.get("spooledCount", 0))
+            last_transport = res.get("transport")
+
+            for retry_round in range(1, self.config.max_retries + 2):
+                if not remaining_items:
+                    break
+                # Wait slightly over 1.0s so the server's 1-second rate-limit window resets
+                wait_delay = max(1.05, self.config.retry_backoff_base_sec) + random.uniform(
+                    0.0, 0.15
+                )
+                time.sleep(wait_delay)
+
+                sub_http_payload: Dict[str, Any] = (
+                    {"fileName": file_name, "records": remaining_items}
+                    if file_name
+                    else {"batch": remaining_items}
+                )
+                sub_res = self._execute_with_retry_and_fallback(
+                    ws_event="batch_sync",
+                    ws_payload=remaining_items,
+                    http_payload=sub_http_payload,
+                    spool_items=remaining_items,
+                    timeout=timeout,
+                    allow_spool=allow_spool,
+                )
+                total_processed += int(sub_res.get("processed", 0))
+                total_duplicates += int(sub_res.get("duplicates", 0))
+                total_spooled += int(sub_res.get("spooledCount", 0))
+                last_transport = sub_res.get("transport") or last_transport
+
+                next_rl_ids = sub_res.get("rateLimitedEventIds")
+                if not isinstance(next_rl_ids, list) or len(next_rl_ids) == 0:
+                    remaining_items = []
+                    break
+                next_set = {str(eid) for eid in next_rl_ids}
+                remaining_items = [
+                    item
+                    for item in remaining_items
+                    if str(item.get("eventId")) in next_set
+                ]
+
+            oversized_ids = res.get("oversizedEventIds")
+            final_rejected = len(remaining_items) + (
+                len(oversized_ids) if isinstance(oversized_ids, list) else 0
+            )
+            return {
+                "success": final_rejected == 0 or total_processed > 0,
+                "processed": total_processed,
+                "rejected": final_rejected,
+                "duplicates": total_duplicates,
+                "spooledCount": total_spooled,
+                "transport": last_transport,
+            }
+
+        return res
 
     # =========================================================================
     # Direct File Streaming (.csv, .json, .jsonl / .ndjson)
@@ -715,8 +969,8 @@ class DataStackClient:
     ) -> Dict[str, Any]:
         """
         Streams a `.csv`, `.json`, or `.jsonl` (`.ndjson`) file directly to DataStack
-        in safe chunks with deterministic idempotency IDs, automatic HTTP fallback,
-        and offline spooling support.
+        in safe chunks with deterministic SHA-256 idempotency IDs, automatic HTTP fallback,
+        partial-batch rate-limit pacing, and offline spooling support.
         """
         path = Path(file_path).expanduser().resolve()
         if not path.exists() or not path.is_file():
@@ -728,9 +982,12 @@ class DataStackClient:
                 f"Unsupported file extension '{ext}'. Supported formats: .csv, .json, .jsonl, .ndjson"
             )
 
-        effective_chunk = max(1, int(chunk_size or self.config.batch_chunk_size))
+        effective_chunk = max(
+            1, int(chunk_size or self.config.batch_chunk_size)
+        )
         total_processed = 0
         total_rejected = 0
+        total_duplicates = 0
         total_spooled = 0
         chunks_sent = 0
         last_transport = "WEBSOCKET"
@@ -742,10 +999,25 @@ class DataStackClient:
                 if extra_metadata and isinstance(record, dict)
                 else record
             )
+            existing_id = (
+                str(enriched.get("eventId") or "").strip()
+                if isinstance(enriched, dict)
+                else ""
+            )
+            evt_id = existing_id or _make_deterministic_file_event_id(
+                path.stem, idx, enriched
+            )
+            existing_ts = (
+                str(enriched.get("timestamp") or "").strip()
+                if isinstance(enriched, dict)
+                else ""
+            )
+            evt_ts = existing_ts or _utc_now_iso()
+
             buffer.append(
                 {
-                    "eventId": f"file_{path.stem}_{idx}_{uuid.uuid4().hex[:6]}",
-                    "timestamp": _utc_now_iso(),
+                    "eventId": evt_id,
+                    "timestamp": evt_ts,
                     "data": enriched,
                 }
             )
@@ -753,6 +1025,7 @@ class DataStackClient:
                 res = self.send_batch(buffer, file_name=path.name)
                 total_processed += int(res.get("processed", 0))
                 total_rejected += int(res.get("rejected", 0))
+                total_duplicates += int(res.get("duplicates", 0))
                 total_spooled += int(res.get("spooledCount", 0))
                 last_transport = str(res.get("transport", last_transport))
                 chunks_sent += 1
@@ -762,6 +1035,7 @@ class DataStackClient:
             res = self.send_batch(buffer, file_name=path.name)
             total_processed += int(res.get("processed", 0))
             total_rejected += int(res.get("rejected", 0))
+            total_duplicates += int(res.get("duplicates", 0))
             total_spooled += int(res.get("spooledCount", 0))
             last_transport = str(res.get("transport", last_transport))
             chunks_sent += 1
@@ -773,6 +1047,7 @@ class DataStackClient:
             "chunksSent": chunks_sent,
             "processed": total_processed,
             "rejected": total_rejected,
+            "duplicates": total_duplicates,
             "spooledCount": total_spooled,
             "transport": last_transport,
         }
@@ -797,20 +1072,34 @@ class DataStackClient:
                             raise DataStackFileError(
                                 f"Malformed JSONL at line {line_no} in {path.name}: {exc}"
                             ) from exc
-                        yield parsed if isinstance(parsed, dict) else {"value": parsed}
+                        yield (
+                            parsed
+                            if isinstance(parsed, dict)
+                            else {"value": parsed}
+                        )
             elif ext == ".json":
                 with path.open("r", encoding="utf-8-sig") as fh:
                     parsed = json.load(fh)
                 if isinstance(parsed, list):
                     for item in parsed:
-                        yield item if isinstance(item, dict) else {"value": item}
+                        yield (
+                            item if isinstance(item, dict) else {"value": item}
+                        )
                 elif isinstance(parsed, dict):
                     if isinstance(parsed.get("records"), list):
                         for item in parsed["records"]:
-                            yield item if isinstance(item, dict) else {"value": item}
+                            yield (
+                                item
+                                if isinstance(item, dict)
+                                else {"value": item}
+                            )
                     elif isinstance(parsed.get("data"), list):
                         for item in parsed["data"]:
-                            yield item if isinstance(item, dict) else {"value": item}
+                            yield (
+                                item
+                                if isinstance(item, dict)
+                                else {"value": item}
+                            )
                     else:
                         yield parsed
                 else:

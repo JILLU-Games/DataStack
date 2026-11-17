@@ -73,6 +73,7 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
         return {
           allowed: false,
           duplicate: true,
+          code: "DUPLICATE_EVENT",
           reason: "Duplicate event dropped",
         };
       }
@@ -91,6 +92,7 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
       return {
         allowed: false,
         duplicate: false,
+        code: "RATE_LIMIT_EXCEEDED",
         reason: `RATE_LIMIT_EXCEEDED: Limit of ${effectiveLimit} events/sec exceeded`,
       };
     } else {
@@ -106,6 +108,7 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
       return {
         allowed: false,
         duplicate: false,
+        code: "PAYLOAD_TOO_LARGE",
         reason: `PAYLOAD_TOO_LARGE: Payload (${(byteLength / 1024).toFixed(1)} KB) exceeds limit of ${(maxBytes / 1024).toFixed(0)} KB`,
       };
     }
@@ -166,6 +169,7 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
           if (callback) {
             callback({
               success: false,
+              code: "CLIENT_REVOKED",
               error: dbCheck.reason || "CLIENT_REVOKED",
             });
           }
@@ -195,7 +199,12 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
             return;
           }
           if (callback) {
-            callback({ success: false, eventId, error: check.reason });
+            callback({
+              success: false,
+              eventId,
+              code: check.code,
+              error: check.reason,
+            });
           }
           return;
         }
@@ -236,6 +245,7 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
               success: false,
               processed: 0,
               rejected: batch.length,
+              code: "CLIENT_REVOKED",
               error: dbCheck.reason || "CLIENT_REVOKED",
             });
           }
@@ -247,6 +257,11 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
           dbCheck.rateLimit || socket.data.rateLimit || 100;
         let processed = 0;
         let rejected = 0;
+        let duplicates = 0;
+        let hitRateLimit = false;
+        let hitPayloadLimit = false;
+        const rateLimitedEventIds = [];
+        const oversizedEventIds = [];
         const errors = [];
 
         for (const item of batch) {
@@ -265,11 +280,21 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
             effectiveClientRate,
           );
           if (!check.allowed) {
-            if (!check.duplicate) {
-              rejected += 1;
-              if (errors.length < 5) {
-                errors.push(`${eventId}: ${check.reason}`);
-              }
+            if (check.duplicate) {
+              duplicates += 1;
+              continue;
+            }
+            rejected += 1;
+            if (check.code === "RATE_LIMIT_EXCEEDED") {
+              hitRateLimit = true;
+              rateLimitedEventIds.push(eventId);
+            }
+            if (check.code === "PAYLOAD_TOO_LARGE") {
+              hitPayloadLimit = true;
+              oversizedEventIds.push(eventId);
+            }
+            if (errors.length < 5) {
+              errors.push(`${eventId}: ${check.reason}`);
             }
             continue;
           }
@@ -288,11 +313,36 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
           onBufferPush();
         }
 
+        if (processed === 0 && duplicates === 0 && rejected > 0) {
+          const code = hitPayloadLimit
+            ? "PAYLOAD_TOO_LARGE"
+            : hitRateLimit
+              ? "RATE_LIMIT_EXCEEDED"
+              : "BATCH_REJECTED";
+          if (callback) {
+            callback({
+              success: false,
+              processed,
+              rejected,
+              duplicates,
+              code,
+              error: errors[0] || "Batch validation failed",
+              errors,
+              ...(rateLimitedEventIds.length > 0 ? { rateLimitedEventIds } : {}),
+              ...(oversizedEventIds.length > 0 ? { oversizedEventIds } : {}),
+            });
+          }
+          return;
+        }
+
         if (callback) {
           callback({
             success: true,
             processed,
             rejected,
+            duplicates,
+            ...(rateLimitedEventIds.length > 0 ? { rateLimitedEventIds } : {}),
+            ...(oversizedEventIds.length > 0 ? { oversizedEventIds } : {}),
             ...(errors.length > 0 ? { errors } : {}),
           });
         }

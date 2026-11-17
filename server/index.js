@@ -203,7 +203,8 @@ async function syncSettingsFromDatabase() {
     await ensureDatabaseSchema();
     const res = await dbPool.query(
       `SELECT max_events_per_sec, max_payload_size_kb, batch_flush_threshold,
-              batch_flush_interval_ms, file_rotation_mb, jwt_secret, enable_idempotency
+              batch_flush_interval_ms, file_rotation_mb, jwt_secret, enable_idempotency,
+              auto_prune_days
        FROM admin_settings
        WHERE id = 'default'`,
     );
@@ -225,6 +226,11 @@ async function syncSettingsFromDatabase() {
     if (nextRotationMb !== runtimeConfig.fileRotationMb) {
       runtimeConfig.fileRotationMb = nextRotationMb;
       writer.setMaxFileSizeMb(nextRotationMb);
+    }
+
+    const nextPruneDays = Number(row.auto_prune_days) || 30;
+    if (nextPruneDays > 0) {
+      writer.pruneExpiredPartitions(nextPruneDays);
     }
 
     const nextIntervalMs = Math.max(

@@ -179,6 +179,8 @@ export async function POST(req: NextRequest) {
       let duplicates = 0;
       let hitRateLimit = false;
       let hitPayloadLimit = false;
+      const rateLimitedEventIds: string[] = [];
+      const oversizedEventIds: string[] = [];
       const errors: string[] = [];
 
       for (const item of batchItems) {
@@ -213,8 +215,14 @@ export async function POST(req: NextRequest) {
             continue;
           }
           rejected += 1;
-          if (val.code === 'RATE_LIMIT_EXCEEDED') hitRateLimit = true;
-          if (val.code === 'PAYLOAD_TOO_LARGE') hitPayloadLimit = true;
+          if (val.code === 'RATE_LIMIT_EXCEEDED') {
+            hitRateLimit = true;
+            rateLimitedEventIds.push(itemEventId);
+          }
+          if (val.code === 'PAYLOAD_TOO_LARGE') {
+            hitPayloadLimit = true;
+            oversizedEventIds.push(itemEventId);
+          }
           if (errors.length < 5) {
             errors.push(`${itemEventId}: ${val.code || 'REJECTED'} - ${val.reason}`);
           }
@@ -254,6 +262,8 @@ export async function POST(req: NextRequest) {
             code,
             error: errors[0] || 'Batch validation failed',
             errors,
+            ...(rateLimitedEventIds.length > 0 ? { rateLimitedEventIds } : {}),
+            ...(oversizedEventIds.length > 0 ? { oversizedEventIds } : {}),
           },
           { status },
         );
@@ -267,6 +277,8 @@ export async function POST(req: NextRequest) {
         ...(typeof bodyObj.fileName === 'string'
           ? { fileName: bodyObj.fileName }
           : {}),
+        ...(rateLimitedEventIds.length > 0 ? { rateLimitedEventIds } : {}),
+        ...(oversizedEventIds.length > 0 ? { oversizedEventIds } : {}),
         ...(errors.length > 0 ? { errors } : {}),
       });
     }

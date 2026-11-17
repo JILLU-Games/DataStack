@@ -1,10 +1,19 @@
-from setuptools import setup, find_packages
+from pathlib import Path
+from setuptools import find_packages, setup
+
+ROOT_DIR = Path(__file__).resolve().parent
+README_PATH = ROOT_DIR / "README.md"
+long_description = (
+    README_PATH.read_text(encoding="utf-8")
+    if README_PATH.exists()
+    else "Official Python client SDK for DataStack — Self-Hosted Real-Time Telemetry & Event Logging Platform"
+)
 
 setup(
     name="datastack-sdk",
-    version="1.0.0",
+    version="2.2.0",
     description="Official Python client SDK for DataStack — Self-Hosted Real-Time Telemetry & Event Logging Platform",
-    long_description=open("README.md", encoding="utf-8").read(),
+    long_description=long_description,
     long_description_content_type="text/markdown",
     author="Vib Tools",
     author_email="hello@vibtools.io",

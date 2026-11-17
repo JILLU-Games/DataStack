@@ -39,7 +39,7 @@ class HeartbeatMonitor:
         interval_sec: float,
         recovery_callback: Callable[[], bool],
     ) -> None:
-        self.interval_sec = max(1.0, float(interval_sec))
+        self.interval_sec = max(0.2, float(interval_sec))
         self._recovery_callback = recovery_callback
         self._state = ConnectionState.CONNECTED_IDLE
         self._closed = False
@@ -169,7 +169,7 @@ class HeartbeatMonitor:
                 continue
 
             with self._lock:
-                if self._state == ConnectionState.STOPPED:
+                if self._closed or self._state == ConnectionState.STOPPED:
                     break
                 self._recovery_attempts += 1
 

@@ -97,6 +97,43 @@ class CsvWriterWorker {
 
     return { written: events.length, files };
   }
+
+  pruneExpiredPartitions(autoPruneDays) {
+    const days = Number(autoPruneDays);
+    if (!Number.isFinite(days) || days <= 0 || !fs.existsSync(this.baseDir)) {
+      return 0;
+    }
+
+    const cutoffDate = new Date(Date.now() - Math.floor(days) * 86400000)
+      .toISOString()
+      .split('T')[0];
+
+    let prunedCount = 0;
+    try {
+      const clientDirs = fs.readdirSync(this.baseDir);
+      for (const clientDir of clientDirs) {
+        const fullClientPath = path.join(this.baseDir, clientDir);
+        if (!fs.statSync(fullClientPath).isDirectory()) continue;
+
+        const files = fs.readdirSync(fullClientPath);
+        for (const file of files) {
+          if (!file.endsWith('.csv')) continue;
+          const datePart = file.replace('.csv', '').split('-part')[0];
+          if (/^\d{4}-\d{2}-\d{2}$/.test(datePart) && datePart < cutoffDate) {
+            try {
+              fs.unlinkSync(path.join(fullClientPath, file));
+              prunedCount += 1;
+            } catch {
+              // Ignore individual file unlink failure
+            }
+          }
+        }
+      }
+    } catch {
+      // Ignore directory scan failure
+    }
+    return prunedCount;
+  }
 }
 
 module.exports = { CsvWriterWorker };

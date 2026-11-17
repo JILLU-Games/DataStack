@@ -165,7 +165,9 @@ export class SettingsManager {
     if (!globals.__dataStackSettingsHydrated) {
       void this.syncFromDatabase();
     }
-    return { ...getSettingsState() };
+    const current = getSettingsState();
+    this.applyRuntimeSettings(current);
+    return { ...current };
   }
 
   public static async getSettingsAsync(): Promise<AdminSettings> {
@@ -173,7 +175,9 @@ export class SettingsManager {
     if (fromDb) {
       return { ...fromDb };
     }
-    return { ...getSettingsState() };
+    const current = getSettingsState();
+    this.applyRuntimeSettings(current);
+    return { ...current };
   }
 
   public static getPublicSettings(): Omit<AdminSettings, "jwtSecret"> {
