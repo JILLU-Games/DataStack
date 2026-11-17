@@ -11,6 +11,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: "3000"
+      INGESTION_INTERNAL_URL: "http://ingestion:4000"
       DATASTACK_JWT_SECRET: "${SERVICE_REALBASE64_64_JWT:?Coolify must generate SERVICE_REALBASE64_64_JWT}"
       DATASTACK_ADMIN_EMAIL: "${DATASTACK_ADMIN_EMAIL:-admin@datastack.dev}"
       DATASTACK_ADMIN_SESSION_SECRET: "${SERVICE_REALBASE64_64_ADMINSESSION:?Coolify must generate SERVICE_REALBASE64_64_ADMINSESSION}"
@@ -46,6 +47,10 @@ services:
       NODE_ENV: production
       PORT_SOCKET: "4000"
       DATASTACK_JWT_SECRET: "${SERVICE_REALBASE64_64_JWT:?Coolify must generate SERVICE_REALBASE64_64_JWT}"
+      DATABASE_URL: "postgresql://datastack:${SERVICE_PASSWORD_64_POSTGRES:?Coolify must generate SERVICE_PASSWORD_64_POSTGRES}@postgres:5432/${SERVICE_HEX_32_DATABASENAME:?Coolify must generate SERVICE_HEX_32_DATABASENAME}"
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test:

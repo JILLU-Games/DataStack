@@ -14,6 +14,13 @@ class CsvWriterWorker {
     this.ensureBaseDir();
   }
 
+  setMaxFileSizeMb(megabytes) {
+    const mb = Number(megabytes);
+    if (Number.isFinite(mb) && mb >= 1) {
+      this.maxFileSize = Math.floor(mb * 1024 * 1024);
+    }
+  }
+
   ensureBaseDir() {
     if (!fs.existsSync(this.baseDir)) {
       fs.mkdirSync(this.baseDir, { recursive: true });
@@ -21,7 +28,7 @@ class CsvWriterWorker {
   }
 
   getTargetFilePath(clientId, dateStr) {
-    const safeClientId = clientId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const safeClientId = String(clientId || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
     const clientDir = path.join(this.baseDir, safeClientId);
     if (!fs.existsSync(clientDir)) {
       fs.mkdirSync(clientDir, { recursive: true });

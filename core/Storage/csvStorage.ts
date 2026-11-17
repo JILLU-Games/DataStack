@@ -168,6 +168,38 @@ export class CSVStorageManager {
   }
 
   /**
+   * Prune CSV partitions older than autoPruneDays
+   */
+  public static pruneExpiredPartitions(autoPruneDays: number): number {
+    if (!Number.isFinite(autoPruneDays) || autoPruneDays <= 0) {
+      return 0;
+    }
+
+    const cutoffDate = new Date(
+      Date.now() - Math.floor(autoPruneDays) * 86_400_000,
+    )
+      .toISOString()
+      .split('T')[0];
+
+    let prunedCount = 0;
+    const files = this.listAllFiles();
+    for (const file of files) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(file.date) && file.date < cutoffDate) {
+        try {
+          if (fs.existsSync(file.filePath)) {
+            fs.unlinkSync(file.filePath);
+            prunedCount += 1;
+          }
+        } catch {
+          // Ignore file removal error
+        }
+      }
+    }
+
+    return prunedCount;
+  }
+
+  /**
    * Get aggregate storage statistics
    */
   public static getStorageStats() {
@@ -175,6 +207,10 @@ export class CSVStorageManager {
     const totalBytes = files.reduce((acc, f) => acc + f.sizeBytes, 0);
     const totalRows = files.reduce((acc, f) => acc + f.linesCount, 0);
     const uniqueClients = new Set(files.map((f) => f.clientId)).size;
+    const rotationMb = Math.max(
+      1,
+      Math.round(this.maxFileSizeBytes / (1024 * 1024)),
+    );
 
     return {
       totalFiles: files.length,
@@ -183,7 +219,8 @@ export class CSVStorageManager {
       totalRows,
       uniqueClients,
       storageDirectory: this.baseStorageDir,
-      rotationRule: 'Per-day OR per-100MB rotation',
+      rotationMb,
+      rotationRule: `${rotationMb}MB / Daily`,
     };
   }
 

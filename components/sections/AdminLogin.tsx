@@ -14,9 +14,13 @@ function safeNextPath() {
     : '/vcon/dashboard';
 }
 
-export function AdminLogin() {
-  const [email, setEmail] = useState('admin@datastack.dev');
-  const [password, setPassword] = useState('admin12345678');
+export function AdminLogin({
+  showDemoHint = false,
+}: {
+  showDemoHint?: boolean;
+}) {
+  const [email, setEmail] = useState(showDemoHint ? 'admin@datastack.dev' : '');
+  const [password, setPassword] = useState(showDemoHint ? 'admin12345678' : '');
   const [remember, setRemember] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -144,16 +148,18 @@ export function AdminLogin() {
             Sign in
           </Button>
 
-          <button
-            type="button"
-            onClick={() => {
-              setEmail('admin@datastack.dev');
-              setPassword('admin12345678');
-            }}
-            className="mt-0.5 text-center font-mono text-[10.5px] text-[var(--accent)] hover:underline cursor-pointer"
-          >
-            admin@datastack.dev / admin12345678
-          </button>
+          {showDemoHint && (
+            <button
+              type="button"
+              onClick={() => {
+                setEmail('admin@datastack.dev');
+                setPassword('admin12345678');
+              }}
+              className="mt-0.5 text-center font-mono text-[10.5px] text-[var(--accent)] hover:underline cursor-pointer"
+            >
+              admin@datastack.dev / admin12345678
+            </button>
+          )}
         </form>
 
         <footer className="flex items-center justify-end border-t border-[var(--border)] px-4 py-2 text-[10.5px]">

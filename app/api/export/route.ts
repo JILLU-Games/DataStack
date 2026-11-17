@@ -1,3 +1,4 @@
+import { DataBufferEngine } from "@/core/data/buffer";
 import {
   CSVStorageManager,
   type StorageFileMeta,
@@ -107,6 +108,18 @@ function streamFile(file: StorageFileMeta) {
 
 export async function GET(request: NextRequest) {
   try {
+    await DataBufferEngine.flush();
+    const ingestionBaseUrl =
+      process.env.INGESTION_INTERNAL_URL || "http://127.0.0.1:4000";
+    try {
+      await fetch(`${ingestionBaseUrl}/internal/flush`, {
+        method: "POST",
+        signal: AbortSignal.timeout(1500),
+      });
+    } catch {
+      // Port 4000 may not be running in isolated single-process dev mode
+    }
+
     const { searchParams } = new URL(request.url);
     const clientId = searchParams.get("clientId") || "all";
     const filename = searchParams.get("filename");

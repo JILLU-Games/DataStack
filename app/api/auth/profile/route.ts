@@ -100,7 +100,12 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ error: result.error }, { status: 401 });
     }
 
-    const expiresAt = Date.now() + SESSION_SECONDS * 1000;
+    // Preserve remaining session duration (e.g., 30-day "Remember me" session)
+    const remainingSeconds = Math.max(
+      SESSION_SECONDS,
+      Math.ceil((session.expiresAt - Date.now()) / 1000),
+    );
+    const expiresAt = Date.now() + remainingSeconds * 1000;
     const nextToken = await createAdminSessionToken(
       result.email,
       sessionSecret,
@@ -121,7 +126,7 @@ export async function PUT(request: NextRequest) {
     response.cookies.set(
       SESSION_COOKIE,
       nextToken,
-      getSessionCookieOptions(request, SESSION_SECONDS),
+      getSessionCookieOptions(request, remainingSeconds),
     );
 
     return response;

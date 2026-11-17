@@ -40,7 +40,7 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
   const { success, error } = useToast();
   const [credentials, setCredentials] = useState<ClientCredentials | null>(null);
   const [confirmAction, setConfirmAction] = useState<{
-    type: 'rotate' | 'revoke';
+    type: 'rotate' | 'revoke' | 'delete';
     client: ClientItem;
   } | null>(null);
   const [processing, setProcessing] = useState(false);
@@ -86,6 +86,24 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
     }
   };
 
+  const executeDeleteClient = async (client: ClientItem) => {
+    setProcessing(true);
+    try {
+      const response = await fetch(`/api/clients/${encodeURIComponent(client.clientId)}`, {
+        method: 'DELETE',
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Unable to delete client');
+      setConfirmAction(null);
+      success('Client deleted', `${client.clientId} has been permanently removed.`);
+      await onStatusChange();
+    } catch (deleteError) {
+      error('Client deletion failed', deleteError instanceof Error ? deleteError.message : 'Unknown error');
+    } finally {
+      setProcessing(false);
+    }
+  };
+
   const toggleStatus = (client: ClientItem) => {
     if (client.status === 'active') {
       setConfirmAction({ type: 'revoke', client });
@@ -98,6 +116,8 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
     if (!confirmAction) return;
     if (confirmAction.type === 'rotate') {
       await executeRotateKey(confirmAction.client);
+    } else if (confirmAction.type === 'delete') {
+      await executeDeleteClient(confirmAction.client);
     } else {
       await executeStatusChange(confirmAction.client, 'revoked');
     }
@@ -178,11 +198,21 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
                           type="button"
                           variant="icon"
                           size="icon"
-                          icon={client.status === 'active' ? 'Trash2' : 'ShieldCheck'}
-                          className={`h-6 w-6 border border-transparent ${client.status === 'active' ? 'hover:border-[var(--danger)] hover:text-[var(--danger)]' : 'hover:border-[var(--border)] hover:bg-[var(--surface-2)]'}`}
+                          icon={client.status === 'active' ? 'ShieldOff' : 'ShieldCheck'}
+                          className={`h-6 w-6 border border-transparent ${client.status === 'active' ? 'hover:border-[var(--warning)] hover:text-[var(--warning)]' : 'hover:border-[var(--border)] hover:bg-[var(--surface-2)]'}`}
                           title={`${client.status === 'active' ? 'Revoke' : 'Reactivate'} ${client.clientId}`}
                           aria-label={`${client.status === 'active' ? 'Revoke' : 'Reactivate'} ${client.clientId}`}
                           onClick={() => toggleStatus(client)}
+                        />
+                        <Button
+                          type="button"
+                          variant="icon"
+                          size="icon"
+                          icon="Trash2"
+                          className="h-6 w-6 border border-transparent hover:border-[var(--danger)] hover:text-[var(--danger)]"
+                          title={`Delete ${client.clientId}`}
+                          aria-label={`Delete ${client.clientId}`}
+                          onClick={() => setConfirmAction({ type: 'delete', client })}
                         />
                       </div>
                     </TableCell>
@@ -197,7 +227,13 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
       <Modal
         isOpen={Boolean(confirmAction)}
         onClose={() => !processing && setConfirmAction(null)}
-        title={confirmAction?.type === 'rotate' ? 'Rotate credentials' : 'Revoke access'}
+        title={
+          confirmAction?.type === 'rotate'
+            ? 'Rotate credentials'
+            : confirmAction?.type === 'delete'
+              ? 'Delete client'
+              : 'Revoke access'
+        }
         maxWidth="xs"
         footer={
           <>
@@ -206,12 +242,16 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
             </Button>
             <Button
               type="button"
-              variant={confirmAction?.type === 'revoke' ? 'danger' : 'primary'}
+              variant={confirmAction?.type === 'rotate' ? 'primary' : 'danger'}
               size="xs"
               loading={processing}
               onClick={handleConfirm}
             >
-              {confirmAction?.type === 'rotate' ? 'Rotate' : 'Revoke'}
+              {confirmAction?.type === 'rotate'
+                ? 'Rotate'
+                : confirmAction?.type === 'delete'
+                  ? 'Delete'
+                  : 'Revoke'}
             </Button>
           </>
         }
@@ -219,7 +259,9 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
         <p className="text-[12px] text-[var(--text-muted)]">
           {confirmAction?.type === 'rotate'
             ? `Rotate credentials for ${confirmAction.client.clientId}? Existing credentials will stop working.`
-            : `Revoke access for ${confirmAction?.client.clientId || ''}?`}
+            : confirmAction?.type === 'delete'
+              ? `Permanently delete client ${confirmAction.client.clientId}? This removes the client registration and credentials.`
+              : `Revoke access for ${confirmAction?.client.clientId || ''}?`}
         </p>
       </Modal>
 

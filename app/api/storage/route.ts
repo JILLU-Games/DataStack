@@ -23,12 +23,40 @@ export async function GET(req: NextRequest) {
 
 export async function POST(_req: NextRequest) {
   try {
-    // Manual flush buffer to disk
-    const res = await DataBufferEngine.flush();
+    // 1. Flush local Next.js DataBufferEngine
+    const localRes = await DataBufferEngine.flush();
+
+    // 2. Also flush Port 4000 Socket.IO ingestion buffer
+    let remoteCount = 0;
+    let remoteFiles: string[] = [];
+    const ingestionBaseUrl = (
+      process.env.INGESTION_INTERNAL_URL || 'http://127.0.0.1:4000'
+    ).replace(/\/$/, '');
+
+    try {
+      const ingestRes = await fetch(`${ingestionBaseUrl}/internal/flush`, {
+        method: 'POST',
+        cache: 'no-store',
+      });
+      if (ingestRes.ok) {
+        const ingestData = await ingestRes.json();
+        remoteCount = Number(ingestData.flushedCount) || 0;
+        if (Array.isArray(ingestData.filesUpdated)) {
+          remoteFiles = ingestData.filesUpdated;
+        }
+      }
+    } catch {
+      // Port 4000 server may be offline in standalone Next.js dev mode
+    }
+
+    const combinedFiles = Array.from(
+      new Set([...localRes.files, ...remoteFiles]),
+    );
+
     return NextResponse.json({
       success: true,
-      flushedCount: res.count,
-      filesUpdated: res.files,
+      flushedCount: localRes.count + remoteCount,
+      filesUpdated: combinedFiles,
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Manual flush failed';

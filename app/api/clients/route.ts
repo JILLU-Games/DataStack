@@ -3,9 +3,11 @@ import { NextRequest, NextResponse } from "next/server";
 
 export async function GET() {
   try {
-    const clients = SDKManager.listClients().map(
-      ({ secret, token, ...client }) => client,
-    );
+    const allClients = await SDKManager.listClientsAsync();
+    const clients = allClients.map(({ secret, ...client }) => {
+      void secret;
+      return client;
+    });
     return NextResponse.json({ clients, count: clients.length });
   } catch (err: unknown) {
     const message =
@@ -26,17 +28,21 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const existing = SDKManager.getClient(clientId);
+    const safeClientId = String(clientId)
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]/g, "_");
+    const existing = await SDKManager.getClientAsync(safeClientId);
     if (existing) {
       return NextResponse.json(
-        { error: `Client '${clientId}' already exists` },
+        { error: `Client '${safeClientId}' already exists` },
         { status: 409 },
       );
     }
 
-    const newClient = SDKManager.registerClient({
-      clientId,
-      name,
+    const newClient = await SDKManager.registerClientAsync({
+      clientId: safeClientId,
+      name: String(name),
       rateLimit: rateLimit ? Number(rateLimit) : 100,
     });
 

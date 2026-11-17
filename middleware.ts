@@ -43,19 +43,33 @@ export async function middleware(request: NextRequest) {
     !isLoginPage &&
     !isSetupPage;
   const isAdminApi = isProtectedApi(pathname, request.method);
+  const hasBearerAuth = Boolean(
+    request.headers.get("authorization")?.toLowerCase().startsWith("bearer "),
+  );
   const isStateChangingApi =
     pathname.startsWith("/api/") &&
     !SAFE_METHODS.has(request.method) &&
-    pathname !== "/api/events";
+    !(pathname === "/api/events" && hasBearerAuth);
 
   if (isSetupPage) return NextResponse.next();
-  if (!isConsolePage && !isAdminApi && !isLoginPage) return NextResponse.next();
+  if (
+    !isConsolePage &&
+    !isAdminApi &&
+    !isLoginPage &&
+    !(pathname === "/api/events" && request.method === "POST")
+  ) {
+    return NextResponse.next();
+  }
 
   if (isStateChangingApi && !isSameOriginRequest(request)) {
     return NextResponse.json(
       { error: "Cross-origin request rejected." },
       { status: 403 },
     );
+  }
+
+  if (pathname === "/api/events" && request.method === "POST") {
+    return NextResponse.next();
   }
 
   const sessionSecret =

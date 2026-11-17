@@ -26,8 +26,8 @@ export function AdminSetup({
     event.preventDefault();
     setErrorMessage('');
 
-    if (password.length < 12) {
-      setErrorMessage('Password must be at least 12 characters.');
+    if (password.length < 8) {
+      setErrorMessage('Password must be at least 8 characters.');
       return;
     }
     if (password !== confirmPassword) {
@@ -94,7 +94,7 @@ export function AdminSetup({
             value={password}
             onChange={(event) => setPassword(event.target.value)}
             compact
-            minLength={12}
+            minLength={8}
             required
           />
           <Input
@@ -104,7 +104,7 @@ export function AdminSetup({
             value={confirmPassword}
             onChange={(event) => setConfirmPassword(event.target.value)}
             compact
-            minLength={12}
+            minLength={8}
             required
           />
           <Input

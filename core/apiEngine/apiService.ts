@@ -1,7 +1,6 @@
 import { SDKManager } from '../sdk/sdkManager';
 import { CSVStorageManager } from '../Storage/csvStorage';
 import { DataBufferEngine } from '../data/buffer';
-import { SettingsManager } from '../adminSettings/settingsManager';
 import { SecurityEngine } from '../Security/security';
 
 export class ApiEngine {
@@ -10,23 +9,37 @@ export class ApiEngine {
    */
   public static async getDashboardMetrics() {
     const storageStats = CSVStorageManager.getStorageStats();
-    const bufferStats = DataBufferEngine.getBufferStats();
-    const clients = SDKManager.listClients();
+    const localBufferStats = DataBufferEngine.getBufferStats();
+    const clients = await SDKManager.listClientsAsync();
     const activeClients = clients.filter((c) => c.status === 'active').length;
     let activeSockets = 0;
+    let ingestionBufferSize = 0;
+
+    const ingestionBaseUrl = (
+      process.env.INGESTION_INTERNAL_URL || 'http://127.0.0.1:4000'
+    ).replace(/\/$/, '');
 
     try {
-      const res = await fetch('http://localhost:4000/health', { cache: 'no-store' });
+      const res = await fetch(`${ingestionBaseUrl}/health`, {
+        cache: 'no-store',
+      });
       if (res.ok) {
         const data = await res.json();
-        activeSockets = data.activeSockets ?? 0;
+        activeSockets = Number(data.activeSockets) || 0;
+        ingestionBufferSize = Number(data.bufferSize) || 0;
       }
     } catch {
-      // Server may be starting
+      // Ingestion server may not be running in single-process dev mode
       activeSockets = 0;
+      ingestionBufferSize = 0;
     }
 
     const securityStats = SecurityEngine.getStats();
+    const bufferStats = {
+      ...localBufferStats,
+      currentBufferSize:
+        localBufferStats.currentBufferSize + ingestionBufferSize,
+    };
 
     return {
       activeSockets,

@@ -95,7 +95,10 @@ export default function StoragePage() {
             label: 'Persisted rows',
             value: stats?.totalRows ? stats.totalRows.toLocaleString() : 0,
           },
-          { label: 'Rotation', value: '100MB / Daily' },
+          {
+            label: 'Rotation',
+            value: stats?.rotationRule || `${stats?.rotationMb ?? 100}MB / Daily`,
+          },
         ]}
       />
 

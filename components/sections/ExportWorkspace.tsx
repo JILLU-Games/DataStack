@@ -57,10 +57,10 @@ export function ExportWorkspace() {
     getCached<StorageFile[]>('vcon:storage-files', [])
   );
   const [selectedClient, setSelectedClient] = useState('all');
-  const [fromDate, setFromDate] = useState(() => dateString(new Date()));
-  const [toDate, setToDate] = useState(() => dateString(new Date()));
+  const [fromDate, setFromDate] = useState('');
+  const [toDate, setToDate] = useState('');
   const [format, setFormat] = useState<ExportFormat>('csv');
-  const [preset, setPreset] = useState<RangePreset>('today');
+  const [preset, setPreset] = useState<RangePreset>('all');
   const [loading, setLoading] = useState(
     () => getCached<StorageFile[]>('vcon:storage-files', []).length === 0
   );

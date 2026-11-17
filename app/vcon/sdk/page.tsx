@@ -38,7 +38,9 @@ export default function SdkGuidePage() {
           const list = setCached('vcon:clients', data.clients || []);
           setClients(list);
           if (list.length > 0) {
-            setSelectedClientId((prev) => prev || list[0].clientId);
+            setSelectedClientId((prev) =>
+              list.some((c: any) => c.clientId === prev) ? prev : list[0].clientId
+            );
           }
         }
       } catch {
@@ -84,14 +86,26 @@ if client.connect():
     <PageShell
       title="Python SDK"
       actions={
-        <Button
-          size="xs"
-          variant="secondary"
-          icon="Copy"
-          onClick={() => copySnippet(pythonSnippet, 'Snippet')}
-        >
-          Copy Code
-        </Button>
+        <>
+          {activeClient?.token && (
+            <Button
+              size="xs"
+              variant="secondary"
+              icon="Key"
+              onClick={() => copySnippet(activeClient.token, 'Client JWT token')}
+            >
+              Copy Token
+            </Button>
+          )}
+          <Button
+            size="xs"
+            variant="secondary"
+            icon="Copy"
+            onClick={() => copySnippet(pythonSnippet, 'Snippet')}
+          >
+            Copy Code
+          </Button>
+        </>
       }
     >
       <StatStrip

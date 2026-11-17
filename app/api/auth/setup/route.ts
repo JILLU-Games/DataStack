@@ -23,18 +23,9 @@ export async function POST(request: NextRequest) {
   const sessionSecret =
     process.env.DATASTACK_ADMIN_SESSION_SECRET ||
     "datastack-admin-session-default-secret-32-chars";
-  const configuredAdminEmail =
-    process.env.DATASTACK_ADMIN_EMAIL?.trim().toLowerCase() ||
-    "admin@datastack.dev";
   if (!sessionSecret || sessionSecret.length < 32) {
     return NextResponse.json(
       { error: "Admin session configuration is unavailable." },
-      { status: 503 },
-    );
-  }
-  if (!configuredAdminEmail || !validEmail(configuredAdminEmail)) {
-    return NextResponse.json(
-      { error: "Admin setup configuration is unavailable." },
       { status: 503 },
     );
   }
@@ -52,17 +43,9 @@ export async function POST(request: NextRequest) {
         { status: 400 },
       );
     }
-    if (email !== configuredAdminEmail) {
+    if (password.length < 8 || password.length > 256) {
       return NextResponse.json(
-        {
-          error: "Use the administrator email configured for this deployment.",
-        },
-        { status: 403 },
-      );
-    }
-    if (password.length < 12 || password.length > 256) {
-      return NextResponse.json(
-        { error: "Choose a password between 12 and 256 characters." },
+        { error: "Choose a password between 8 and 256 characters." },
         { status: 400 },
       );
     }

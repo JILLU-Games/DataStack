@@ -6,7 +6,7 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const client = SDKManager.getClient(id);
+  const client = await SDKManager.getClientAsync(id);
   if (!client) {
     return NextResponse.json({ error: "Client not found" }, { status: 404 });
   }
@@ -24,7 +24,7 @@ export async function PATCH(
 
     // Special action: regenerate token
     if (body.action === "regenerate_token") {
-      const refreshed = SDKManager.regenerateToken(id);
+      const refreshed = await SDKManager.regenerateTokenAsync(id);
       if (!refreshed) {
         return NextResponse.json(
           { error: "Client not found" },
@@ -34,7 +34,7 @@ export async function PATCH(
       return NextResponse.json({ client: refreshed });
     }
 
-    const updated = SDKManager.updateClient(id, body);
+    const updated = await SDKManager.updateClientAsync(id, body);
     if (!updated) {
       return NextResponse.json({ error: "Client not found" }, { status: 404 });
     }
@@ -50,7 +50,7 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const deleted = SDKManager.deleteClient(id);
+  const deleted = await SDKManager.deleteClientAsync(id);
   if (!deleted) {
     return NextResponse.json({ error: "Client not found" }, { status: 404 });
   }

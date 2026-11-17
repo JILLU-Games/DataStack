@@ -1,6 +1,7 @@
 import time
 import uuid
 import logging
+import threading
 from typing import Any, Dict, List, Optional
 import socketio
 
@@ -63,10 +64,15 @@ class DataStackClient:
             logger.error(f"Failed to connect to DataStack: {e}")
             return False
 
-    def sync(self, data: Any, event_id: Optional[str] = None) -> Dict[str, Any]:
+    def sync(
+        self,
+        data: Any,
+        event_id: Optional[str] = None,
+        timeout: float = 5.0,
+    ) -> Dict[str, Any]:
         """
         Sync single event payload in realtime.
-        Returns server response dict.
+        Blocks until the server ack callback fires or timeout expires.
         """
         if not self.is_connected:
             raise ConnectionError("DataStack client is not connected. Call connect() first.")
@@ -80,24 +86,35 @@ class DataStackClient:
             "data": data,
         }
 
-        response = {"success": False, "eventId": evt_id}
+        ack_event = threading.Event()
+        response: Dict[str, Any] = {
+            "success": False,
+            "eventId": evt_id,
+            "error": "Timeout waiting for server acknowledgment",
+        }
 
         def on_ack(res):
             nonlocal response
-            response = res
+            if isinstance(res, dict):
+                response = res
+            ack_event.set()
 
         try:
             self.sio.emit("sync_data", payload, callback=on_ack)
-            # Short wait for ack in synchronous invocation
-            time.sleep(0.05)
+            ack_event.wait(timeout=timeout)
             return response
         except Exception as e:
             logger.error(f"Sync error for event {evt_id}: {e}")
             return {"success": False, "eventId": evt_id, "error": str(e)}
 
-    def batch_sync(self, records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def batch_sync(
+        self,
+        records: List[Dict[str, Any]],
+        timeout: float = 10.0,
+    ) -> Dict[str, Any]:
         """
         Sync list of records in a single batch.
+        Blocks until the server ack callback fires or timeout expires.
         """
         if not self.is_connected:
             raise ConnectionError("DataStack client is not connected.")
@@ -110,15 +127,22 @@ class DataStackClient:
                 "data": r.get("data", r),
             })
 
-        response = {"success": False, "processed": 0}
+        ack_event = threading.Event()
+        response: Dict[str, Any] = {
+            "success": False,
+            "processed": 0,
+            "error": "Timeout waiting for server batch acknowledgment",
+        }
 
         def on_ack(res):
             nonlocal response
-            response = res
+            if isinstance(res, dict):
+                response = res
+            ack_event.set()
 
         try:
             self.sio.emit("batch_sync", batch_payload, callback=on_ack)
-            time.sleep(0.1)
+            ack_event.wait(timeout=timeout)
             return response
         except Exception as e:
             logger.error(f"Batch sync error: {e}")
