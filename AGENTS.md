@@ -24,3 +24,8 @@
 - **Font Stack**: `"Segoe UI", "Segoe UI Web", system-ui, -apple-system, "Helvetica Neue", sans-serif`.
 - **Border Radius**: `--radius: 0rem` across all UI components.
 - **Shadows**: None (`--shadow: none`). Crisp 1px borders with dark and light theme support.
+
+## 5. Cross-IDE Persistent Memory (`MEMORY.md` & `.ai-rules`)
+
+- CRITICAL RULE: This is a multi-IDE project. Whenever any modification, update, or bug fix is completed in our session, automatically update `MEMORY.md` (or provide exact markdown blocks) so project context remains synchronized across VS Code, Google Antigravity, Cursor, and other IDEs (see `.ai-rules`).
+
