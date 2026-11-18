@@ -91,6 +91,21 @@ Cleanly closes the active Socket.IO connection.
 
 ---
 
+## Canonical Documentation Suite
+
+For exhaustive documentation on configuration auto-discovery, HTTP fallback, offline disk spooling, direct file streaming, and error handling, consult the canonical documentation:
+
+- **[Python SDK Documentation Hub](../sdk/python/datastack/docs/README.md)**
+- **[Installation Guide](../sdk/python/datastack/docs/INSTALLATION.md)**
+- **[Quickstart Guide](../sdk/python/datastack/docs/QUICKSTART.md)**
+- **[API Reference](../sdk/python/datastack/docs/API_REFERENCE.md)**
+- **[Configuration Guide](../sdk/python/datastack/docs/CONFIGURATION.md)**
+- **[Practical Examples](../sdk/python/datastack/docs/EXAMPLES.md)**
+- **[Error Handling Guide](../sdk/python/datastack/docs/ERROR_HANDLING.md)**
+- **[Lifecycle & Resilience](../sdk/python/datastack/docs/LIFECYCLE.md)**
+
+---
+
 ## Author & Support
 
 Developed and maintained by **[Vib Tools](https://vib.tools/)**:

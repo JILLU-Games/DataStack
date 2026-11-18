@@ -1,110 +1,84 @@
 # DataStack Official Python SDK (`datastack`)
 
-> **Production-Grade Python Client for DataStack** — featuring automatic `config.datastack.py` configuration discovery, real-time Socket.IO streaming (`Port 4000`), automatic Heartbeat HTTP fallback (`Port 3000`), offline disk spooling, and direct `.csv`, `.json`, and `.jsonl` file ingestion.
+[![PyPI version](https://img.shields.io/badge/pypi-v2.2.0-blue.svg)](https://pypi.org/project/datastack/)
+[![Python: 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](../../../LICENSE)
+[![Maintained by Vib Tools](https://img.shields.io/badge/Maintained%20by-Vib%20Tools-0f172a)](https://vibtools.top/)
+
+The official production-grade Python SDK for **[DataStack](https://vibtools.top/)** — high-throughput, self-hosted telemetry ingestion and partitioned CSV persistence platform.
 
 ---
 
-## 1. Installation
+## Key Capabilities
 
-### Install from Local Repository
+- **Zero-Boilerplate Auto-Discovery**: Automatically finds and loads `config.datastack.py` in your working directory.
+- **Dual-Transport Resilience**: Real-time Socket.IO streaming on Port 4000 with automatic fallback to HTTP REST (`POST /api/events`) on Port 3000.
+- **Zero-CPU Heartbeat Monitor**: Background recovery thread sleeps in 0-CPU `IDLE` mode when healthy; wakes only on network disruption.
+- **Offline Disk Spooling**: Automatically appends unsent events to `.datastack_spool/spool.jsonl` when offline and replays them atomically upon reconnection.
+- **Direct File Streaming**: Stream `.csv`, `.json`, `.jsonl`, and `.ndjson` files with deterministic SHA-256 deduplication and auto-halving on payload limits.
+- **Backoff & Rate-Limit Pacing**: Lossless partial-batch retries on `429 RATE_LIMIT_EXCEEDED` with jitter.
+
+---
+
+## Installation
+
 ```bash
+# From PyPI
+pip install datastack
+
+# Or from local repository
 pip install ./sdk/python/datastack
 ```
 
-### Editable Development Mode
-```bash
-pip install -e ./sdk/python/datastack
-```
-
-### PyPI Package Installation
-```bash
-pip install datastack
-```
-
 ---
 
-## 2. Zero-Boilerplate Setup with `config.datastack.py`
+## Quick Example
 
-Create a file named **`config.datastack.py`** in your Python project's root directory (you can also copy a pre-filled version directly from the DataStack Admin Console at **`/vcon/sdk`**):
-
+Create `config.datastack.py` in your project root:
 ```python
 # config.datastack.py
 DATASTACK_CONFIG = {
-    "SERVER_URL": "http://localhost:4000",        # Port 4000 Socket.IO Ingestion Service
-    "API_URL": "http://localhost:3000",           # Port 3000 HTTP Fallback & File Ingestion API
-    "CLIENT_TOKEN": "YOUR_CLIENT_JWT_TOKEN",      # Provisioned in /vcon/clients
-    "CLIENT_ID": "",                              # Optional override (defaults to JWT sub/clientId)
-    "AUTO_CONNECT": True,
-    "ENABLE_HTTP_FALLBACK": True,
-    "HEARTBEAT_INTERVAL_SEC": 5.0,
-    "MAX_RETRIES": 3,
-    "RETRY_BACKOFF_BASE_SEC": 0.5,
-    "BATCH_CHUNK_SIZE": 250,
-    "OFFLINE_SPOOL_ENABLED": True,
-    "OFFLINE_SPOOL_DIR": ".datastack_spool",
-    "MAX_SPOOL_SIZE_MB": 50,
+    "SERVER_URL": "http://localhost:4000",
+    "API_URL": "http://localhost:3000",
+    "CLIENT_TOKEN": "YOUR_SIGNED_CLIENT_JWT",
 }
 ```
 
----
-
-## 3. Quickstart Usage
-
+Then stream telemetry in Python:
 ```python
 from datastack import DataStack
 
-# Automatically discovers and loads config.datastack.py and connects!
-client = DataStack()
+with DataStack() as client:
+    # 1. Single Event
+    client.send({"service": "order_worker", "status": "completed", "amount": 99.50})
 
-# 1. Push a Single Event
-res = client.send({
-    "service": "checkout-worker",
-    "order_id": "ORD-9921",
-    "amount_usd": 149.99,
-    "status": "completed",
-})
-print("Single Event:", res)
+    # 2. Batch Events
+    client.send_batch([
+        {"metric": "cpu", "value": 45.2},
+        {"metric": "ram_mb", "value": 2048},
+    ])
 
-# 2. Push a Batch of Events
-batch_res = client.send_batch([
-    {"data": {"metric": "cpu_load", "value": 0.42}},
-    {"data": {"metric": "mem_used_mb", "value": 2048}},
-])
-print("Batch Result:", batch_res)
-
-# 3. Directly Stream .csv, .json, or .jsonl Files
-file_res = client.send_file("monthly_records.csv", chunk_size=250)
-print("File Ingestion:", file_res)
-
-# 4. Inspect Connection & Heartbeat Status
-print("SDK Status:", client.status())
-
-client.disconnect()
+    # 3. Direct File Streaming
+    client.send_file("device_logs.csv", chunk_size=250)
 ```
 
 ---
 
-## 4. Smart Connection State Machine & Auto-Recovery
+## Documentation Suite
 
-The DataStack Python SDK maintains a 4-state resilience lifecycle managed by `HeartbeatMonitor`:
+Exhaustive technical documentation is available in the **[`docs/`](./docs/README.md)** directory:
 
-1. **`CONNECTED_IDLE` (Primary WebSocket Active — Heartbeat IDLE)**:
-   - Events stream over Socket.IO (`Port 4000`) with sub-millisecond overhead.
-   - The Heartbeat Monitor sleeps in **IDLE mode** (`heartbeatMode: "IDLE"`), consuming zero network or CPU resources.
-2. **`FALLBACK_HTTP` (WebSocket Disconnected — Auto HTTP Fallback Active)**:
-   - If the WebSocket connection drops or closes, `send()`, `send_batch()`, and `send_file()` automatically switch to `POST {API_URL}/api/events` so zero application calls fail.
-   - Simultaneously, the Heartbeat Monitor wakes up (`heartbeatMode: "ACTIVE_RECOVERY"`), probes and reconnects the WebSocket in the background, verifies the handshake (`ping_verify`), and transitions back to **`CONNECTED_IDLE` (`IDLE` mode)**.
-3. **`OFFLINE_SPOOL` (Device Offline — Local Disk Spooling)**:
-   - If the client machine loses internet connectivity completely, events are safely appended to `.datastack_spool/spool.jsonl` with deterministic `eventId`s.
-   - When the device comes back online, the Heartbeat Monitor detects connectivity, reconnects the WebSocket, replays all spooled events without duplicates, and returns to **`CONNECTED_IDLE` (`IDLE` mode)**.
-4. **Structured Error Handling & Auto-Chunking**:
-   - **`413 PAYLOAD_TOO_LARGE`**: Batch/file payloads automatically split in half (`chunk // 2`) recursively and retry.
-   - **`429 RATE_LIMIT_EXCEEDED`**: Automatically retries with exponential backoff and random jitter.
-   - **`401 / 403` (`CLIENT_REVOKED`, `TOKEN_ROTATED`)**: Immediately halts retries and raises `DataStackAuthError`.
+- **[Installation Guide (`docs/INSTALLATION.md`)](./docs/INSTALLATION.md)** — Runtimes, dependencies, and environment verification.
+- **[Quickstart (`docs/QUICKSTART.md`)](./docs/QUICKSTART.md)** — 5-minute integration guide.
+- **[API Reference (`docs/API_REFERENCE.md`)](./docs/API_REFERENCE.md)** — Complete method signatures, parameters, and return types.
+- **[Configuration Reference (`docs/CONFIGURATION.md`)](./docs/CONFIGURATION.md)** — `config.datastack.py`, environment variables, and precedence order.
+- **[Practical Examples (`docs/EXAMPLES.md`)](./docs/EXAMPLES.md)** — IoT streaming, FastAPI logging, batch transactions, and file ingestion.
+- **[Error Handling (`docs/ERROR_HANDLING.md`)](./docs/ERROR_HANDLING.md)** — Exception hierarchy, status codes, and retry strategies.
+- **[Lifecycle & Resilience (`docs/LIFECYCLE.md`)](./docs/LIFECYCLE.md)** — Connection state machine, Heartbeat Monitor, and offline disk spooler.
 
 ---
 
-## 5. Author & License
+## Author & License
 
 - **Organization**: [Vib Tools](https://vibtools.top/)
 - **Author**: Md Anik (`ANIK.D.ART`) — `info@vibtools.top`

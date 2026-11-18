@@ -85,8 +85,20 @@ datastack/
 │   ├── index.js                   # Express 5 + Socket.IO (Port 4000), /health, /internal/* bridge, PG sync, graceful exit
 │   ├── socket/handlers.js         # Handshake JWT auth, ping_verify, sync_data, batch_sync
 │   └── workers/csvWriter.js       # Partitioned CSV batch writer & rotation/pruning worker
-├── sdk/python/datastack/          # Official pip-installable Python SDK (`datastack`)
-│   └── datastack/                 # client.py, config.py, heartbeat.py, spool.py, exceptions.py
+├── sdk/python/datastack/          # Official pip-installable Python SDK (`datastack` v2.2.0)
+│   ├── datastack/                 # client.py, config.py, heartbeat.py, spool.py, exceptions.py
+│   ├── config.datastack.example.py
+│   ├── pyproject.toml / setup.py
+│   ├── README.md                  # SDK overview, installation, quickstart, docs index
+│   └── docs/                      # Production SDK Documentation Suite (LicenX Standard):
+│       ├── README.md              # SDK Documentation Hub & architecture overview
+│       ├── INSTALLATION.md        # Python runtimes, pip commands, and verification
+│       ├── QUICKSTART.md          # 5-minute zero-boilerplate onboarding guide
+│       ├── API_REFERENCE.md       # Complete DataStack class & method specifications
+│       ├── CONFIGURATION.md       # config.datastack.py & DATASTACK_* environment reference
+│       ├── EXAMPLES.md            # IoT streaming, FastAPI, batching, and file ingestion
+│       ├── ERROR_HANDLING.md      # Exception hierarchy, 401/403/413/429 codes & retries
+│       └── LIFECYCLE.md           # 5-state machine, zero-CPU IDLE mode & offline spooling
 ├── sdk-python/                    # Backward-compatible re-export package (`datastack-sdk`)
 ├── docker/
 │   ├── docker-compose.yml         # web, ingestion, proxy (Nginx), postgres (pgdata), redis (redisdata AOF)
@@ -97,11 +109,36 @@ datastack/
 ├── nginx/default.conf             # Local Nginx proxy config matching coolify-nginx.conf
 ├── prisma/schema.prisma           # Reference PostgreSQL metadata schema
 ├── public/                        # PWA manifest.json, sw.js, icons (192, 512, maskable, apple-touch)
-├── storage/data/                  # Runtime partitioned CSV root ({clientId}/{YYYY-MM-DD}.csv)
-├── docs/                          # Official documentation suite:
-│   ├── MANIFEST.md                # Documentation index, breakdown, and governance rules
-│   ├── users/                     # End-user & operator guides (installation, features, tutorials, faq)
-│   └── dev/                       # Contributor & developer guides (architecture, setup, build, contributing)
+├── docs/                          # Comprehensive Production Documentation Suite:
+│   ├── index.md                   # Primary documentation hub and portal navigation index
+│   ├── MANIFEST.md                # Master documentation inventory & authoring governance
+│   ├── audit-coverage-report.md   # Forensic codebase audit matrix & coverage report
+│   ├── users/                     # End-User & Operator Guides:
+│   │   ├── index.md               # User portal overview & reading pathways
+│   │   ├── getting-started.md     # 5-minute fast-track operator onboarding guide
+│   │   ├── installation.md        # Production Docker Compose, Coolify & volume guide
+│   │   ├── configuration.md       # Environment variables & platform runtime settings
+│   │   ├── features/              # Deep-dive guides: admin-console, client-management,
+│   │   │                          # data-simulator, partitioned-storage, data-export
+│   │   ├── workflows.md           # End-to-end operator journeys & disaster recovery
+│   │   ├── troubleshooting.md     # Forensic error recovery, status codes & diagnostics
+│   │   └── faq.md                 # Storage architecture & operational questions
+│   ├── dev/                       # Developer & Contributor Guides:
+│   │   ├── index.md               # Developer hub index & architectural principles
+│   │   ├── architecture.md        # Dual-runtime blueprint, service bridge & storage
+│   │   ├── codebase-structure.md  # File-by-file module, route & component inventory
+│   │   ├── local-setup.md         # Local workstation setup & dual-terminal workflow
+│   │   ├── api-reference.md       # Exhaustive REST API & Socket.IO specification
+│   │   ├── database-schema.md     # PostgreSQL control plane & DDL migrations
+│   │   ├── security.md            # Security architecture, scrypt, sessions & CSRF
+│   │   ├── building-packaging.md  # Next.js standalone build & multi-stage Dockerfiles
+│   │   ├── testing.md             # Automated test suites guide (node:test + unittest)
+│   │   └── contributing.md        # Architectural rules, memory sync & PR checklist
+│   └── reference/                 # Technical Reference Portal:
+│       ├── index.md               # Technical reference index
+│       ├── configuration-reference.md # Complete environment variable & setting bounds
+│       ├── dependencies.md        # Runtime & dev dependencies audit with rationales
+│       └── glossary.md            # Technical domain terminology & concept glossary
 ├── notes/                         # Audit logs & phase implementation plans (gitignored)
 └── tests/                         # Automated verification suites:
     ├── phase01-auth.test.ts       # Auth fail-closed, tokenVersion, brute-force lockout, Bearer revocation, CSRF
