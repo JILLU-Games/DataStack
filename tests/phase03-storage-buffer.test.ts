@@ -508,4 +508,34 @@ test("BUG-14: GET /api/data searches eventId & clientId + UTC dates, GET /api/ev
   const eventsJson = await eventsRes.json();
   assert.equal(eventsJson.events.length, 1);
   assert.equal(eventsJson.events[0].eventId, "unique-findme-id-99");
+
+  // 6. SPEC-07: extractSafePartitionDate returns null on corrupt timestamp with null fallback
+  assert.equal(CSVStorageManager.extractSafePartitionDate("not-a-timestamp", null), null);
+  assert.equal(CSVStorageManager.extractSafePartitionDate("", null), null);
+  assert.equal(CSVStorageManager.extractSafePartitionDate("2026-11-17T12:00:00.000Z", null), "2026-11-17");
+
+  // Corrupt timestamp in buffer must NOT leak into today's date range query
+  await DataBufferEngine.pushBatchAsync([
+    {
+      clientId: "alpha_cli",
+      eventId: "corrupt-ts-event",
+      timestamp: "corrupted_raw_value",
+      payload: JSON.stringify({ broken: true }),
+    },
+  ]);
+  const today = new Date().toISOString().slice(0, 10);
+  const dateRangeRes = await getDataRoute(
+    new NextRequest(`http://localhost:3000/api/data?search=corrupt-ts-event&from=${today}&to=${today}`),
+  );
+  assert.equal(dateRangeRes.status, 200);
+  const dateRangeJson = await dateRangeRes.json();
+  assert.equal(dateRangeJson.total, 0, "Corrupt timestamp must NOT match date range");
+
+  // But without from/to date filters, corrupt event is still visible for admin inspection
+  const allDataRes = await getDataRoute(
+    new NextRequest("http://localhost:3000/api/data?search=corrupt-ts-event"),
+  );
+  assert.equal(allDataRes.status, 200);
+  const allDataJson = await allDataRes.json();
+  assert.equal(allDataJson.total, 1, "Corrupt timestamp event must be discoverable in unfiltered search");
 });

@@ -79,10 +79,14 @@ class Phase05PythonSdkTests(unittest.TestCase):
         from datastack_sdk.exceptions import (
             DataStackOfflineSpoolError as ShimSpoolErr,
         )
+        from datastack_sdk.heartbeat import HeartbeatMonitor as ShimHeartbeat
+        from datastack_sdk.spool import DiskSpooler as ShimSpooler
 
         self.assertIs(ShimClient, DataStackClient)
         self.assertIs(shim_load_config, load_config)
         self.assertIs(ShimSpoolErr, DataStackOfflineSpoolError)
+        self.assertIs(ShimHeartbeat, HeartbeatMonitor)
+        self.assertIs(ShimSpooler, DiskSpooler)
 
     def test_client_id_config_env_and_jwt_validation(self) -> None:
         tok_alpha = _make_jwt({"clientId": "alpha_svc", "sub": "alpha_svc"})

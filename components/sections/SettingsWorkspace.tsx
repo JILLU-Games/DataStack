@@ -82,8 +82,11 @@ export function SettingsWorkspace() {
 
   const probeSocketServer = useCallback(async (port: number) => {
     setSocketStatus('checking');
-    const isLocalDev = window.location.port === '3000';
-    const httpHost = isLocalDev
+    const isLocalHost =
+      window.location.hostname === 'localhost' ||
+      window.location.hostname === '127.0.0.1' ||
+      window.location.port === '3000';
+    const httpHost = isLocalHost
       ? `${window.location.hostname}:${port}`
       : window.location.host;
     const healthUrl = `${window.location.protocol}//${httpHost}/health`;
@@ -95,15 +98,27 @@ export function SettingsWorkspace() {
       });
       setSocketStatus(response.ok ? 'online' : 'offline');
     } catch {
-      setSocketStatus('offline');
+      // In remote/preview environments where Port 4000 is proxied through web API or reverse proxy, probe /api/health
+      try {
+        const fallbackRes = await fetch('/api/health', {
+          cache: 'no-store',
+          signal: AbortSignal.timeout(1500),
+        });
+        setSocketStatus(fallbackRes.ok ? 'online' : 'offline');
+      } catch {
+        setSocketStatus('offline');
+      }
     }
   }, []);
 
   useEffect(() => {
     setBaseUrl(window.location.origin);
-    const isLocalDev = window.location.port === '3000';
+    const isLocalHost =
+      window.location.hostname === 'localhost' ||
+      window.location.hostname === '127.0.0.1' ||
+      window.location.port === '3000';
     const socketProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const socketHost = isLocalDev
+    const socketHost = isLocalHost
       ? `${window.location.hostname}:${serverPort}`
       : window.location.host;
     setWebSocketUrl(`${socketProtocol}://${socketHost}`);

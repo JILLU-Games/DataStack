@@ -102,7 +102,7 @@ export function AdminLogin({
             label="Email"
             type="email"
             autoComplete="username"
-            placeholder="admin@example.com"
+            placeholder="admin@datastack.dev"
             value={email}
             onChange={(event) => setEmail(event.target.value)}
             compact

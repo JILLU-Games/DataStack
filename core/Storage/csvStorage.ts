@@ -119,10 +119,15 @@ export class CSVStorageManager {
   }
 
   /**
-   * Normalizes and validates any timestamp or date string into a strict YYYY-MM-DD partition key
+   * Normalizes and validates any timestamp or date string into a strict YYYY-MM-DD partition key.
+   * Returns fallback (default: today's date) if unparseable, or null when fallback is null.
    */
-  public static extractSafePartitionDate(rawTimestamp?: string): string {
-    const fallback = new Date().toISOString().slice(0, 10);
+  public static extractSafePartitionDate(rawTimestamp?: string, fallback?: string): string;
+  public static extractSafePartitionDate(rawTimestamp: string | undefined, fallback: null): string | null;
+  public static extractSafePartitionDate(
+    rawTimestamp?: string,
+    fallback: string | null = new Date().toISOString().slice(0, 10),
+  ): string | null {
     if (!rawTimestamp || typeof rawTimestamp !== 'string') {
       return fallback;
     }

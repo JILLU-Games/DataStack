@@ -24,7 +24,7 @@ import {
   verifyRequestAdminSession,
 } from "@/core/auth/adminUsers";
 import { AuthService, resolveDefaultJwtSecret } from "@/core/auth/jwt";
-import { isSameOriginRequest } from "@/middleware";
+import { isSameOriginRequest, middleware } from "@/middleware";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -336,5 +336,45 @@ describe("Phase-01 Auth, Secrets, Revocation & Proxy Hardening", () => {
       },
     });
     assert.equal(isSameOriginRequest(reqMissingBoth), false);
+  });
+
+  it("SPEC-08: allows headless scripts with x-datastack-admin-client or DataStack-CLI to bypass browser CSRF check", async () => {
+    process.env.DATASTACK_ADMIN_SESSION_SECRET = "test-secret-at-least-32-chars-long-for-session";
+
+    // 1. Without headless header or origin -> 403 CSRF rejected
+    const blockedReq = new NextRequest("http://localhost:3000/api/clients", {
+      method: "POST",
+      headers: {
+        host: "localhost:3000",
+      },
+    });
+    const blockedRes = await middleware(blockedReq);
+    assert.equal(blockedRes.status, 403);
+    const blockedJson = await blockedRes.json();
+    assert.match(blockedJson.error, /cross-origin/i);
+
+    // 2. With x-datastack-admin-client header -> bypasses CSRF (reaches auth check, returns 401 Unauthorized if no cookie)
+    const headlessReq = new NextRequest("http://localhost:3000/api/clients", {
+      method: "POST",
+      headers: {
+        host: "localhost:3000",
+        "x-datastack-admin-client": "true",
+      },
+    });
+    const headlessRes = await middleware(headlessReq);
+    assert.equal(headlessRes.status, 401);
+    const headlessJson = await headlessRes.json();
+    assert.match(headlessJson.error, /authentication required/i);
+
+    // 3. With DataStack-CLI User-Agent -> bypasses CSRF
+    const cliReq = new NextRequest("http://localhost:3000/api/clients", {
+      method: "POST",
+      headers: {
+        host: "localhost:3000",
+        "user-agent": "DataStack-CLI/1.0",
+      },
+    });
+    const cliRes = await middleware(cliReq);
+    assert.equal(cliRes.status, 401);
   });
 });

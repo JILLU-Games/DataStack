@@ -33,7 +33,7 @@ export async function GET(request: NextRequest) {
     let total = 0;
 
     const addIfMatching = (event: DataEvent) => {
-      const eventDate = CSVStorageManager.extractSafePartitionDate(event.timestamp);
+      const eventDate = CSVStorageManager.extractSafePartitionDate(event.timestamp, null);
       const dedupeKey = `${event.clientId}:${event.eventId}`;
       const matchesSearch =
         !search ||
@@ -43,8 +43,7 @@ export async function GET(request: NextRequest) {
 
       if (
         (clientId !== "all" && event.clientId !== clientId) ||
-        (from && eventDate < from) ||
-        (to && eventDate > to) ||
+        ((from || to) && (!eventDate || (from && eventDate < from) || (to && eventDate > to))) ||
         !matchesSearch ||
         eventIds.has(dedupeKey)
       ) {

@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000 -H 0.0.0.0",
+    "dev:all": "node scripts/dev-all.js",
     "server": "node server/index.js",
     "build": "NODE_ENV=production next build",
     "start": "next start",

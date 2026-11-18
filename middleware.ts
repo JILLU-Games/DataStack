@@ -74,11 +74,17 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
+  const isHeadlessAdminClient =
+    request.headers.get("x-datastack-admin-client") === "true" ||
+    Boolean(request.headers.get("user-agent")?.startsWith("DataStack-CLI"));
+
   if (isStateChangingApi && !isSameOriginRequest(request)) {
-    return NextResponse.json(
-      { error: "Cross-origin request rejected." },
-      { status: 403 },
-    );
+    if (!isHeadlessAdminClient) {
+      return NextResponse.json(
+        { error: "Cross-origin request rejected." },
+        { status: 403 },
+      );
+    }
   }
 
   if (pathname === "/api/events" && request.method === "POST") {

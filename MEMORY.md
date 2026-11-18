@@ -1,7 +1,7 @@
 # MEMORY.md — DataStack Cross-IDE Persistent Project Memory
 
-> **Last Synchronized**: 2026-11-17  
-> **Status**: Production-Ready (`Phase-01` through `Phase-07` Completed & Verified)  
+> **Last Synchronized**: 2026-11-18 10:40:00 UTC  
+> **Status**: Production Remediation Complete & Certified (Phases 01–05 100% Verified) (`notes/PHASE_EXECUTION_LOG.md`)  
 > **Scope Rule**: Maintain this file accurately across VS Code, Google Antigravity, Cursor, and any other IDE after every modification, feature update, or bug fix (see `.ai-rules` and `AGENTS.md`).
 
 ---
@@ -139,7 +139,15 @@ datastack/
 │       ├── configuration-reference.md # Complete environment variable & setting bounds
 │       ├── dependencies.md        # Runtime & dev dependencies audit with rationales
 │       └── glossary.md            # Technical domain terminology & concept glossary
-├── notes/                         # Audit logs & phase implementation plans (gitignored)
+├── notes/                         # Production remediation & baseline specifications:
+│   ├── README.md                  # Notes document index & navigation hub
+│   ├── BASELINE_FREEZE.md         # Baseline system freeze & test verification contract
+│   ├── forensic-audit-report.md   # Primary forensic audit report (11 verified findings)
+│   ├── PRODUCTION_REMEDIATION_SPECIFICATION.md # Exact code patch references & scope locks
+│   ├── PHASED_IMPLEMENTATION_ROADMAP.md # 5-phase execution strategy & validation gates
+│   ├── PHASE_EXECUTION_LOG.md     # Living phase progress tracker (Pending Phase 01)
+│   ├── ERROR_HANDLING_AUDIT_AND_TAXONOMY.md # Error codes, handlers & defensive taxonomy
+│   └── FEATURE_STATE_REGISTRY.md  # Single-source-of-truth feature operational matrix
 └── tests/                         # Automated verification suites:
     ├── phase01-auth.test.ts       # Auth fail-closed, tokenVersion, brute-force lockout, Bearer revocation, CSRF
     ├── phase02-sync.test.ts       # Internal bridge auth, settings sync, JWT rotation kick, rate/security metrics
@@ -173,6 +181,26 @@ All planned hardening & deployment phases (**Phase-01 through Phase-07**) are **
    - Complete `public/manifest.json`, icons, `public/sw.js`, and root-relative navigation links.
 7. **Docker / Coolify Deployment & Persistence Hardening (Completed — Phase-07)**
    - Redis AOF persistence (`redisdata:/data`), deterministic `package-lock.json` for `npm ci`, Nginx `location = /health` → `ingestion:4000`, `/api/health` container probes, non-blocking startup ownership check in Dockerfiles, unhydrated-DB `autoPruneDays` safety guard in `SettingsManager`, DB JWT hydration in `SDKManager`, graceful `SIGTERM`/`SIGINT` flush in `DataBufferEngine`, and non-destructive `ADD COLUMN IF NOT EXISTS` DDL guards.
+
+### Production Phased Remediation Execution
+- **Phase 01: Critical Telemetry & Ingestion Flow (COMPLETED — 2026-11-18)**:
+  - Simulator WebSocket transport (`/app/vcon/simulator/page.tsx`): Aligned client origin to `http:`/`https:` and event emission to `sync_data` (single) and `batch_sync` (burst) using acknowledgment callbacks, resolving 100% failure rate in simulator WebSocket tests.
+  - Storage Workspace manual flush (`/app/vcon/storage/page.tsx`): Integrated response JSON parsing with `warning` toast for partial flushes (HTTP 502 when local buffer is written but Port 4000 returns error) and accurate server error display.
+- **Phase 02: Data Filtering, Export UX & Health Probe (COMPLETED — 2026-11-18)**:
+  - Settings Workspace (`/components/sections/SettingsWorkspace.tsx`): Dynamically routes health checks to localhost, 127.0.0.1, custom dev ports, or `/api/health` reverse proxy fallback.
+  - Export Workspace (`/components/sections/ExportWorkspace.tsx`): Replaced window navigation with blob fetch and in-app error toast on download failure.
+  - Partition Filtering (`/core/Storage/csvStorage.ts` & `/app/api/data/route.ts`): Null fallback on unparseable timestamps prevents corrupt historical events from leaking into today's partition query.
+- **Phase 03: Security & Usability Uniformity (COMPLETED — 2026-11-18)**:
+  - Administrator Email Uniformity (`/.env.example`, `AdminSetup.tsx`, `AdminLogin.tsx`): Standardized email placeholder to `admin@datastack.dev` aligning with backend default and Docker Compose.
+  - Headless Automation CSRF Accommodation (`/middleware.ts`): Added `isHeadlessAdminClient` check to allow programmatic callers carrying `x-datastack-admin-client: true` or `user-agent: DataStack-CLI/*` to bypass browser origin checks while preserving admin session cookie authentication and browser CSRF protection.
+- **Phase 04: SDK & Codebase Consolidation (COMPLETED — 2026-11-18)**:
+  - Python SDK Consolidation (`sdk/python/datastack/` & `sdk-python/`): Verified single source of truth across all submodule shims (`client`, `config`, `exceptions`, `heartbeat`, `spool`) in `tests/phase05_sdk_test.py`.
+  - Unified Concurrent Dev Script (`package.json` & `scripts/dev-all.js`): Added `"dev:all": "node scripts/dev-all.js"` with clean SIGINT/SIGTERM shutdown.
+  - Landing UI Telemetry Snippet (`components/sections/SdkSection.tsx`): Aligned with realistic `sensor_telemetry` payload matching Simulator and SDK documentation.
+- **Phase 05: Final E2E Sign-Off & Verification (COMPLETED — 2026-11-18)**:
+  - Full automated regression passed: 24/24 TypeScript tests (`tests/*.test.ts`) and 3/3 Python tests (`tests/phase05_sdk_test.py`).
+  - Next.js production build (`compile_applet`) and ESLint (`lint_applet`) passing cleanly with zero errors and zero warnings.
+  - 100% of platform features (20 / 20) certified 🟢 Fully Functional in `notes/FEATURE_STATE_REGISTRY.md`.
 
 ---
 

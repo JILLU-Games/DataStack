@@ -198,10 +198,27 @@ export function ExportWorkspace() {
     );
   };
 
-  const downloadFile = (file: StorageFile) => {
-    window.location.assign(
-      `/api/export?clientId=${encodeURIComponent(file.clientId)}&filename=${encodeURIComponent(file.filename)}`
-    );
+  const downloadFile = async (file: StorageFile) => {
+    const url = `/api/export?clientId=${encodeURIComponent(file.clientId)}&filename=${encodeURIComponent(file.filename)}`;
+    try {
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) {
+        const errorJson = await res.json().catch(() => ({}));
+        error('Download Failed', errorJson.error || 'Requested CSV file could not be exported.');
+        return;
+      }
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = file.filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(objectUrl);
+    } catch (err: unknown) {
+      error('Download Failed', err instanceof Error ? err.message : 'Export download error');
+    }
   };
 
   const rangeChanged = (setter: (value: string) => void, value: string) => {

@@ -12,7 +12,7 @@ export const SdkSection: React.FC = () => (
         <span className="text-[var(--text-faint)]"># Auto-loads config.datastack.py from project root</span>{'\n'}
         <span className="text-[var(--text)]">from datastack import DataStack</span>{'\n\n'}
         <span className="text-[var(--text)]">client = DataStack()</span>{'\n'}
-        <span className="text-[var(--text)]">client.send({'{'}<span className="text-[var(--accent)]">&quot;event&quot;</span>: <span className="text-[var(--accent)]">&quot;package_received&quot;</span>{'}'})</span>{'\n'}
+        <span className="text-[var(--text)]">client.send({'{'}<span className="text-[var(--accent)]">&quot;event_type&quot;</span>: <span className="text-[var(--accent)]">&quot;sensor_telemetry&quot;</span>, <span className="text-[var(--accent)]">&quot;temperature&quot;</span>: 24.8, <span className="text-[var(--accent)]">&quot;status&quot;</span>: <span className="text-[var(--accent)]">&quot;NOMINAL&quot;</span>{'}'})</span>{'\n'}
         <span className="text-[var(--text)]">client.send_file(<span className="text-[var(--accent)]">&quot;telemetry_batch.csv&quot;</span>)</span>{'\n'}
         <span className="text-[var(--text)]">client.disconnect()</span>
       </CodeBlock>

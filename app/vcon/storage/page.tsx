@@ -19,7 +19,7 @@ import { getCached, setCached } from '@/lib/vconCache';
 import { useCallback, useEffect, useState } from 'react';
 
 export default function StoragePage() {
-  const { success, error } = useToast();
+  const { success, warning, error } = useToast();
   const [stats, setStats] = useState<any>(() =>
     getCached<any>('vcon:storage-stats', null)
   );
@@ -48,15 +48,28 @@ export default function StoragePage() {
     setFlushing(true);
     try {
       const res = await fetch('/api/storage', { method: 'POST' });
-      if (res.ok) {
-        const data = await res.json();
-        success('Buffer Flushed', `Flushed ${data.flushedCount} events to CSV`);
+      const data = await res.json().catch(() => ({}));
+
+      if (res.ok && data.success) {
+        const count = Number(data.flushedCount) || 0;
+        success(
+          'Buffer Flushed',
+          `Flushed ${count} event${count === 1 ? '' : 's'} to CSV${data.warning ? ` (${data.warning})` : ''}`
+        );
+        fetchStorageData();
+      } else if (data.flushedCount !== undefined && data.flushedCount > 0) {
+        // Partial flush: local events persisted, remote Port 4000 flush returned error
+        warning(
+          'Partial Flush',
+          `Flushed ${data.flushedCount} local events. Ingestion server: ${data.error || 'flush failed'}`
+        );
         fetchStorageData();
       } else {
-        error('Flush Failed', 'Could not flush buffer');
+        error('Flush Failed', data.error || 'Could not flush buffer');
       }
-    } catch (err: any) {
-      error('Error', err.message);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown network error';
+      error('Flush Error', msg);
     } finally {
       setFlushing(false);
     }

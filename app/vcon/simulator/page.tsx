@@ -24,9 +24,9 @@ type DispatchStatus = 'Ready' | 'Accepted' | 'Rejected' | 'Error';
 
 function getSocketOrigin(): string {
   const isLocalDev = window.location.port === '3000';
-  const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
   const host = isLocalDev ? `${window.location.hostname}:4000` : window.location.host;
-  return `${protocol}://${host}`;
+  return `${protocol}//${host}`;
 }
 
 export default function SimulatorPage() {
@@ -112,8 +112,8 @@ export default function SimulatorPage() {
 
       const timer = window.setTimeout(() => {
         socket.disconnect();
-        reject(new Error('WebSocket handshake timed out (is Port 4000 ingestion server running?)'));
-      }, 4500);
+        reject(new Error('WebSocket timeout (is Port 4000 ingestion server running?)'));
+      }, 5000);
 
       socket.on('connect_error', (connectErr) => {
         window.clearTimeout(timer);
@@ -122,49 +122,46 @@ export default function SimulatorPage() {
       });
 
       socket.on('connect', () => {
-        const responses: Record<string, unknown>[] = [];
-        let accepted = 0;
-        let rejected = 0;
-        let settled = 0;
-
-        const finishIfDone = () => {
-          if (settled >= items.length) {
-            window.clearTimeout(timer);
-            socket.disconnect();
-            resolve({ accepted, rejected, responses });
-          }
-        };
-
-        const onAck = (ack: Record<string, unknown>) => {
-          responses.push(ack);
-          if (ack?.status === 'ok' || ack?.status === 'duplicate') {
-            accepted++;
-          } else {
-            rejected++;
-          }
-          settled++;
-          finishIfDone();
-        };
-
-        const onErrorEvent = (errPayload: Record<string, unknown>) => {
-          responses.push(errPayload);
-          rejected++;
-          settled++;
-          finishIfDone();
-        };
-
-        socket.on('ack', onAck);
-        socket.on('error_event', onErrorEvent);
-
-        items.forEach((data, index) => {
-          const eventId = `sim_ws_${Date.now()}_${index}`;
-          socket.emit('telemetry_event', {
-            clientId,
-            eventId,
+        if (items.length === 1) {
+          const eventId = `sim_ws_${Date.now()}_0`;
+          socket.emit(
+            'sync_data',
+            {
+              clientId,
+              eventId,
+              timestamp: new Date().toISOString(),
+              data: items[0],
+            },
+            (response: Record<string, unknown>) => {
+              window.clearTimeout(timer);
+              socket.disconnect();
+              const ok = Boolean(response?.success);
+              resolve({
+                accepted: ok ? 1 : 0,
+                rejected: ok ? 0 : 1,
+                responses: [response || { success: false, error: 'Empty response' }],
+              });
+            }
+          );
+        } else {
+          const batchPayload = items.map((data, idx) => ({
+            eventId: `sim_ws_${Date.now()}_${idx}`,
             timestamp: new Date().toISOString(),
             data,
+          }));
+          socket.emit('batch_sync', batchPayload, (response: Record<string, unknown>) => {
+            window.clearTimeout(timer);
+            socket.disconnect();
+            const processed = Number(response?.processed) || 0;
+            const rejected = Number(response?.rejected) || 0;
+            const ok = Boolean(response?.success);
+            resolve({
+              accepted: processed,
+              rejected: ok && rejected === 0 ? 0 : (rejected || (ok ? 0 : items.length)),
+              responses: [response || { success: false, error: 'Empty response' }],
+            });
           });
-        });
+        }
       });
     });
   };
