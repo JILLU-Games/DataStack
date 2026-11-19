@@ -26,6 +26,34 @@ function normalizeClientId(clientId) {
     .replace(/[^a-z0-9_-]/g, "_");
 }
 
+function extractSocketClientIp(socket) {
+  const headers = (socket && socket.handshake && socket.handshake.headers) || {};
+  const realIp =
+    typeof headers["x-real-ip"] === "string" ? headers["x-real-ip"].trim() : "";
+  if (realIp) {
+    return realIp.slice(0, 128);
+  }
+  const forwardedFor =
+    typeof headers["x-forwarded-for"] === "string"
+      ? headers["x-forwarded-for"]
+      : "";
+  if (forwardedFor) {
+    const hops = forwardedFor
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean);
+    const rightmost = hops[hops.length - 1];
+    if (rightmost) {
+      return rightmost.slice(0, 128);
+    }
+  }
+  const addr =
+    (socket && socket.handshake && socket.handshake.address) ||
+    (socket && socket.conn && socket.conn.remoteAddress) ||
+    "";
+  return String(addr).trim() || "127.0.0.1";
+}
+
 function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
   const getRuntimeConfig =
     typeof options.getRuntimeConfig === "function"
@@ -340,17 +368,20 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
       const decoded = jwt.verify(cleanToken, config.jwtSecret);
 
       const normalizedClientId = normalizeClientId(decoded.clientId);
+      const clientIp = extractSocketClientIp(socket);
       const dbCheck = await verifyClientInDb(
         normalizedClientId,
         cleanToken,
         true,
+        clientIp,
       );
       if (!dbCheck.allowed) {
-        return next(new Error(dbCheck.reason || "CLIENT_REVOKED"));
+        return next(new Error(dbCheck.reason || dbCheck.code || "CLIENT_REVOKED"));
       }
 
       socket.data.clientId = normalizedClientId;
       socket.data.token = cleanToken;
+      socket.data.clientIp = clientIp;
       socket.data.rateLimit =
         dbCheck.rateLimit || decoded.rateLimit || config.maxEventsPerSec || 100;
       next();
@@ -401,21 +432,42 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
     // Single event
     socket.on("sync_data", async (payload, callback) => {
       try {
+        const clientIp = socket.data.clientIp || extractSocketClientIp(socket);
         const dbCheck = await verifyClientInDb(
           clientId,
           socket.data.token,
           false,
+          clientIp,
         );
         if (!dbCheck.allowed) {
           if (callback) {
             callback({
               success: false,
-              code: "CLIENT_REVOKED",
+              code: dbCheck.code || "CLIENT_REVOKED",
               error: dbCheck.reason || "CLIENT_REVOKED",
             });
           }
           socket.disconnect(true);
           return;
+        }
+
+        if (worker && typeof worker.checkStorageAdmission === "function") {
+          const config = getRuntimeConfig();
+          const admission = await worker.checkStorageAdmission(
+            clientId,
+            dbCheck.storageQuotaMb || 0,
+            config.diskPauseThresholdPct ?? 95,
+          );
+          if (!admission.allowed) {
+            if (callback) {
+              callback({
+                success: false,
+                code: admission.code,
+                error: admission.reason,
+              });
+            }
+            return;
+          }
         }
 
         const effectiveClientRate =
@@ -499,10 +551,12 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
           return;
         }
 
+        const clientIp = socket.data.clientIp || extractSocketClientIp(socket);
         const dbCheck = await verifyClientInDb(
           clientId,
           socket.data.token,
           false,
+          clientIp,
         );
         if (!dbCheck.allowed) {
           if (callback) {
@@ -510,12 +564,33 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
               success: false,
               processed: 0,
               rejected: batch.length,
-              code: "CLIENT_REVOKED",
+              code: dbCheck.code || "CLIENT_REVOKED",
               error: dbCheck.reason || "CLIENT_REVOKED",
             });
           }
           socket.disconnect(true);
           return;
+        }
+
+        if (worker && typeof worker.checkStorageAdmission === "function") {
+          const config = getRuntimeConfig();
+          const admission = await worker.checkStorageAdmission(
+            clientId,
+            dbCheck.storageQuotaMb || 0,
+            config.diskPauseThresholdPct ?? 95,
+          );
+          if (!admission.allowed) {
+            if (callback) {
+              callback({
+                success: false,
+                processed: 0,
+                rejected: batch.length,
+                code: admission.code,
+                error: admission.reason,
+              });
+            }
+            return;
+          }
         }
 
         const effectiveClientRate =
@@ -646,16 +721,19 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
     // Heartbeat & Reconnection Verification Event
     socket.on("ping_verify", async (_payload, callback) => {
       try {
+        const clientIp = socket.data.clientIp || extractSocketClientIp(socket);
         const dbCheck = await verifyClientInDb(
           clientId,
           socket.data.token,
           true,
+          clientIp,
         );
         if (!dbCheck.allowed) {
           if (callback) {
             callback({
               success: false,
               status: "REVOKED",
+              code: dbCheck.code || "CLIENT_REVOKED",
               error: dbCheck.reason || "CLIENT_REVOKED",
             });
           }
@@ -691,4 +769,4 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
   };
 }
 
-module.exports = { setupSocketHandlers, normalizeClientId };
+module.exports = { setupSocketHandlers, normalizeClientId, extractSocketClientIp };

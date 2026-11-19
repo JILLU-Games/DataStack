@@ -23,7 +23,10 @@ export async function GET(req: NextRequest) {
       ? CSVStorageManager.sanitizeClientId(clientId)
       : undefined;
 
-    const allFiles = await CSVStorageManager.listAllFilesAsync();
+    const [allFiles, diskUsage] = await Promise.all([
+      CSVStorageManager.listAllFilesAsync(),
+      CSVStorageManager.getDiskUsageAsync(),
+    ]);
     let files = allFiles;
 
     if (clientId) {
@@ -39,7 +42,7 @@ export async function GET(req: NextRequest) {
 
     const stats = CSVStorageManager.formatStorageStats(files);
 
-    return NextResponse.json({ stats, files });
+    return NextResponse.json({ stats, files, diskUsage });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Storage stats failed';
     return NextResponse.json({ error: message }, { status: 500 });

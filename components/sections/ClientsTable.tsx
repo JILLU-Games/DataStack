@@ -47,6 +47,9 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
   const [editClient, setEditClient] = useState<ClientItem | null>(null);
   const [editName, setEditName] = useState('');
   const [editRateLimit, setEditRateLimit] = useState('100');
+  const [editStorageQuotaMb, setEditStorageQuotaMb] = useState('0');
+  const [editAllowedIps, setEditAllowedIps] = useState('');
+  const [editExpiresAt, setEditExpiresAt] = useState('');
   const [editError, setEditError] = useState('');
   const [processing, setProcessing] = useState(false);
 
@@ -59,6 +62,18 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
     setEditClient(client);
     setEditName(client.name);
     setEditRateLimit(String(client.rateLimit || 100));
+    setEditStorageQuotaMb(String(client.storageQuotaMb ?? 0));
+    setEditAllowedIps(client.allowedIps || '');
+    if (client.expiresAt) {
+      const parsedDate = new Date(client.expiresAt);
+      setEditExpiresAt(
+        !Number.isNaN(parsedDate.getTime())
+          ? parsedDate.toISOString().slice(0, 16)
+          : '',
+      );
+    } else {
+      setEditExpiresAt('');
+    }
     setEditError('');
   };
 
@@ -68,6 +83,9 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
 
     const trimmedName = editName.trim();
     const numericRateLimit = Number(editRateLimit);
+    const numericQuotaMb = Number(
+      editStorageQuotaMb.trim() === '' ? '0' : editStorageQuotaMb,
+    );
     if (!trimmedName) {
       setEditError('Display name is required.');
       return;
@@ -75,6 +93,19 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
     if (!Number.isInteger(numericRateLimit) || numericRateLimit < 1 || numericRateLimit > 100000) {
       setEditError('Rate limit must be an integer between 1 and 100,000 events/s.');
       return;
+    }
+    if (!Number.isInteger(numericQuotaMb) || numericQuotaMb < 0 || numericQuotaMb > 1048576) {
+      setEditError('Storage quota must be an integer between 0 and 1,048,576 MB (0 = unlimited).');
+      return;
+    }
+    let normalizedExpiresAt: string | null = null;
+    if (editExpiresAt.trim()) {
+      const parsedDate = new Date(editExpiresAt.trim());
+      if (Number.isNaN(parsedDate.getTime())) {
+        setEditError('Expiration date/time is invalid.');
+        return;
+      }
+      normalizedExpiresAt = parsedDate.toISOString();
     }
 
     setEditError('');
@@ -86,6 +117,9 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
         body: JSON.stringify({
           name: trimmedName,
           rateLimit: Math.floor(numericRateLimit),
+          storageQuotaMb: Math.floor(numericQuotaMb),
+          allowedIps: editAllowedIps.trim(),
+          expiresAt: normalizedExpiresAt,
         }),
       });
       if (response.status === 401) {
@@ -224,17 +258,32 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
             ) : (
               clients.map((client) => {
                 const revoked = client.status === 'revoked';
-                const online = client.status === 'active' && Boolean(client.lastActive) &&
+                const expired =
+                  Boolean(client.expiresAt) &&
+                  now >= new Date(client.expiresAt!).getTime();
+                const online =
+                  client.status === 'active' &&
+                  !expired &&
+                  Boolean(client.lastActive) &&
                   now - new Date(client.lastActive!).getTime() < 60_000;
-                const pending = client.status === 'active' && !client.lastActive;
-                const label = revoked ? 'revoked' : pending ? 'pending' : online ? 'online' : 'offline';
-                const dotClass = revoked
-                  ? 'bg-[var(--danger)]'
-                  : online
-                    ? 'bg-[var(--accent)]'
+                const pending = client.status === 'active' && !expired && !client.lastActive;
+                const label = revoked
+                  ? 'revoked'
+                  : expired
+                    ? 'expired'
                     : pending
-                      ? 'bg-[var(--warning)]'
-                      : 'bg-[var(--text-faint)]';
+                      ? 'pending'
+                      : online
+                        ? 'online'
+                        : 'offline';
+                const dotClass =
+                  revoked || expired
+                    ? 'bg-[var(--danger)]'
+                    : online
+                      ? 'bg-[var(--accent)]'
+                      : pending
+                        ? 'bg-[var(--warning)]'
+                        : 'bg-[var(--text-faint)]';
 
                 return (
                   <TableRow key={client.clientId}>
@@ -249,6 +298,11 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
                                 revoked
                               </span>
                             )}
+                            {expired && (
+                              <span className="border border-[var(--danger)] bg-[var(--danger-soft)] px-1 py-0 text-[9px] uppercase tracking-wider text-[var(--danger)]">
+                                expired
+                              </span>
+                            )}
                           </div>
                           <div className="mt-0.5 truncate font-mono text-[10.5px] text-[var(--text-faint)]">{client.clientId}</div>
                         </div>
@@ -259,7 +313,11 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
                         {client.tokenPreview || 'JWT Active'}
                       </div>
                       <div className="mt-0.5 text-[10px] text-[var(--text-faint)]">
-                        {client.rateLimit}/s limit
+                        {client.rateLimit}/s · {(client.storageQuotaMb ?? 0) > 0 ? `${client.storageQuotaMb}MB quota` : 'Unlimited'}
+                        {client.allowedIps ? ` · IP: ${client.allowedIps}` : ''}
+                        {client.expiresAt
+                          ? ` · Exp: ${new Date(client.expiresAt).toISOString().slice(0, 10)}`
+                          : ''}
                       </div>
                     </TableCell>
                     <TableCell className="text-right font-mono tabular-nums">
@@ -375,6 +433,46 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
             onChange={(event) => setEditRateLimit(event.target.value)}
             required
           />
+          <Input
+            label="Storage quota (MB, 0 = unlimited)"
+            compact
+            type="number"
+            min="0"
+            max="1048576"
+            value={editStorageQuotaMb}
+            onChange={(event) => setEditStorageQuotaMb(event.target.value)}
+            required
+          />
+          <Input
+            label="Allowed IPs / CIDR (blank = allow all)"
+            compact
+            value={editAllowedIps}
+            onChange={(event) => setEditAllowedIps(event.target.value)}
+            placeholder="203.0.113.10, 10.0.0.0/8"
+            className="font-mono text-[11px]"
+          />
+          <div className="flex items-end gap-1.5">
+            <div className="min-w-0 flex-1">
+              <Input
+                label="Token expiration (optional)"
+                compact
+                type="datetime-local"
+                value={editExpiresAt}
+                onChange={(event) => setEditExpiresAt(event.target.value)}
+                className="font-mono text-[11px]"
+              />
+            </div>
+            {editExpiresAt && (
+              <Button
+                type="button"
+                size="xs"
+                variant="ghost"
+                onClick={() => setEditExpiresAt('')}
+              >
+                Clear
+              </Button>
+            )}
+          </div>
           {editError && (
             <p role="alert" className="text-[11px] text-[var(--danger)]">
               {editError}

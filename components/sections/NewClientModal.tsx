@@ -19,6 +19,9 @@ export function NewClientModal({ open, onClose, onCreated }: NewClientModalProps
   const [clientId, setClientId] = useState('');
   const [name, setName] = useState('');
   const [rateLimit, setRateLimit] = useState('100');
+  const [storageQuotaMb, setStorageQuotaMb] = useState('0');
+  const [allowedIps, setAllowedIps] = useState('');
+  const [expiresAt, setExpiresAt] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [credentials, setCredentials] = useState<ClientCredentials | null>(null);
 
@@ -35,12 +38,33 @@ export function NewClientModal({ open, onClose, onCreated }: NewClientModalProps
       error('Validation error', 'Rate limit must be an integer between 1 and 100,000 events/s.');
       return;
     }
+    const numericQuotaMb = Number(storageQuotaMb.trim() === '' ? '0' : storageQuotaMb);
+    if (!Number.isInteger(numericQuotaMb) || numericQuotaMb < 0 || numericQuotaMb > 1048576) {
+      error('Validation error', 'Storage quota must be an integer between 0 and 1,048,576 MB (0 = unlimited).');
+      return;
+    }
+    let normalizedExpiresAt: string | null = null;
+    if (expiresAt.trim()) {
+      const parsedDate = new Date(expiresAt.trim());
+      if (Number.isNaN(parsedDate.getTime())) {
+        error('Validation error', 'Token expiration must be a valid date/time.');
+        return;
+      }
+      normalizedExpiresAt = parsedDate.toISOString();
+    }
     setSubmitting(true);
     try {
       const response = await fetch('/api/clients', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clientId: trimmedId, name: trimmedName, rateLimit: numericRate }),
+        body: JSON.stringify({
+          clientId: trimmedId,
+          name: trimmedName,
+          rateLimit: numericRate,
+          storageQuotaMb: numericQuotaMb,
+          allowedIps: allowedIps.trim(),
+          expiresAt: normalizedExpiresAt,
+        }),
       });
       if (response.status === 401) {
         window.location.assign('/vcon/login');
@@ -53,6 +77,9 @@ export function NewClientModal({ open, onClose, onCreated }: NewClientModalProps
       setClientId('');
       setName('');
       setRateLimit('100');
+      setStorageQuotaMb('0');
+      setAllowedIps('');
+      setExpiresAt('');
       onClose();
       success('Client registered', `${data.client.clientId} is ready to connect.`);
       await onCreated();
@@ -102,6 +129,31 @@ export function NewClientModal({ open, onClose, onCreated }: NewClientModalProps
             max="100000"
             value={rateLimit}
             onChange={(event) => setRateLimit(event.target.value)}
+          />
+          <Input
+            compact
+            label="Storage quota (MB, 0 = unlimited)"
+            type="number"
+            min="0"
+            max="1048576"
+            value={storageQuotaMb}
+            onChange={(event) => setStorageQuotaMb(event.target.value)}
+          />
+          <Input
+            compact
+            label="Allowed IPs / CIDR (blank = allow all)"
+            placeholder="203.0.113.10, 10.0.0.0/8"
+            value={allowedIps}
+            onChange={(event) => setAllowedIps(event.target.value)}
+            className="font-mono text-[11px]"
+          />
+          <Input
+            compact
+            label="Token expiration (optional)"
+            type="datetime-local"
+            value={expiresAt}
+            onChange={(event) => setExpiresAt(event.target.value)}
+            className="font-mono text-[11px]"
           />
         </form>
       </Modal>

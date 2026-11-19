@@ -1,7 +1,10 @@
 import crypto from 'node:crypto';
 import fs from 'fs';
 import path from 'path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { StringDecoder } from 'node:string_decoder';
+import zlib from 'node:zlib';
 import { Parser } from 'json2csv';
 
 export interface DataEvent {
@@ -19,7 +22,27 @@ export interface StorageFileMeta {
   sizeBytes: number;
   linesCount: number;
   modifiedAt: Date;
+  compressed?: boolean;
 }
+
+export interface DiskUsageSnapshot {
+  usedPct: number;
+  availableBytes: number;
+  totalBytes: number;
+  checkedAt: number;
+}
+
+export interface StorageAdmissionResult {
+  allowed: boolean;
+  code?: 'DISK_SPACE_LOW' | 'STORAGE_QUOTA_EXCEEDED';
+  reason?: string;
+}
+
+export type StatfsProvider = (dir: string) => Promise<{
+  blocks: number;
+  bavail: number;
+  bsize: number;
+}>;
 
 interface RowCountCacheEntry {
   sizeBytes: number;
@@ -31,6 +54,7 @@ const LOCK_RETRY_MIN_MS = 5;
 const LOCK_RETRY_MAX_MS = 18;
 const LOCK_TIMEOUT_MS = 10_000;
 const STALE_LOCK_AGE_MS = 30_000;
+const QUOTA_CACHE_TTL_MS = 30_000;
 
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -49,9 +73,37 @@ export class CSVStorageManager {
   public static baseStorageDir = resolveDefaultStorageDir();
   public static maxFileSizeBytes = 100 * 1024 * 1024; // 100MB rotation limit
   private static rowCountCache = new Map<string, RowCountCacheEntry>();
+  private static diskUsageCache: DiskUsageSnapshot | null = null;
+  private static clientBytesCache = new Map<
+    string,
+    { checkedAt: number; bytes: number }
+  >();
+  private static statfsOverrideForTests: StatfsProvider | null = null;
+
+  public static isPartitionFilename(filename: string): boolean {
+    return filename.endsWith('.csv') || filename.endsWith('.csv.gz');
+  }
+
+  public static extractDateFromFilename(filename: string): string {
+    return filename.replace(/\.csv(?:\.gz)?$/, '').split('-part')[0];
+  }
 
   public static clearRowCountCache(): void {
     this.rowCountCache.clear();
+  }
+
+  public static clearQuotaCaches(clientId?: string): void {
+    this.diskUsageCache = null;
+    if (clientId) {
+      this.clientBytesCache.delete(this.sanitizeClientId(clientId));
+    } else {
+      this.clientBytesCache.clear();
+    }
+  }
+
+  public static setStatfsOverrideForTests(provider: StatfsProvider | null): void {
+    this.statfsOverrideForTests = provider;
+    this.diskUsageCache = null;
   }
 
   public static sanitizeClientId(clientId: string): string {
@@ -299,6 +351,12 @@ export class CSVStorageManager {
 
   private static countCsvDataRowsChunkedSync(filePath: string): number {
     const counter = this.createChunkRowCounter();
+    if (filePath.endsWith('.gz')) {
+      const compressed = fs.readFileSync(filePath);
+      const decompressed = zlib.gunzipSync(compressed);
+      counter.pushChunk(decompressed);
+      return counter.finish();
+    }
     const buf = Buffer.allocUnsafe(64 * 1024);
     const fd = fs.openSync(filePath, 'r');
     try {
@@ -312,14 +370,34 @@ export class CSVStorageManager {
     }
   }
 
+  public static openPartitionTextStream(filePath: string): Readable {
+    const fileStream = fs.createReadStream(filePath, {
+      highWaterMark: 64 * 1024,
+    });
+    if (!filePath.endsWith('.gz')) {
+      return fileStream;
+    }
+    const gunzip = zlib.createGunzip();
+    fileStream.on('error', (err) => {
+      if (!gunzip.destroyed) {
+        gunzip.destroy(err);
+      }
+    });
+    gunzip.on('close', () => {
+      if (!fileStream.destroyed) {
+        fileStream.destroy();
+      }
+    });
+    fileStream.pipe(gunzip);
+    return gunzip;
+  }
+
   private static async countCsvDataRowsStreamAsync(
     filePath: string,
   ): Promise<number> {
     const counter = this.createChunkRowCounter();
     return new Promise<number>((resolve, reject) => {
-      const stream = fs.createReadStream(filePath, {
-        highWaterMark: 64 * 1024,
-      });
+      const stream = this.openPartitionTextStream(filePath);
       stream.on('data', (chunk) => counter.pushChunk(chunk));
       stream.on('end', () => resolve(counter.finish()));
       stream.on('error', (err) => reject(err));
@@ -437,8 +515,9 @@ export class CSVStorageManager {
           fs.writeFileSync(resolvedPath, fullCsv, 'utf8');
         }
 
-        // Invalidate row cache for modified file immediately
+        // Invalidate row & quota caches for modified file immediately
         this.rowCountCache.delete(resolvedPath);
+        this.clearQuotaCaches(clientId);
         return resolvedPath;
       });
 
@@ -449,7 +528,7 @@ export class CSVStorageManager {
   }
 
   /**
-   * List all stored CSV files with cached row counts (invalidated on mtime/size changes)
+   * List all stored CSV and gzipped CSV (.csv / .csv.gz) files with cached row counts
    */
   public static listAllFiles(): StorageFileMeta[] {
     const results: StorageFileMeta[] = [];
@@ -473,7 +552,7 @@ export class CSVStorageManager {
 
         const files = fs.readdirSync(fullClientPath);
         for (const file of files) {
-          if (!file.endsWith('.csv')) continue;
+          if (!this.isPartitionFilename(file)) continue;
           const fullFilePath = path.join(fullClientPath, file);
           let stats: fs.Stats;
           try {
@@ -505,7 +584,7 @@ export class CSVStorageManager {
             }
           }
 
-          const datePart = file.replace('.csv', '').split('-part')[0];
+          const datePart = this.extractDateFromFilename(file);
 
           results.push({
             clientId: clientDir,
@@ -515,6 +594,7 @@ export class CSVStorageManager {
             sizeBytes: stats.size,
             linesCount,
             modifiedAt: stats.mtime,
+            compressed: file.endsWith('.csv.gz'),
           });
         }
       }
@@ -551,7 +631,7 @@ export class CSVStorageManager {
 
         const files = await fs.promises.readdir(fullClientPath);
         for (const file of files) {
-          if (!file.endsWith('.csv')) continue;
+          if (!this.isPartitionFilename(file)) continue;
           const fullFilePath = path.join(fullClientPath, file);
           const stats = await fs.promises.lstat(fullFilePath).catch(() => null);
           if (!stats || stats.isSymbolicLink() || !stats.isFile()) continue;
@@ -578,7 +658,7 @@ export class CSVStorageManager {
             }
           }
 
-          const datePart = file.replace('.csv', '').split('-part')[0];
+          const datePart = this.extractDateFromFilename(file);
 
           results.push({
             clientId: clientDir,
@@ -588,6 +668,7 @@ export class CSVStorageManager {
             sizeBytes: stats.size,
             linesCount,
             modifiedAt: stats.mtime,
+            compressed: file.endsWith('.csv.gz'),
           });
         }
       }
@@ -605,7 +686,121 @@ export class CSVStorageManager {
   }
 
   /**
-   * Prune CSV partitions older than autoPruneDays under cooperative partition locks
+   * Compress uncompressed .csv partitions older than compressAfterDays into .csv.gz under cooperative partition locks
+   */
+  public static async compressOldPartitionsAsync(
+    compressAfterDays: number,
+  ): Promise<number> {
+    if (!Number.isFinite(compressAfterDays) || compressAfterDays <= 0) {
+      return 0;
+    }
+
+    const baseStat = await fs.promises.lstat(this.baseStorageDir).catch(() => null);
+    if (!baseStat || !baseStat.isDirectory()) {
+      return 0;
+    }
+
+    const cutoffDate = new Date(
+      Date.now() - Math.floor(compressAfterDays) * 86_400_000,
+    )
+      .toISOString()
+      .split('T')[0];
+
+    let compressedCount = 0;
+    try {
+      const clientDirs = await fs.promises.readdir(this.baseStorageDir);
+      for (const clientDir of clientDirs) {
+        const fullClientPath = path.join(this.baseStorageDir, clientDir);
+        const dirLstat = await fs.promises.lstat(fullClientPath).catch(() => null);
+        if (!dirLstat || dirLstat.isSymbolicLink() || !dirLstat.isDirectory()) {
+          continue;
+        }
+
+        const files = await fs.promises
+          .readdir(fullClientPath)
+          .catch(() => [] as string[]);
+        for (const file of files) {
+          if (!file.endsWith('.csv')) continue;
+          const datePart = this.extractDateFromFilename(file);
+          if (!(/^\d{4}-\d{2}-\d{2}$/.test(datePart) && datePart < cutoffDate)) {
+            continue;
+          }
+          const fullPath = path.join(fullClientPath, file);
+          const fileLstat = await fs.promises.lstat(fullPath).catch(() => null);
+          if (!fileLstat || fileLstat.isSymbolicLink() || !fileLstat.isFile()) {
+            continue;
+          }
+
+          const lockPath = path.join(fullClientPath, `.${datePart}.csv.lock`);
+          const lockValue = `${process.pid}:${Date.now()}:${crypto.randomUUID()}`;
+          let acquired = false;
+          const tryAcquireLock = async (): Promise<boolean> => {
+            const handle = await fs.promises.open(lockPath, 'wx');
+            try {
+              await handle.writeFile(lockValue, 'utf8');
+            } finally {
+              await handle.close();
+            }
+            return true;
+          };
+
+          try {
+            acquired = await tryAcquireLock();
+          } catch (err: unknown) {
+            if ((err as NodeJS.ErrnoException)?.code === 'EEXIST') {
+              await this.removeStaleLockAtomicallyAsync(lockPath);
+              try {
+                acquired = await tryAcquireLock();
+              } catch {
+                acquired = false;
+              }
+            }
+          }
+
+          if (!acquired) continue;
+
+          let targetGzPath = `${fullPath}.gz`;
+          if (fs.existsSync(targetGzPath)) {
+            const stem = fullPath.replace(/\.csv$/, '');
+            let suffix = 2;
+            while (fs.existsSync(`${stem}-gz${suffix}.csv.gz`)) {
+              suffix += 1;
+            }
+            targetGzPath = `${stem}-gz${suffix}.csv.gz`;
+          }
+          const tmpGzPath = `${targetGzPath}.tmp.${crypto.randomUUID()}`;
+
+          try {
+            await pipeline(
+              fs.createReadStream(fullPath, { highWaterMark: 64 * 1024 }),
+              zlib.createGzip({ level: 6 }),
+              fs.createWriteStream(tmpGzPath),
+            );
+            await fs.promises
+              .utimes(tmpGzPath, fileLstat.atime, fileLstat.mtime)
+              .catch(() => undefined);
+            await fs.promises.rename(tmpGzPath, targetGzPath);
+            await fs.promises.unlink(fullPath);
+            this.rowCountCache.delete(fullPath);
+            this.rowCountCache.delete(targetGzPath);
+            this.clearQuotaCaches(clientDir);
+            compressedCount += 1;
+          } catch {
+            await fs.promises.unlink(tmpGzPath).catch(() => undefined);
+          } finally {
+            await this.releaseLockIfOwnedAsync(lockPath, lockValue);
+          }
+        }
+      }
+    } catch {
+      // Ignore directory scan failure
+    }
+
+    return compressedCount;
+  }
+
+  /**
+   * Prune CSV / CSV.GZ partitions older than autoPruneDays under cooperative partition locks
    */
   public static pruneExpiredPartitions(autoPruneDays: number): number {
     if (!Number.isFinite(autoPruneDays) || autoPruneDays <= 0) {
@@ -636,8 +831,8 @@ export class CSVStorageManager {
 
         const files = fs.readdirSync(fullClientPath);
         for (const file of files) {
-          if (!file.endsWith('.csv')) continue;
-          const datePart = file.replace('.csv', '').split('-part')[0];
+          if (!this.isPartitionFilename(file)) continue;
+          const datePart = this.extractDateFromFilename(file);
           if (/^\d{4}-\d{2}-\d{2}$/.test(datePart) && datePart < cutoffDate) {
             const fullPath = path.join(fullClientPath, file);
             let fileLstat: fs.Stats;
@@ -683,6 +878,7 @@ export class CSVStorageManager {
               if (fs.existsSync(fullPath)) {
                 fs.unlinkSync(fullPath);
                 this.rowCountCache.delete(fullPath);
+                this.clearQuotaCaches(clientDir);
                 prunedCount += 1;
               }
             } catch {
@@ -701,27 +897,54 @@ export class CSVStorageManager {
   }
 
   /**
-   * Non-blocking async partition pruner using fs.promises under cooperative partition locks
+   * Archive and/or prune expired partitions under cooperative partition locks.
+   * Never deletes a local partition if options.beforeDeleteFile throws or rejects (V2-E02).
    */
-  public static async pruneExpiredPartitionsAsync(
+  public static async pruneOrArchiveExpiredPartitionsAsync(
     autoPruneDays: number,
-  ): Promise<number> {
-    if (!Number.isFinite(autoPruneDays) || autoPruneDays <= 0) {
-      return 0;
+    options?: {
+      beforeDeleteFile?: (file: {
+        clientId: string;
+        filename: string;
+        filePath: string;
+        date: string;
+      }) => Promise<void>;
+      archiveOnlyWithoutDelete?: boolean;
+      maxCutoffDays?: number;
+    },
+  ): Promise<{
+    scannedCount: number;
+    archivedCount: number;
+    prunedCount: number;
+    errors: string[];
+  }> {
+    const targetDays =
+      options?.maxCutoffDays !== undefined
+        ? options.maxCutoffDays
+        : autoPruneDays;
+    if (!Number.isFinite(targetDays) || targetDays < 0) {
+      return { scannedCount: 0, archivedCount: 0, prunedCount: 0, errors: [] };
+    }
+    if (options?.maxCutoffDays === undefined && targetDays <= 0) {
+      return { scannedCount: 0, archivedCount: 0, prunedCount: 0, errors: [] };
     }
 
     const baseStat = await fs.promises.lstat(this.baseStorageDir).catch(() => null);
     if (!baseStat || !baseStat.isDirectory()) {
-      return 0;
+      return { scannedCount: 0, archivedCount: 0, prunedCount: 0, errors: [] };
     }
 
     const cutoffDate = new Date(
-      Date.now() - Math.floor(autoPruneDays) * 86_400_000,
+      Date.now() - Math.floor(targetDays) * 86_400_000,
     )
       .toISOString()
       .split('T')[0];
 
+    let scannedCount = 0;
+    let archivedCount = 0;
     let prunedCount = 0;
+    const errors: string[] = [];
+
     try {
       const clientDirs = await fs.promises.readdir(this.baseStorageDir);
       for (const clientDir of clientDirs) {
@@ -731,54 +954,71 @@ export class CSVStorageManager {
           continue;
         }
 
-        const files = await fs.promises.readdir(fullClientPath).catch(() => [] as string[]);
+        const files = await fs.promises
+          .readdir(fullClientPath)
+          .catch(() => [] as string[]);
         for (const file of files) {
-          if (!file.endsWith('.csv')) continue;
-          const datePart = file.replace('.csv', '').split('-part')[0];
-          if (/^\d{4}-\d{2}-\d{2}$/.test(datePart) && datePart < cutoffDate) {
-            const fullPath = path.join(fullClientPath, file);
-            const fileLstat = await fs.promises.lstat(fullPath).catch(() => null);
-            if (!fileLstat || fileLstat.isSymbolicLink() || !fileLstat.isFile()) {
-              continue;
-            }
+          if (!this.isPartitionFilename(file)) continue;
+          const datePart = this.extractDateFromFilename(file);
+          if (!(/^\d{4}-\d{2}-\d{2}$/.test(datePart) && datePart < cutoffDate)) {
+            continue;
+          }
+          const fullPath = path.join(fullClientPath, file);
+          const fileLstat = await fs.promises.lstat(fullPath).catch(() => null);
+          if (!fileLstat || fileLstat.isSymbolicLink() || !fileLstat.isFile()) {
+            continue;
+          }
+          scannedCount += 1;
 
-            const lockPath = path.join(fullClientPath, `.${datePart}.csv.lock`);
-            const lockValue = `${process.pid}:${Date.now()}:${crypto.randomUUID()}`;
-            let acquired = false;
-            const tryAcquireLock = async (): Promise<boolean> => {
-              const handle = await fs.promises.open(lockPath, 'wx');
+          const lockPath = path.join(fullClientPath, `.${datePart}.csv.lock`);
+          const lockValue = `${process.pid}:${Date.now()}:${crypto.randomUUID()}`;
+          let acquired = false;
+          const tryAcquireLock = async (): Promise<boolean> => {
+            const handle = await fs.promises.open(lockPath, 'wx');
+            try {
+              await handle.writeFile(lockValue, 'utf8');
+            } finally {
+              await handle.close();
+            }
+            return true;
+          };
+
+          try {
+            acquired = await tryAcquireLock();
+          } catch (err: unknown) {
+            if ((err as NodeJS.ErrnoException)?.code === 'EEXIST') {
+              await this.removeStaleLockAtomicallyAsync(lockPath);
               try {
-                await handle.writeFile(lockValue, 'utf8');
-              } finally {
-                await handle.close();
-              }
-              return true;
-            };
-
-            try {
-              acquired = await tryAcquireLock();
-            } catch (err: unknown) {
-              if ((err as NodeJS.ErrnoException)?.code === 'EEXIST') {
-                await this.removeStaleLockAtomicallyAsync(lockPath);
-                try {
-                  acquired = await tryAcquireLock();
-                } catch {
-                  acquired = false;
-                }
+                acquired = await tryAcquireLock();
+              } catch {
+                acquired = false;
               }
             }
+          }
 
-            if (!acquired) continue;
+          if (!acquired) continue;
 
-            try {
+          try {
+            if (options?.beforeDeleteFile) {
+              await options.beforeDeleteFile({
+                clientId: clientDir,
+                filename: file,
+                filePath: fullPath,
+                date: datePart,
+              });
+              archivedCount += 1;
+            }
+            if (!options?.archiveOnlyWithoutDelete) {
               await fs.promises.unlink(fullPath);
               this.rowCountCache.delete(fullPath);
+              this.clearQuotaCaches(clientDir);
               prunedCount += 1;
-            } catch {
-              // Ignore individual unlink error or concurrent removal
-            } finally {
-              await this.releaseLockIfOwnedAsync(lockPath, lockValue);
             }
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : 'Archive/prune error';
+            errors.push(`${clientDir}/${file}: ${msg}`);
+          } finally {
+            await this.releaseLockIfOwnedAsync(lockPath, lockValue);
           }
         }
       }
@@ -786,7 +1026,149 @@ export class CSVStorageManager {
       // Ignore directory scan failure
     }
 
-    return prunedCount;
+    return { scannedCount, archivedCount, prunedCount, errors };
+  }
+
+  /**
+   * Non-blocking async partition pruner using fs.promises under cooperative partition locks
+   */
+  public static async pruneExpiredPartitionsAsync(
+    autoPruneDays: number,
+  ): Promise<number> {
+    const res = await this.pruneOrArchiveExpiredPartitionsAsync(autoPruneDays);
+    return res.prunedCount;
+  }
+
+  /**
+   * Cached VPS filesystem disk usage snapshot (30s TTL) for disk-full protection
+   */
+  public static async getDiskUsageAsync(): Promise<DiskUsageSnapshot> {
+    const now = Date.now();
+    if (
+      this.diskUsageCache &&
+      now - this.diskUsageCache.checkedAt < QUOTA_CACHE_TTL_MS
+    ) {
+      return this.diskUsageCache;
+    }
+
+    let probeDir = path.resolve(this.baseStorageDir);
+    while (!fs.existsSync(probeDir)) {
+      const parent = path.dirname(probeDir);
+      if (parent === probeDir) break;
+      probeDir = parent;
+    }
+
+    try {
+      const statfsRes = this.statfsOverrideForTests
+        ? await this.statfsOverrideForTests(probeDir)
+        : await fs.promises.statfs(probeDir);
+      const bsize = Math.max(1, Number(statfsRes.bsize) || 4096);
+      const totalBytes = Math.max(0, Number(statfsRes.blocks) * bsize);
+      const availableBytes = Math.max(0, Number(statfsRes.bavail) * bsize);
+      const usedBytes = Math.max(0, totalBytes - availableBytes);
+      const usedPct =
+        totalBytes > 0
+          ? Number(
+              Math.min(100, Math.max(0, (usedBytes / totalBytes) * 100)).toFixed(2),
+            )
+          : 0;
+      const snapshot: DiskUsageSnapshot = {
+        usedPct,
+        availableBytes,
+        totalBytes,
+        checkedAt: now,
+      };
+      this.diskUsageCache = snapshot;
+      return snapshot;
+    } catch {
+      const fallback: DiskUsageSnapshot = {
+        usedPct: 0,
+        availableBytes: 0,
+        totalBytes: 0,
+        checkedAt: now,
+      };
+      this.diskUsageCache = fallback;
+      return fallback;
+    }
+  }
+
+  /**
+   * Cached per-client directory byte count (30s TTL)
+   */
+  public static async getClientStorageBytesAsync(
+    clientId: string,
+  ): Promise<number> {
+    const safeClientId = this.sanitizeClientId(clientId);
+    const now = Date.now();
+    const cached = this.clientBytesCache.get(safeClientId);
+    if (cached && now - cached.checkedAt < QUOTA_CACHE_TTL_MS) {
+      return cached.bytes;
+    }
+
+    const resolvedBase = path.resolve(this.baseStorageDir);
+    const clientDir = path.resolve(resolvedBase, safeClientId);
+    if (!clientDir.startsWith(resolvedBase + path.sep)) {
+      return 0;
+    }
+
+    let totalBytes = 0;
+    try {
+      const dirStat = await fs.promises.lstat(clientDir).catch(() => null);
+      if (dirStat && !dirStat.isSymbolicLink() && dirStat.isDirectory()) {
+        const entries = await fs.promises
+          .readdir(clientDir)
+          .catch(() => [] as string[]);
+        for (const entry of entries) {
+          if (!this.isPartitionFilename(entry)) continue;
+          const filePath = path.join(clientDir, entry);
+          const stats = await fs.promises.lstat(filePath).catch(() => null);
+          if (stats && !stats.isSymbolicLink() && stats.isFile()) {
+            totalBytes += stats.size;
+          }
+        }
+      }
+    } catch {
+      // Fall back to 0 on unreadable directory
+    }
+
+    this.clientBytesCache.set(safeClientId, { checkedAt: now, bytes: totalBytes });
+    return totalBytes;
+  }
+
+  /**
+   * Checks global VPS disk threshold and per-client MB quota before admitting new events
+   */
+  public static async checkStorageAdmissionAsync(
+    clientId: string,
+    clientQuotaMb: number,
+    diskPauseThresholdPct: number,
+  ): Promise<StorageAdmissionResult> {
+    const threshold = Number(diskPauseThresholdPct);
+    if (Number.isFinite(threshold) && threshold >= 50 && threshold <= 99) {
+      const disk = await this.getDiskUsageAsync();
+      if (disk.totalBytes > 0 && disk.usedPct >= threshold) {
+        return {
+          allowed: false,
+          code: 'DISK_SPACE_LOW',
+          reason: `DISK_SPACE_LOW: Disk utilization (${disk.usedPct.toFixed(1)}%) reached safety pause threshold (${threshold}%).`,
+        };
+      }
+    }
+
+    const quotaMb = Number(clientQuotaMb);
+    if (Number.isFinite(quotaMb) && quotaMb > 0) {
+      const currentBytes = await this.getClientStorageBytesAsync(clientId);
+      const quotaBytes = Math.floor(quotaMb) * 1024 * 1024;
+      if (currentBytes >= quotaBytes) {
+        return {
+          allowed: false,
+          code: 'STORAGE_QUOTA_EXCEEDED',
+          reason: `STORAGE_QUOTA_EXCEEDED: Client '${clientId}' used ${(currentBytes / (1024 * 1024)).toFixed(2)} MB of ${quotaMb} MB quota.`,
+        };
+      }
+    }
+
+    return { allowed: true };
   }
 
   public static formatStorageStats(files: StorageFileMeta[]) {
@@ -826,12 +1208,12 @@ export class CSVStorageManager {
   }
 
   /**
-   * Reads file content for export / download with path traversal protection
+   * Reads file content for export / download with path traversal protection (supports .csv & .csv.gz)
    */
   public static getFileContent(clientId: string, filename: string): string | null {
     const safeClientId = this.sanitizeClientId(clientId);
     const safeFilename = path.basename(String(filename || ''));
-    if (!safeClientId || !safeFilename || !safeFilename.endsWith('.csv')) {
+    if (!safeClientId || !safeFilename || !this.isPartitionFilename(safeFilename)) {
       return null;
     }
     const resolvedBase = path.resolve(this.baseStorageDir);
@@ -843,6 +1225,9 @@ export class CSVStorageManager {
       const stats = fs.lstatSync(fullPath);
       if (stats.isSymbolicLink() || !stats.isFile()) {
         return null;
+      }
+      if (safeFilename.endsWith('.gz')) {
+        return zlib.gunzipSync(fs.readFileSync(fullPath)).toString('utf8');
       }
       return fs.readFileSync(fullPath, 'utf8');
     }

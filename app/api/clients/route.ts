@@ -1,5 +1,9 @@
 import { verifyRequestAdminSession } from "@/core/auth/adminUsers";
 import { SDKManager } from "@/core/sdk/sdkManager";
+import {
+  validateAllowedIpsInput,
+  validateClientExpiresAtInput,
+} from "@/core/Security/ipAllowlist";
 import { NextRequest, NextResponse } from "next/server";
 
 const SESSION_COOKIE = "datastack_admin_session";
@@ -58,7 +62,14 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const { clientId, name, rateLimit } = body;
+    const {
+      clientId,
+      name,
+      rateLimit,
+      storageQuotaMb,
+      allowedIps,
+      expiresAt,
+    } = body;
 
     if (typeof clientId !== "string" || typeof name !== "string" || !clientId.trim() || !name.trim()) {
       return NextResponse.json(
@@ -83,6 +94,44 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const parsedQuotaMb = storageQuotaMb === undefined ? 0 : Number(storageQuotaMb);
+    if (!Number.isInteger(parsedQuotaMb) || parsedQuotaMb < 0 || parsedQuotaMb > 1048576) {
+      return NextResponse.json(
+        { error: "storageQuotaMb must be an integer between 0 and 1048576.", code: "VALIDATION_ERROR" },
+        { status: 400 },
+      );
+    }
+
+    let normalizedAllowedIps = "";
+    if (allowedIps !== undefined && allowedIps !== null) {
+      if (typeof allowedIps !== "string") {
+        return NextResponse.json(
+          { error: "allowedIps must be a string.", code: "VALIDATION_ERROR" },
+          { status: 400 },
+        );
+      }
+      const ipValidation = validateAllowedIpsInput(allowedIps);
+      if (!ipValidation.valid) {
+        return NextResponse.json(
+          { error: ipValidation.error || "Invalid allowedIps.", code: "VALIDATION_ERROR" },
+          { status: 400 },
+        );
+      }
+      normalizedAllowedIps = ipValidation.normalized;
+    }
+
+    let normalizedExpiresAt: string | null = null;
+    if (expiresAt !== undefined) {
+      const expValidation = validateClientExpiresAtInput(expiresAt);
+      if (!expValidation.valid) {
+        return NextResponse.json(
+          { error: expValidation.error || "Invalid expiresAt.", code: "VALIDATION_ERROR" },
+          { status: 400 },
+        );
+      }
+      normalizedExpiresAt = expValidation.normalized;
+    }
+
     const existing = await SDKManager.getClientAsync(safeClientId);
     if (existing) {
       return NextResponse.json(
@@ -95,6 +144,9 @@ export async function POST(req: NextRequest) {
       clientId: safeClientId,
       name: name.trim().slice(0, 120),
       rateLimit: parsedRateLimit,
+      storageQuotaMb: parsedQuotaMb,
+      allowedIps: normalizedAllowedIps,
+      expiresAt: normalizedExpiresAt,
     });
 
     return NextResponse.json({ client: newClient }, { status: 201 });

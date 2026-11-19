@@ -4,6 +4,10 @@ import { AuthService } from '@/core/auth/jwt';
 import { DataBufferEngine, REDIS_BUFFER_KEY } from '@/core/data/buffer';
 import { SDKManager } from '@/core/sdk/sdkManager';
 import {
+  isClientIpAllowed,
+  isClientTokenExpired,
+} from '@/core/Security/ipAllowlist';
+import {
   SecurityEngine,
   getInternalIngestionHeaders,
 } from '@/core/Security/security';
@@ -15,8 +19,7 @@ import {
 import { parse } from 'csv-parse';
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { requireAdminApiSession } from '@/lib/adminAuth';
+import { extractClientIp, requireAdminApiSession } from '@/lib/adminAuth';
 import type { BufferedBucket, BufferedSummary } from '@/lib/vconUiHelpers';
 
 const SESSION_COOKIE = 'datastack_admin_session';
@@ -233,10 +236,13 @@ async function getRecentStoredEvents(
 
   for (const file of files) {
     const fileTail: DataEvent[] = [];
-    const fileStream = createReadStream(file.filePath);
+    const fileStream = CSVStorageManager.openPartitionTextStream(file.filePath);
     const parser = fileStream.pipe(
       parse({ columns: true, skip_empty_lines: true, bom: true }),
     );
+    fileStream.on('error', (err) => {
+      if (!parser.destroyed) parser.destroy(err);
+    });
 
     try {
       for await (const record of parser as AsyncIterable<
@@ -254,7 +260,7 @@ async function getRecentStoredEvents(
         });
       }
     } catch (err) {
-      console.warn(`[API /events] Failed reading CSV partition ${file.filePath}:`, err);
+      console.warn(`[API /events] Failed reading partition ${file.filePath}:`, err);
     } finally {
       if (!parser.destroyed) parser.destroy();
       if (!fileStream.destroyed) fileStream.destroy();
@@ -476,6 +482,77 @@ export async function POST(req: NextRequest) {
           { status: 401 },
         );
       }
+      if (isClientTokenExpired(registeredClient.expiresAt)) {
+        SettingsManager.triggerWebhookAlert({
+          event: 'CLIENT_TOKEN_EXPIRED',
+          severity: 'warning',
+          title: 'Expired Client Token Rejected',
+          message: `Client '${clientId}' attempted HTTP ingestion with an expired token (expiresAt=${registeredClient.expiresAt}).`,
+          clientId,
+          details: { expiresAt: registeredClient.expiresAt },
+        });
+        return NextResponse.json(
+          {
+            error: `CLIENT_TOKEN_EXPIRED: Client '${clientId}' token expired at ${registeredClient.expiresAt}. Rotate or extend client expiration.`,
+            code: 'CLIENT_TOKEN_EXPIRED',
+          },
+          { status: 401 },
+        );
+      }
+      if (registeredClient.allowedIps && registeredClient.allowedIps.trim()) {
+        const clientIp = extractClientIp(req);
+        if (!isClientIpAllowed(clientIp, registeredClient.allowedIps)) {
+          SettingsManager.triggerWebhookAlert({
+            event: 'CLIENT_IP_FORBIDDEN',
+            severity: 'warning',
+            title: 'Unauthorized Client IP Blocked',
+            message: `Client '${clientId}' request from IP '${clientIp}' was blocked by allowedIps policy.`,
+            clientId,
+            details: {
+              clientIp,
+              allowedIps: registeredClient.allowedIps,
+            },
+          });
+          return NextResponse.json(
+            {
+              error: `CLIENT_IP_FORBIDDEN: Request IP '${clientIp}' is not authorized for client '${clientId}'.`,
+              code: 'CLIENT_IP_FORBIDDEN',
+            },
+            { status: 403 },
+          );
+        }
+      }
+    }
+
+    const storageAdmission = await CSVStorageManager.checkStorageAdmissionAsync(
+      clientId,
+      registeredClient.storageQuotaMb,
+      settings.diskPauseThresholdPct,
+    );
+    if (!storageAdmission.allowed) {
+      if (storageAdmission.code) {
+        SettingsManager.triggerWebhookAlert({
+          event: storageAdmission.code,
+          severity:
+            storageAdmission.code === 'DISK_SPACE_LOW' ? 'critical' : 'warning',
+          title:
+            storageAdmission.code === 'DISK_SPACE_LOW'
+              ? 'VPS Disk Pause Threshold Reached'
+              : 'Client Storage Quota Exceeded',
+          message:
+            storageAdmission.reason ||
+            `Storage admission paused (${storageAdmission.code}) for client '${clientId}'.`,
+          clientId,
+        });
+      }
+      return NextResponse.json(
+        {
+          success: false,
+          error: storageAdmission.reason,
+          code: storageAdmission.code,
+        },
+        { status: 507 },
+      );
     }
 
     const effectiveClientRate =

@@ -1,8 +1,9 @@
 import {
   SettingsManager,
-  type AdminSettings,
+  type AdminSettingsUpdateInput,
 } from "@/core/adminSettings/settingsManager";
 import { verifyRequestAdminSession } from "@/core/auth/adminUsers";
+import { SecretVaultError } from "@/core/Security/secretVault";
 import { NextRequest, NextResponse } from "next/server";
 
 const SESSION_COOKIE = "datastack_admin_session";
@@ -16,6 +17,24 @@ const ALLOWED_SETTING_KEYS = new Set([
   "enableIdempotency",
   "autoPruneDays",
   "jwtSecret",
+  "compressAfterDays",
+  "enableS3Backup",
+  "s3Endpoint",
+  "s3Region",
+  "s3Bucket",
+  "s3Prefix",
+  "s3AccessKeyId",
+  "s3SecretAccessKey",
+  "clearS3SecretKey",
+  "diskPauseThresholdPct",
+  "enableWebhookAlerts",
+  "webhookUrl",
+  "webhookSecret",
+  "clearWebhookSecret",
+  "webhookCooldownSec",
+  "enablePrometheusMetrics",
+  "prometheusMetricsToken",
+  "clearPrometheusToken",
 ]);
 
 function parseBoundedInt(
@@ -31,6 +50,21 @@ function parseBoundedInt(
     throw new Error(`${field} must be between ${min} and ${max}.`);
   }
   return raw;
+}
+
+function parseOptionalString(
+  raw: unknown,
+  field: string,
+  maxLength: number,
+): string {
+  if (typeof raw !== "string") {
+    throw new Error(`${field} must be a string.`);
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length > maxLength) {
+    throw new Error(`${field} must be at most ${maxLength} characters.`);
+  }
+  return trimmed;
 }
 
 export async function GET(req: NextRequest) {
@@ -109,7 +143,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const validated: Partial<AdminSettings> = {};
+    const validated: AdminSettingsUpdateInput = {};
     try {
       if (body.maxEventsPerSec !== undefined) {
         validated.maxEventsPerSec = parseBoundedInt(
@@ -159,14 +193,161 @@ export async function POST(req: NextRequest) {
           3650,
         );
       }
+      if (body.compressAfterDays !== undefined) {
+        validated.compressAfterDays = parseBoundedInt(
+          body.compressAfterDays,
+          "compressAfterDays",
+          0,
+          3650,
+        );
+      }
+      if (body.diskPauseThresholdPct !== undefined) {
+        const pct = parseBoundedInt(
+          body.diskPauseThresholdPct,
+          "diskPauseThresholdPct",
+          0,
+          99,
+        );
+        if (pct !== 0 && pct < 50) {
+          throw new Error(
+            "diskPauseThresholdPct must be 0 (disabled) or between 50 and 99.",
+          );
+        }
+        validated.diskPauseThresholdPct = pct;
+      }
       if (body.enableIdempotency !== undefined) {
         if (typeof body.enableIdempotency !== "boolean") {
           throw new Error("enableIdempotency must be a boolean.");
         }
         validated.enableIdempotency = body.enableIdempotency;
       }
+      if (body.enableS3Backup !== undefined) {
+        if (typeof body.enableS3Backup !== "boolean") {
+          throw new Error("enableS3Backup must be a boolean.");
+        }
+        validated.enableS3Backup = body.enableS3Backup;
+      }
+      if (body.s3Endpoint !== undefined) {
+        const ep = parseOptionalString(body.s3Endpoint, "s3Endpoint", 512);
+        if (ep) {
+          let parsedEp: URL;
+          try {
+            parsedEp = new URL(
+              /^https?:\/\//i.test(ep) ? ep : `https://${ep}`,
+            );
+          } catch {
+            throw new Error("s3Endpoint must be a valid http(s) URL.");
+          }
+          if (parsedEp.protocol !== "http:" && parsedEp.protocol !== "https:") {
+            throw new Error("s3Endpoint must use http:// or https://.");
+          }
+        }
+        validated.s3Endpoint = ep;
+      }
+      if (body.s3Region !== undefined) {
+        validated.s3Region =
+          parseOptionalString(body.s3Region, "s3Region", 64) || "auto";
+      }
+      if (body.s3Bucket !== undefined) {
+        validated.s3Bucket = parseOptionalString(
+          body.s3Bucket,
+          "s3Bucket",
+          128,
+        );
+      }
+      if (body.s3Prefix !== undefined) {
+        validated.s3Prefix = parseOptionalString(
+          body.s3Prefix,
+          "s3Prefix",
+          256,
+        );
+      }
+      if (body.s3AccessKeyId !== undefined) {
+        validated.s3AccessKeyId = parseOptionalString(
+          body.s3AccessKeyId,
+          "s3AccessKeyId",
+          256,
+        );
+      }
+      if (body.s3SecretAccessKey !== undefined) {
+        validated.s3SecretAccessKey = parseOptionalString(
+          body.s3SecretAccessKey,
+          "s3SecretAccessKey",
+          512,
+        );
+      }
+      if (body.clearS3SecretKey !== undefined) {
+        if (typeof body.clearS3SecretKey !== "boolean") {
+          throw new Error("clearS3SecretKey must be a boolean.");
+        }
+        validated.clearS3SecretKey = body.clearS3SecretKey;
+      }
+      if (body.enableWebhookAlerts !== undefined) {
+        if (typeof body.enableWebhookAlerts !== "boolean") {
+          throw new Error("enableWebhookAlerts must be a boolean.");
+        }
+        validated.enableWebhookAlerts = body.enableWebhookAlerts;
+      }
+      if (body.webhookUrl !== undefined) {
+        const wh = parseOptionalString(body.webhookUrl, "webhookUrl", 1024);
+        if (wh) {
+          let parsedWh: URL;
+          try {
+            parsedWh = new URL(wh);
+          } catch {
+            throw new Error("webhookUrl must be a valid http(s) URL.");
+          }
+          if (parsedWh.protocol !== "http:" && parsedWh.protocol !== "https:") {
+            throw new Error("webhookUrl must use http:// or https://.");
+          }
+        }
+        validated.webhookUrl = wh;
+      }
+      if (body.webhookSecret !== undefined) {
+        validated.webhookSecret = parseOptionalString(
+          body.webhookSecret,
+          "webhookSecret",
+          512,
+        );
+      }
+      if (body.clearWebhookSecret !== undefined) {
+        if (typeof body.clearWebhookSecret !== "boolean") {
+          throw new Error("clearWebhookSecret must be a boolean.");
+        }
+        validated.clearWebhookSecret = body.clearWebhookSecret;
+      }
+      if (body.webhookCooldownSec !== undefined) {
+        validated.webhookCooldownSec = parseBoundedInt(
+          body.webhookCooldownSec,
+          "webhookCooldownSec",
+          10,
+          86400,
+        );
+      }
+      if (body.enablePrometheusMetrics !== undefined) {
+        if (typeof body.enablePrometheusMetrics !== "boolean") {
+          throw new Error("enablePrometheusMetrics must be a boolean.");
+        }
+        validated.enablePrometheusMetrics = body.enablePrometheusMetrics;
+      }
+      if (body.prometheusMetricsToken !== undefined) {
+        validated.prometheusMetricsToken = parseOptionalString(
+          body.prometheusMetricsToken,
+          "prometheusMetricsToken",
+          512,
+        );
+      }
+      if (body.clearPrometheusToken !== undefined) {
+        if (typeof body.clearPrometheusToken !== "boolean") {
+          throw new Error("clearPrometheusToken must be a boolean.");
+        }
+        validated.clearPrometheusToken = body.clearPrometheusToken;
+      }
       if (body.jwtSecret !== undefined) {
-        if (typeof body.jwtSecret !== "string" || body.jwtSecret.trim().length < 32) {
+        if (
+          typeof body.jwtSecret !== "string" ||
+          body.jwtSecret.trim().length < 32
+        ) {
           throw new Error(
             "jwtSecret must be a string with at least 32 characters.",
           );
@@ -208,6 +389,12 @@ export async function POST(req: NextRequest) {
         : {}),
     });
   } catch (err: unknown) {
+    if (err instanceof SecretVaultError) {
+      return NextResponse.json(
+        { error: err.message, code: err.code },
+        { status: 500 },
+      );
+    }
     const message =
       err instanceof Error ? err.message : "Settings update failed";
     return NextResponse.json({ error: message }, { status: 500 });

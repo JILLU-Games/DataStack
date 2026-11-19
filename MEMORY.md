@@ -1,7 +1,7 @@
 # MEMORY.md — DataStack Cross-IDE Persistent Project Memory
 
 > **Last Synchronized**: 2026-11-19  
-> **Status**: **Production & Deployment Hardening Complete (`BASELINE-2026-11-19-R2` + Deployment Hardening) — `4 / 4` R2 Phases (`18/18` bugs) + `5/5` Docker/Coolify Redeploy Fixes (`DEPLOY-BUG-01`–`05`) Verified (`85/85` TS tests, `10/10` Python tests, ESLint-enabled build & lint `0` errors / `0` warnings).**  
+> **Status**: **V2-Phase-01 Complete & Verified (`BASELINE-2026-11-19-V2`) — `1 / 4` V2 Phases Done (Storage `.csv.gz` Auto-Compression, S3/R2 Off-Site Archive with AES-256-GCM Secret Vault, Per-Client `storageQuotaMb` & VPS Disk Pause Guard `HTTP 507`) — Verified (`89/89` TS tests, `10/10` Python tests, ESLint-enabled build & lint `0` errors / `0` warnings).**  
 > **Scope Rule**: Maintain this file accurately across VS Code, Google Antigravity, Cursor, and any other IDE after every modification, feature update, or bug fix (see `.ai-rules` and `AGENTS.md`).
 
 ---
@@ -299,6 +299,21 @@ All planned hardening & deployment phases (**Phase-01 through Phase-07**) are **
       - **`DEPLOY-BUG-04`**: Reordered `gracefulShutdown()` in `server/index.js` to close Socket.IO/HTTP ingress first (`closeServerGracefully()`), drain `pendingRedisWrites` and `flushBuffer()`/`flushPendingClientActivity()` with bounded timeouts (`2000ms`/`6000ms`), and close Redis (`quit()` with `2000ms` timeout + `.disconnect()` fallback) and PostgreSQL (`dbPool.end()` bounded `2000ms`); added `stop_grace_period: 20s` to both `web` and `ingestion` in `docker/docker-compose.yml`.
       - **`DEPLOY-BUG-05`**: Clarified Coolify `Base Directory: /` and `Docker Compose Location: /docker/docker-compose.yml` in `docs/users/installation.md` and `README.md`.
       - Verified: `85/85` full TS suite pass (`11/11` in `tests/phase07-deployment.test.ts`), `10/10` Python SDK tests pass, `npm run build` clean, `npm run lint` (`0` errors, `0` warnings).
+
+    - **V2 Baseline Freeze & Governance Planning Complete (`BASELINE-2026-11-19-V2`)**:
+      - Froze the clean, Deployment-Hardened runtime state (`85/85` TS tests, `10/10` Python tests, clean `npm run build` & `eslint .`, zero runtime code changes) as **`BASELINE-2026-11-19-V2`**.
+      - Created raw-source verified V2 planning & contract documents in `notes/`:
+        - `notes/V2_FEATURE_GAP_AUDIT.md` (`V2-FEAT-01`–`V2-FEAT-07` gap analysis + full `/vcon/*` control mapping).
+        - `notes/V2_DATABASE_AND_SETTINGS_CONTRACT.md` (zero-loss additive PostgreSQL DDL rules preserving `admin_users` `id = 1 CHECK (id = 1)`, AES-256-GCM DB secret encryption + masked `GET /api/settings`, Port `3000`↔`4000` live sync).
+        - `notes/BASELINE_FREEZE.md`, `notes/PRODUCTION_READINESS_SCOPE_LOCK.md` (Doc `001` Scope Locks for `V2-Phase-01`–`04`), `notes/PRODUCTION_ROADMAP.md` (Doc `002`), `notes/PHASE_EXECUTION_LOG.md` (Doc `003`, `0 / 4` V2 phases done), `notes/ERROR_HANDLING_MATRIX.md` (Doc `004`, including `V2-E01`–`V2-E12`), `notes/ACTUAL_IMPLEMENTATION_STATUS.md`, and `notes/README.md`.
+      - Roadmap grouped into 4 Scope-Locked V2 Phases (`V2-Phase-01` Archival/Gzip + Quota/Disk Guard; `V2-Phase-02` Webhooks/Alerts + IP Allowlist/Expiry + Prometheus/NDJSON; `V2-Phase-03` Multi-Admin RBAC + Audit Log; `V2-Phase-04` Node.js/TypeScript SDK + `/vcon/sdk` guide).
+      - **`V2-Phase-01` Complete & Verified (`2026-11-19`)** (`V2-FEAT-01`, `V2-FEAT-03`, `V2-E01`–`V2-E05`):
+        - **AES-256-GCM Secret Vault (`core/Security/secretVault.ts`)**: Deterministic HKDF-SHA256 key derivation (`encryptSecret`, `decryptSecret`, `getMaskedHintFromEncrypted`, `SecretVaultError`) so `s3_secret_access_key_enc` is encrypted at rest in PostgreSQL and never leaked in plaintext by `GET /api/settings` (`hasS3SecretKey` + `s3SecretKeyMask: "••••xxxx"`).
+        - **S3 / Cloudflare R2 / MinIO SigV4 Client (`core/Storage/s3Archive.ts`)**: Pure Node `node:crypto` + `fetch` AWS Signature v4 client (`testS3Connection`, `uploadFileToS3`, `buildS3ObjectKey`, `normalizeS3EndpointUrl`) with `POST /api/storage/s3-test` and `POST /api/storage/archive`.
+        - **Transparent `.csv.gz` Auto-Compression & Safe Archive-Before-Prune (`core/Storage/csvStorage.ts`, `server/workers/csvWriter.js`)**: Cooperatively locked atomic `.csv` → `.csv.gz` compression (`compressOldPartitionsAsync` / `compressOldPartitions`) excluding today's active UTC partition; transparent `.csv` + `.csv.gz` reading/streaming across `GET /api/data` (surfacing `500 Corrupt .csv.gz partition` on corrupt gzip — `V2-E03`), `GET /api/events`, and `GET /api/export` (`application/gzip` for raw single `.csv.gz` download); fail-safe `beforeDeleteFile` S3 upload hook (`V2-E02`) that never deletes local partitions if S3 upload fails (`502 S3_ARCHIVE_FAILED`).
+        - **Per-Client Storage Quota (`storageQuotaMb`) & VPS Disk Pause Guard (`diskPauseThresholdPct`)**: Additive PostgreSQL columns (`client_sdks.storage_quota_mb` + 9 `admin_settings` columns in `core/Database/database.ts`, synced in `server/index.js` while preserving `ddlCount === 8`), `30s` TTL cached `statfs` + directory byte counters, and HTTP `507 Insufficient Storage` (`DISK_SPACE_LOW` / `STORAGE_QUOTA_EXCEEDED` — `V2-E04`, `V2-E05`) on `POST /api/events` and Port `4000` `sync_data`/`batch_sync` while keeping all Admin read/export/settings routes online.
+        - **Admin UI Controls (`SettingsWorkspace.tsx`, `NewClientModal.tsx`, `ClientsTable.tsx`, `lib/vconUiHelpers.ts`)**: Added live VPS disk usage bar, `Auto-compress (.csv → .csv.gz)`, `Disk pause threshold (0 or 50–99%)`, full `S3 / R2 off-site archive` configuration with `Test S3 Connection` & `Archive Now`, and per-client `Storage quota (MB, 0 = unlimited)` in modal and table.
+        - **Verified**: `89/89` TS tests (`4/4` in `tests/v2-phase01-storage-quotas.test.ts`), `10/10` Python SDK tests, `npm run build` clean, `npm run lint` (`0` errors / `0` warnings), and Chromium E2E across `/vcon/settings` (Storage tab) and `/vcon/clients` (`0` console errors).
 
 ---
 

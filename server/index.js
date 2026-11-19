@@ -199,6 +199,9 @@ const runtimeConfig = {
   fileRotationMb: 100,
   enableIdempotency: true,
   autoPruneDays: 30,
+  compressAfterDays: 0,
+  enableS3Backup: false,
+  diskPauseThresholdPct: 95,
 };
 
 let previousJwtSecret = '';
@@ -287,17 +290,113 @@ const inMemoryClientActivity = new Map();
 let hasSyncedInMemoryClients = false;
 const CLIENT_CACHE_TTL_MS = 2000;
 
-async function verifyClientInDb(clientId, presentedToken, bypassCache = false) {
+function stripIpv6MappedPrefix(rawIp) {
+  let ip = String(rawIp || '').trim();
+  if (!ip) return '';
+  if (ip.startsWith('[') && ip.includes(']')) {
+    ip = ip.slice(1, ip.indexOf(']'));
+  } else if (/^\d{1,3}(?:\.\d{1,3}){3}:\d+$/.test(ip)) {
+    ip = ip.slice(0, ip.lastIndexOf(':'));
+  }
+  const pctIndex = ip.indexOf('%');
+  if (pctIndex !== -1) {
+    ip = ip.slice(0, pctIndex);
+  }
+  if (/^::ffff:\d{1,3}(?:\.\d{1,3}){3}$/i.test(ip)) {
+    return ip.slice(7);
+  }
+  return ip.toLowerCase();
+}
+
+function ipv4ToUint32(ip) {
+  const parts = ip.split('.');
+  if (parts.length !== 4) return null;
+  let acc = 0;
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return null;
+    if (part.length > 1 && part.startsWith('0')) return null;
+    const num = Number(part);
+    if (num < 0 || num > 255) return null;
+    acc = ((acc << 8) | num) >>> 0;
+  }
+  return acc >>> 0;
+}
+
+function matchesIpv4Cidr(clientIp, cidrPattern) {
+  const [networkStr, prefixStr] = cidrPattern.split('/');
+  if (!networkStr || prefixStr === undefined) return false;
+  const prefix = Number(prefixStr);
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) return false;
+  const clientNum = ipv4ToUint32(clientIp);
+  const networkNum = ipv4ToUint32(networkStr);
+  if (clientNum === null || networkNum === null) return false;
+  if (prefix === 0) return true;
+  const mask = (0xffffffff << (32 - prefix)) >>> 0;
+  return (clientNum & mask) >>> 0 === (networkNum & mask) >>> 0;
+}
+
+function isClientIpAllowed(clientIp, rawAllowedIps) {
+  if (!rawAllowedIps || !String(rawAllowedIps).trim()) return true;
+  const entries = String(rawAllowedIps)
+    .split(/[\s,]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (entries.length === 0) return true;
+  if (entries.includes('*') || entries.includes('0.0.0.0/0') || entries.includes('::/0')) {
+    return true;
+  }
+  const normalizedClientIp = stripIpv6MappedPrefix(clientIp);
+  if (!normalizedClientIp || normalizedClientIp === 'unknown') {
+    return false;
+  }
+  for (const entry of entries) {
+    const normalizedEntry = stripIpv6MappedPrefix(entry);
+    if (normalizedEntry.includes('/')) {
+      if (matchesIpv4Cidr(normalizedClientIp, normalizedEntry)) {
+        return true;
+      }
+      const [netAddr, prefixStr] = normalizedEntry.split('/');
+      if (Number(prefixStr) === 128 && normalizedClientIp === stripIpv6MappedPrefix(netAddr)) {
+        return true;
+      }
+    } else {
+      if (normalizedClientIp === normalizedEntry) {
+        return true;
+      }
+      if (
+        (normalizedClientIp === '127.0.0.1' && normalizedEntry === '::1') ||
+        (normalizedClientIp === '::1' && normalizedEntry === '127.0.0.1')
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function isClientTokenExpired(expiresAt, nowMs = Date.now()) {
+  if (!expiresAt) return false;
+  const ts =
+    expiresAt instanceof Date
+      ? expiresAt.getTime()
+      : new Date(String(expiresAt)).getTime();
+  if (Number.isNaN(ts)) return false;
+  return ts <= nowMs;
+}
+
+async function verifyClientInDb(clientId, presentedToken, bypassCache = false, clientIp = '') {
   const normalizedId = normalizeClientId(clientId);
   if (!normalizedId) {
     return {
       allowed: false,
+      code: 'CLIENT_REVOKED',
       reason: 'CLIENT_REVOKED: Missing client identifier',
     };
   }
   if (deletedClientsSet.has(normalizedId)) {
     return {
       allowed: false,
+      code: 'CLIENT_REVOKED',
       reason: 'CLIENT_REVOKED: Client access has been deleted or revoked by admin',
     };
   }
@@ -313,6 +412,7 @@ async function verifyClientInDb(clientId, presentedToken, bypassCache = false) {
             deletedClientsSet.add(normalizedId);
             return {
               allowed: false,
+              code: 'CLIENT_REVOKED',
               reason: 'CLIENT_REVOKED: Client access has been deleted by admin',
             };
           }
@@ -326,6 +426,9 @@ async function verifyClientInDb(clientId, presentedToken, bypassCache = false) {
                 status: parsed.status === 'revoked' ? 'revoked' : 'active',
                 token: String(parsed.token || ''),
                 rateLimit: Math.max(1, Number(parsed.rateLimit) || 100),
+                storageQuotaMb: Math.max(0, Math.floor(Number(parsed.storageQuotaMb) || 0)),
+                allowedIps: typeof parsed.allowedIps === 'string' ? parsed.allowedIps : '',
+                expiresAt: parsed.expiresAt ? String(parsed.expiresAt) : null,
               };
               inMemoryClientRegistry.set(normalizedId, memClient);
               hasSyncedInMemoryClients = true;
@@ -341,20 +444,41 @@ async function verifyClientInDb(clientId, presentedToken, bypassCache = false) {
       if (memClient.status === 'revoked') {
         return {
           allowed: false,
+          code: 'CLIENT_REVOKED',
           reason: 'CLIENT_REVOKED: Client access has been revoked by admin',
         };
       }
       if (memClient.token && presentedToken && memClient.token !== presentedToken) {
         return {
           allowed: false,
+          code: 'TOKEN_ROTATED',
           reason: 'TOKEN_ROTATED: Client credentials have been rotated',
         };
       }
-      return { allowed: true, rateLimit: memClient.rateLimit || 100 };
+      if (isClientTokenExpired(memClient.expiresAt)) {
+        return {
+          allowed: false,
+          code: 'CLIENT_TOKEN_EXPIRED',
+          reason: `CLIENT_TOKEN_EXPIRED: Client '${normalizedId}' token has expired`,
+        };
+      }
+      if (memClient.allowedIps && memClient.allowedIps.trim() && !isClientIpAllowed(clientIp, memClient.allowedIps)) {
+        return {
+          allowed: false,
+          code: 'CLIENT_IP_FORBIDDEN',
+          reason: `CLIENT_IP_FORBIDDEN: Client IP '${clientIp || 'unknown'}' is not authorized`,
+        };
+      }
+      return {
+        allowed: true,
+        rateLimit: memClient.rateLimit || 100,
+        storageQuotaMb: memClient.storageQuotaMb || 0,
+      };
     }
 
     return {
       allowed: false,
+      code: 'CLIENT_REVOKED',
       reason: 'CLIENT_REVOKED: Client registration not found or has been deleted',
     };
   }
@@ -365,16 +489,36 @@ async function verifyClientInDb(clientId, presentedToken, bypassCache = false) {
     if (prevCached.status === 'revoked') {
       return {
         allowed: false,
+        code: 'CLIENT_REVOKED',
         reason: 'CLIENT_REVOKED: Client access has been revoked by admin',
       };
     }
     if (prevCached.token && presentedToken && prevCached.token !== presentedToken) {
       return {
         allowed: false,
+        code: 'TOKEN_ROTATED',
         reason: 'TOKEN_ROTATED: Client credentials have been rotated',
       };
     }
-    return { allowed: true, rateLimit: prevCached.rateLimit };
+    if (isClientTokenExpired(prevCached.expiresAt, now)) {
+      return {
+        allowed: false,
+        code: 'CLIENT_TOKEN_EXPIRED',
+        reason: `CLIENT_TOKEN_EXPIRED: Client '${normalizedId}' token has expired`,
+      };
+    }
+    if (prevCached.allowedIps && prevCached.allowedIps.trim() && !isClientIpAllowed(clientIp, prevCached.allowedIps)) {
+      return {
+        allowed: false,
+        code: 'CLIENT_IP_FORBIDDEN',
+        reason: `CLIENT_IP_FORBIDDEN: Client IP '${clientIp || 'unknown'}' is not authorized`,
+      };
+    }
+    return {
+      allowed: true,
+      rateLimit: prevCached.rateLimit,
+      storageQuotaMb: prevCached.storageQuotaMb || 0,
+    };
   }
 
   try {
@@ -387,26 +531,39 @@ async function verifyClientInDb(clientId, presentedToken, bypassCache = false) {
       deletedClientsSet.add(normalizedId);
       return {
         allowed: false,
+        code: 'CLIENT_REVOKED',
         reason: 'CLIENT_REVOKED: Client access has been deleted by admin',
       };
     }
 
     const res = await dbPool.query(
-      `SELECT status, token, rate_limit FROM client_sdks WHERE client_id = $1`,
+      `SELECT status, token, rate_limit, storage_quota_mb, allowed_ips, expires_at FROM client_sdks WHERE client_id = $1`,
       [normalizedId],
     );
     if (!res.rowCount || res.rowCount === 0) {
       clientAuthCache.delete(normalizedId);
       return {
         allowed: false,
+        code: 'CLIENT_REVOKED',
         reason: 'CLIENT_REVOKED: Client registration not found or has been deleted',
       };
     }
     const row = res.rows[0];
+    const parsedQuota = Number(row.storage_quota_mb);
+    let expiresAtIso = null;
+    if (row.expires_at) {
+      const d = new Date(row.expires_at);
+      if (!Number.isNaN(d.getTime())) {
+        expiresAtIso = d.toISOString();
+      }
+    }
     const entry = {
       status: row.status,
       token: row.token,
       rateLimit: Number(row.rate_limit) || 100,
+      storageQuotaMb: Number.isFinite(parsedQuota) && parsedQuota >= 0 ? Math.floor(parsedQuota) : 0,
+      allowedIps: typeof row.allowed_ips === 'string' ? row.allowed_ips : '',
+      expiresAt: expiresAtIso,
       checkedAt: now,
     };
     clientAuthCache.set(normalizedId, entry);
@@ -414,19 +571,40 @@ async function verifyClientInDb(clientId, presentedToken, bypassCache = false) {
     if (entry.status === 'revoked') {
       return {
         allowed: false,
+        code: 'CLIENT_REVOKED',
         reason: 'CLIENT_REVOKED: Client access has been revoked by admin',
       };
     }
     if (entry.token && presentedToken && entry.token !== presentedToken) {
       return {
         allowed: false,
+        code: 'TOKEN_ROTATED',
         reason: 'TOKEN_ROTATED: Client credentials have been rotated',
       };
     }
-    return { allowed: true, rateLimit: entry.rateLimit };
+    if (isClientTokenExpired(entry.expiresAt, now)) {
+      return {
+        allowed: false,
+        code: 'CLIENT_TOKEN_EXPIRED',
+        reason: `CLIENT_TOKEN_EXPIRED: Client '${normalizedId}' token has expired`,
+      };
+    }
+    if (entry.allowedIps && entry.allowedIps.trim() && !isClientIpAllowed(clientIp, entry.allowedIps)) {
+      return {
+        allowed: false,
+        code: 'CLIENT_IP_FORBIDDEN',
+        reason: `CLIENT_IP_FORBIDDEN: Client IP '${clientIp || 'unknown'}' is not authorized`,
+      };
+    }
+    return {
+      allowed: true,
+      rateLimit: entry.rateLimit,
+      storageQuotaMb: entry.storageQuotaMb,
+    };
   } catch {
     return {
       allowed: false,
+      code: 'AUTH_UNAVAILABLE',
       reason: 'AUTH_UNAVAILABLE: Unable to verify client credentials against database',
     };
   }
@@ -888,13 +1066,42 @@ function applyRuntimeSettingsObject(settingsObj) {
     }
   }
 
+  if (settingsObj.enableS3Backup !== undefined) {
+    runtimeConfig.enableS3Backup = Boolean(settingsObj.enableS3Backup);
+  }
+
+  if (
+    settingsObj.diskPauseThresholdPct !== undefined &&
+    settingsObj.diskPauseThresholdPct !== null
+  ) {
+    const pct = Number(settingsObj.diskPauseThresholdPct);
+    if (Number.isFinite(pct) && (pct === 0 || (pct >= 50 && pct <= 99))) {
+      runtimeConfig.diskPauseThresholdPct = Math.floor(pct);
+    }
+  }
+
+  if (
+    settingsObj.compressAfterDays !== undefined &&
+    settingsObj.compressAfterDays !== null
+  ) {
+    const parsedCompress = Number(settingsObj.compressAfterDays);
+    if (Number.isFinite(parsedCompress) && parsedCompress >= 0) {
+      const nextCompressDays = Math.floor(parsedCompress);
+      const changed = nextCompressDays !== runtimeConfig.compressAfterDays;
+      runtimeConfig.compressAfterDays = nextCompressDays;
+      if (changed && nextCompressDays > 0) {
+        void writer.compressOldPartitionsAsync(nextCompressDays).catch(() => undefined);
+      }
+    }
+  }
+
   if (settingsObj.autoPruneDays !== undefined && settingsObj.autoPruneDays !== null) {
     const parsedPrune = Number(settingsObj.autoPruneDays);
     if (Number.isFinite(parsedPrune) && parsedPrune >= 0) {
       const nextPruneDays = Math.floor(parsedPrune);
       const changed = nextPruneDays !== runtimeConfig.autoPruneDays;
       runtimeConfig.autoPruneDays = nextPruneDays;
-      if (changed && nextPruneDays > 0) {
+      if (changed && nextPruneDays > 0 && !runtimeConfig.enableS3Backup) {
         void writer.pruneExpiredPartitionsAsync(nextPruneDays).catch(() => undefined);
       }
     }
@@ -948,6 +1155,9 @@ async function ensureDatabaseSchema() {
           secret TEXT NOT NULL,
           token TEXT NOT NULL,
           rate_limit INTEGER NOT NULL DEFAULT 100,
+          storage_quota_mb INTEGER NOT NULL DEFAULT 0,
+          allowed_ips TEXT NOT NULL DEFAULT '',
+          expires_at TIMESTAMPTZ,
           status TEXT NOT NULL DEFAULT 'active',
           total_events BIGINT NOT NULL DEFAULT 0,
           last_active TIMESTAMPTZ,
@@ -968,6 +1178,21 @@ async function ensureDatabaseSchema() {
           jwt_secret TEXT NOT NULL,
           enable_idempotency BOOLEAN NOT NULL DEFAULT true,
           auto_prune_days INTEGER NOT NULL DEFAULT 30,
+          compress_after_days INTEGER NOT NULL DEFAULT 0,
+          enable_s3_backup BOOLEAN NOT NULL DEFAULT false,
+          s3_endpoint TEXT NOT NULL DEFAULT '',
+          s3_region TEXT NOT NULL DEFAULT 'auto',
+          s3_bucket TEXT NOT NULL DEFAULT '',
+          s3_prefix TEXT NOT NULL DEFAULT 'datastack/',
+          s3_access_key_id TEXT NOT NULL DEFAULT '',
+          s3_secret_access_key_enc TEXT NOT NULL DEFAULT '',
+          disk_pause_threshold_pct INTEGER NOT NULL DEFAULT 95,
+          enable_webhook_alerts BOOLEAN NOT NULL DEFAULT false,
+          webhook_url TEXT NOT NULL DEFAULT '',
+          webhook_secret_enc TEXT NOT NULL DEFAULT '',
+          webhook_cooldown_sec INTEGER NOT NULL DEFAULT 300,
+          enable_prometheus_metrics BOOLEAN NOT NULL DEFAULT false,
+          prometheus_metrics_token_enc TEXT NOT NULL DEFAULT '',
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
       `);
@@ -999,6 +1224,9 @@ async function ensureDatabaseSchema() {
       await pool.query(`
         ALTER TABLE client_sdks
           ADD COLUMN IF NOT EXISTS rate_limit INTEGER NOT NULL DEFAULT 100,
+          ADD COLUMN IF NOT EXISTS storage_quota_mb INTEGER NOT NULL DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS allowed_ips TEXT NOT NULL DEFAULT '',
+          ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ,
           ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active',
           ADD COLUMN IF NOT EXISTS total_events BIGINT NOT NULL DEFAULT 0,
           ADD COLUMN IF NOT EXISTS last_active TIMESTAMPTZ,
@@ -1016,6 +1244,21 @@ async function ensureDatabaseSchema() {
           ADD COLUMN IF NOT EXISTS file_rotation_mb INTEGER NOT NULL DEFAULT 100,
           ADD COLUMN IF NOT EXISTS enable_idempotency BOOLEAN NOT NULL DEFAULT true,
           ADD COLUMN IF NOT EXISTS auto_prune_days INTEGER NOT NULL DEFAULT 30,
+          ADD COLUMN IF NOT EXISTS compress_after_days INTEGER NOT NULL DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS enable_s3_backup BOOLEAN NOT NULL DEFAULT false,
+          ADD COLUMN IF NOT EXISTS s3_endpoint TEXT NOT NULL DEFAULT '',
+          ADD COLUMN IF NOT EXISTS s3_region TEXT NOT NULL DEFAULT 'auto',
+          ADD COLUMN IF NOT EXISTS s3_bucket TEXT NOT NULL DEFAULT '',
+          ADD COLUMN IF NOT EXISTS s3_prefix TEXT NOT NULL DEFAULT 'datastack/',
+          ADD COLUMN IF NOT EXISTS s3_access_key_id TEXT NOT NULL DEFAULT '',
+          ADD COLUMN IF NOT EXISTS s3_secret_access_key_enc TEXT NOT NULL DEFAULT '',
+          ADD COLUMN IF NOT EXISTS disk_pause_threshold_pct INTEGER NOT NULL DEFAULT 95,
+          ADD COLUMN IF NOT EXISTS enable_webhook_alerts BOOLEAN NOT NULL DEFAULT false,
+          ADD COLUMN IF NOT EXISTS webhook_url TEXT NOT NULL DEFAULT '',
+          ADD COLUMN IF NOT EXISTS webhook_secret_enc TEXT NOT NULL DEFAULT '',
+          ADD COLUMN IF NOT EXISTS webhook_cooldown_sec INTEGER NOT NULL DEFAULT 300,
+          ADD COLUMN IF NOT EXISTS enable_prometheus_metrics BOOLEAN NOT NULL DEFAULT false,
+          ADD COLUMN IF NOT EXISTS prometheus_metrics_token_enc TEXT NOT NULL DEFAULT '',
           ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       `);
       await pool.query(`
@@ -1043,7 +1286,7 @@ async function syncSettingsFromDatabase() {
     const res = await dbPool.query(
       `SELECT max_events_per_sec, max_payload_size_kb, batch_flush_threshold,
               batch_flush_interval_ms, file_rotation_mb, jwt_secret, enable_idempotency,
-              auto_prune_days
+              auto_prune_days, compress_after_days, enable_s3_backup, disk_pause_threshold_pct
        FROM admin_settings
        WHERE id = 'default'`,
     );
@@ -1052,6 +1295,14 @@ async function syncSettingsFromDatabase() {
     const parsedPrune =
       row.auto_prune_days !== undefined && row.auto_prune_days !== null
         ? Number(row.auto_prune_days)
+        : NaN;
+    const parsedCompress =
+      row.compress_after_days !== undefined && row.compress_after_days !== null
+        ? Number(row.compress_after_days)
+        : NaN;
+    const parsedDiskPct =
+      row.disk_pause_threshold_pct !== undefined && row.disk_pause_threshold_pct !== null
+        ? Number(row.disk_pause_threshold_pct)
         : NaN;
 
     applyRuntimeSettingsObject({
@@ -1065,6 +1316,9 @@ async function syncSettingsFromDatabase() {
       fileRotationMb: Number(row.file_rotation_mb) || 100,
       enableIdempotency: Boolean(row.enable_idempotency),
       autoPruneDays: Number.isFinite(parsedPrune) ? parsedPrune : 30,
+      compressAfterDays: Number.isFinite(parsedCompress) ? Math.max(0, parsedCompress) : 0,
+      enableS3Backup: Boolean(row.enable_s3_backup),
+      diskPauseThresholdPct: Number.isFinite(parsedDiskPct) ? parsedDiskPct : 95,
       jwtSecret: row.jwt_secret ? String(row.jwt_secret).trim() : undefined,
     });
     return true;
@@ -1338,6 +1592,9 @@ app.post('/internal/client-sync', (req, res) => {
         status: nextStatus,
         token: nextToken,
         rateLimit: Math.max(1, Number(item.rateLimit) || 100),
+        storageQuotaMb: Math.max(0, Math.floor(Number(item.storageQuotaMb) || 0)),
+        allowedIps: typeof item.allowedIps === 'string' ? item.allowedIps : '',
+        expiresAt: item.expiresAt ? String(item.expiresAt) : null,
       });
       if (nextStatus === 'revoked' || (prev && nextToken && prev.token !== nextToken)) {
         io.to(`client:${cid}`).disconnectSockets(true);
@@ -1380,6 +1637,9 @@ app.post('/internal/client-sync', (req, res) => {
           status: 'revoked',
           token: String(clientPayload.token || ''),
           rateLimit: Math.max(1, Number(clientPayload.rateLimit) || 100),
+          storageQuotaMb: Math.max(0, Math.floor(Number(clientPayload.storageQuotaMb) || 0)),
+          allowedIps: typeof clientPayload.allowedIps === 'string' ? clientPayload.allowedIps : '',
+          expiresAt: clientPayload.expiresAt ? String(clientPayload.expiresAt) : null,
         });
       } else if (existingMem) {
         existingMem.status = 'revoked';
@@ -1390,6 +1650,9 @@ app.post('/internal/client-sync', (req, res) => {
           status: 'revoked',
           token: '',
           rateLimit: 100,
+          storageQuotaMb: 0,
+          allowedIps: '',
+          expiresAt: null,
         });
       }
       io.to(`client:${normalizedId}`).disconnectSockets(true);
@@ -1402,6 +1665,9 @@ app.post('/internal/client-sync', (req, res) => {
           status: clientPayload.status === 'revoked' ? 'revoked' : 'active',
           token: String(clientPayload.token || ''),
           rateLimit: Math.max(1, Number(clientPayload.rateLimit) || 100),
+          storageQuotaMb: Math.max(0, Math.floor(Number(clientPayload.storageQuotaMb) || 0)),
+          allowedIps: typeof clientPayload.allowedIps === 'string' ? clientPayload.allowedIps : '',
+          expiresAt: clientPayload.expiresAt ? String(clientPayload.expiresAt) : null,
         });
       }
     } else if (action === 'updated') {
@@ -1412,6 +1678,9 @@ app.post('/internal/client-sync', (req, res) => {
           status: clientPayload.status === 'revoked' ? 'revoked' : 'active',
           token: String(clientPayload.token || ''),
           rateLimit: Math.max(1, Number(clientPayload.rateLimit) || 100),
+          storageQuotaMb: Math.max(0, Math.floor(Number(clientPayload.storageQuotaMb) || 0)),
+          allowedIps: typeof clientPayload.allowedIps === 'string' ? clientPayload.allowedIps : '',
+          expiresAt: clientPayload.expiresAt ? String(clientPayload.expiresAt) : null,
         });
       }
       io.to(`client:${normalizedId}`).disconnectSockets(true);
@@ -1542,7 +1811,12 @@ async function startIngestionServer() {
   }
 
   pruneTimer = setInterval(() => {
-    if (runtimeConfig.autoPruneDays > 0) {
+    if (runtimeConfig.compressAfterDays > 0) {
+      void writer
+        .compressOldPartitionsAsync(runtimeConfig.compressAfterDays)
+        .catch(() => undefined);
+    }
+    if (runtimeConfig.autoPruneDays > 0 && !runtimeConfig.enableS3Backup) {
       void writer
         .pruneExpiredPartitionsAsync(runtimeConfig.autoPruneDays)
         .catch(() => undefined);
@@ -1594,4 +1868,6 @@ module.exports = {
   parseAllowedCorsOrigins,
   isOriginAllowedByCors,
   corsOriginDelegate,
+  isClientIpAllowed,
+  isClientTokenExpired,
 };

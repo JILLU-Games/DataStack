@@ -1,9 +1,21 @@
 import { verifyRequestAdminSession } from "@/core/auth/adminUsers";
 import { SDKManager } from "@/core/sdk/sdkManager";
+import {
+  validateAllowedIpsInput,
+  validateClientExpiresAtInput,
+} from "@/core/Security/ipAllowlist";
 import { NextRequest, NextResponse } from "next/server";
 
 const SESSION_COOKIE = "datastack_admin_session";
-const ALLOWED_PATCH_KEYS = new Set(["action", "name", "rateLimit", "status"]);
+const ALLOWED_PATCH_KEYS = new Set([
+  "action",
+  "name",
+  "rateLimit",
+  "storageQuotaMb",
+  "allowedIps",
+  "expiresAt",
+  "status",
+]);
 
 export async function GET(
   req: NextRequest,
@@ -125,7 +137,14 @@ export async function PATCH(
     }
   }
 
-  const updates: { name?: string; rateLimit?: number; status?: "active" | "revoked" } = {};
+  const updates: {
+    name?: string;
+    rateLimit?: number;
+    storageQuotaMb?: number;
+    allowedIps?: string;
+    expiresAt?: string | null;
+    status?: "active" | "revoked";
+  } = {};
   if (body.name !== undefined) {
     if (
       typeof body.name !== "string" ||
@@ -152,6 +171,46 @@ export async function PATCH(
       );
     }
     updates.rateLimit = body.rateLimit;
+  }
+  if (body.storageQuotaMb !== undefined) {
+    if (
+      typeof body.storageQuotaMb !== "number" ||
+      !Number.isInteger(body.storageQuotaMb) ||
+      body.storageQuotaMb < 0 ||
+      body.storageQuotaMb > 1048576
+    ) {
+      return NextResponse.json(
+        { error: "storageQuotaMb must be an integer between 0 and 1048576.", code: "VALIDATION_ERROR" },
+        { status: 400 },
+      );
+    }
+    updates.storageQuotaMb = body.storageQuotaMb;
+  }
+  if (body.allowedIps !== undefined) {
+    if (typeof body.allowedIps !== "string") {
+      return NextResponse.json(
+        { error: "allowedIps must be a string.", code: "VALIDATION_ERROR" },
+        { status: 400 },
+      );
+    }
+    const ipValidation = validateAllowedIpsInput(body.allowedIps);
+    if (!ipValidation.valid) {
+      return NextResponse.json(
+        { error: ipValidation.error || "Invalid allowedIps.", code: "VALIDATION_ERROR" },
+        { status: 400 },
+      );
+    }
+    updates.allowedIps = ipValidation.normalized;
+  }
+  if (body.expiresAt !== undefined) {
+    const expValidation = validateClientExpiresAtInput(body.expiresAt);
+    if (!expValidation.valid) {
+      return NextResponse.json(
+        { error: expValidation.error || "Invalid expiresAt.", code: "VALIDATION_ERROR" },
+        { status: 400 },
+      );
+    }
+    updates.expiresAt = expValidation.normalized;
   }
   if (body.status !== undefined) {
     if (body.status !== "active" && body.status !== "revoked") {

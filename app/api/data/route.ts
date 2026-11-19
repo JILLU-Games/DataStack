@@ -6,7 +6,6 @@ import { CSVStorageManager } from "@/core/Storage/csvStorage";
 import { requireAdminApiSession } from "@/lib/adminAuth";
 import { parse } from "csv-parse";
 import { NextRequest, NextResponse } from "next/server";
-import { createReadStream } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 
@@ -135,10 +134,10 @@ export async function GET(request: NextRequest) {
       try {
         filenames = (await readdir(clientDir))
           .filter((filename) => {
-            if (!/^\d{4}-\d{2}-\d{2}(?:-part\d+)?\.csv$/.test(filename)) {
+            if (!/^\d{4}-\d{2}-\d{2}(?:-part\d+)?(?:-gz\d+)?\.csv(?:\.gz)?$/.test(filename)) {
               return false;
             }
-            const fileDate = filename.slice(0, 10);
+            const fileDate = CSVStorageManager.extractDateFromFilename(filename);
             if ((from && fileDate < from) || (to && fileDate > to)) {
               return false;
             }
@@ -150,7 +149,7 @@ export async function GET(request: NextRequest) {
       }
 
       for (const filename of filenames) {
-        const fileDate = filename.slice(0, 10);
+        const fileDate = CSVStorageManager.extractDateFromFilename(filename);
 
         const filePath = path.join(clientDir, filename);
         let fileLstat;
@@ -161,10 +160,13 @@ export async function GET(request: NextRequest) {
         }
         if (fileLstat.isSymbolicLink() || !fileLstat.isFile()) continue;
 
-        const fileStream = createReadStream(filePath);
+        const fileStream = CSVStorageManager.openPartitionTextStream(filePath);
         const parser = fileStream.pipe(
           parse({ columns: true, skip_empty_lines: true, bom: true }),
         );
+        fileStream.on("error", (err) => {
+          if (!parser.destroyed) parser.destroy(err);
+        });
 
         try {
           for await (const record of parser as AsyncIterable<
@@ -180,7 +182,11 @@ export async function GET(request: NextRequest) {
             if (event.eventId) addIfMatching(event);
           }
         } catch (err) {
-          console.warn(`[API /data] Failed reading CSV partition ${filePath}:`, err);
+          console.warn(`[API /data] Failed reading partition ${filePath}:`, err);
+          if (filename.endsWith(".csv.gz")) {
+            const detail = err instanceof Error ? err.message : String(err);
+            throw new Error(`Corrupt .csv.gz partition (${filename}): ${detail}`);
+          }
         } finally {
           if (!parser.destroyed) parser.destroy();
           if (!fileStream.destroyed) fileStream.destroy();

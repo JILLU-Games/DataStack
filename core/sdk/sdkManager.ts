@@ -23,6 +23,9 @@ export interface ClientSDK {
   secret: string;
   token: string;
   rateLimit: number; // max events per sec
+  storageQuotaMb: number; // max storage in MB per client (0 = unlimited)
+  allowedIps: string; // comma-separated IPv4/IPv6/CIDR list ("" = allow all)
+  expiresAt?: string | null; // ISO timestamp or null/undefined if never expires
   status: "active" | "revoked";
   totalEvents: number;
   lastActive?: string;
@@ -103,6 +106,9 @@ interface RemoteInMemoryClient {
   status?: string;
   token?: string;
   rateLimit?: number;
+  storageQuotaMb?: number;
+  allowedIps?: string;
+  expiresAt?: string | null;
 }
 
 function hydrateLocalMapFromRemote(remoteClients: RemoteInMemoryClient[]): number {
@@ -119,6 +125,9 @@ function hydrateLocalMapFromRemote(remoteClients: RemoteInMemoryClient[]): numbe
       secret: "",
       token: String(item.token || ""),
       rateLimit: Math.max(1, Number(item.rateLimit) || 100),
+      storageQuotaMb: Math.max(0, Math.floor(Number(item.storageQuotaMb) || 0)),
+      allowedIps: typeof item.allowedIps === "string" ? item.allowedIps : "",
+      expiresAt: item.expiresAt ? String(item.expiresAt) : null,
       status: item.status === "revoked" ? "revoked" : "active",
       totalEvents: 0,
       createdAt: new Date().toISOString(),
@@ -135,6 +144,9 @@ function serializeSyncClient(client: ClientSDK) {
     status: client.status,
     token: client.token,
     rateLimit: client.rateLimit,
+    storageQuotaMb: client.storageQuotaMb,
+    allowedIps: client.allowedIps || "",
+    expiresAt: client.expiresAt ?? null,
   };
 }
 
@@ -224,12 +236,26 @@ function notifyIngestionClientSync(
 }
 
 function mapRowToClient(row: Record<string, unknown>): ClientSDK {
+  const parsedQuota = Number(row.storage_quota_mb);
+  let expiresAt: string | null = null;
+  if (row.expires_at) {
+    const d = new Date(row.expires_at as string | Date);
+    if (!Number.isNaN(d.getTime())) {
+      expiresAt = d.toISOString();
+    }
+  }
   return {
     clientId: String(row.client_id),
     name: String(row.name),
     secret: String(row.secret),
     token: String(row.token),
     rateLimit: Number(row.rate_limit) || 100,
+    storageQuotaMb:
+      Number.isFinite(parsedQuota) && parsedQuota >= 0
+        ? Math.floor(parsedQuota)
+        : 0,
+    allowedIps: typeof row.allowed_ips === "string" ? row.allowed_ips : "",
+    expiresAt,
     status: row.status === "revoked" ? "revoked" : "active",
     totalEvents: Number(row.total_events) || 0,
     lastActive: row.last_active
@@ -256,7 +282,7 @@ export class SDKManager {
 
       const [result, deletedResult] = await Promise.all([
         pool.query(
-          `SELECT client_id, name, secret, token, rate_limit, status, total_events, last_active, created_at
+          `SELECT client_id, name, secret, token, rate_limit, storage_quota_mb, allowed_ips, expires_at, status, total_events, last_active, created_at
            FROM client_sdks
            ORDER BY created_at DESC`,
         ),
@@ -464,7 +490,7 @@ export class SDKManager {
           await this.flushPendingClientActivityAsync();
         }
         const result = await pool.query(
-          `SELECT client_id, name, secret, token, rate_limit, status, total_events, last_active, created_at
+          `SELECT client_id, name, secret, token, rate_limit, storage_quota_mb, allowed_ips, expires_at, status, total_events, last_active, created_at
            FROM client_sdks
            WHERE client_id = $1`,
           [normalizedId],
@@ -500,10 +526,19 @@ export class SDKManager {
     clientId: string;
     name: string;
     rateLimit?: number;
+    storageQuotaMb?: number;
+    allowedIps?: string;
+    expiresAt?: string | null;
   }): ClientSDK {
     const safeClientId = this.normalizeClientId(data.clientId);
     const secret = this.generateClientSecret(safeClientId);
     const rateLimit = Math.max(1, Number(data.rateLimit) || 100);
+    const storageQuotaMb = Math.max(
+      0,
+      Math.floor(Number(data.storageQuotaMb) || 0),
+    );
+    const allowedIps = typeof data.allowedIps === "string" ? data.allowedIps.trim() : "";
+    const expiresAt = data.expiresAt ? String(data.expiresAt) : null;
 
     const token = AuthService.generateClientToken({
       clientId: safeClientId,
@@ -517,6 +552,9 @@ export class SDKManager {
       secret,
       token,
       rateLimit,
+      storageQuotaMb,
+      allowedIps,
+      expiresAt,
       status: "active",
       totalEvents: 0,
       createdAt: new Date().toISOString(),
@@ -548,13 +586,16 @@ export class SDKManager {
         [client.clientId],
       );
       await pool.query(
-        `INSERT INTO client_sdks (client_id, name, secret, token, rate_limit, status, total_events, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+        `INSERT INTO client_sdks (client_id, name, secret, token, rate_limit, storage_quota_mb, allowed_ips, expires_at, status, total_events, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
          ON CONFLICT (client_id) DO UPDATE SET
            name = EXCLUDED.name,
            secret = EXCLUDED.secret,
            token = EXCLUDED.token,
            rate_limit = EXCLUDED.rate_limit,
+           storage_quota_mb = EXCLUDED.storage_quota_mb,
+           allowed_ips = EXCLUDED.allowed_ips,
+           expires_at = EXCLUDED.expires_at,
            status = EXCLUDED.status,
            updated_at = NOW()`,
         [
@@ -563,6 +604,9 @@ export class SDKManager {
           client.secret,
           client.token,
           client.rateLimit,
+          client.storageQuotaMb,
+          client.allowedIps || "",
+          client.expiresAt ?? null,
           client.status,
           client.totalEvents,
           client.createdAt,
@@ -578,11 +622,20 @@ export class SDKManager {
     clientId: string;
     name: string;
     rateLimit?: number;
+    storageQuotaMb?: number;
+    allowedIps?: string;
+    expiresAt?: string | null;
   }): Promise<ClientSDK> {
     await ensureDbSettingsHydrated();
     const safeClientId = this.normalizeClientId(data.clientId);
     const secret = this.generateClientSecret(safeClientId);
     const rateLimit = Math.max(1, Number(data.rateLimit) || 100);
+    const storageQuotaMb = Math.max(
+      0,
+      Math.floor(Number(data.storageQuotaMb) || 0),
+    );
+    const allowedIps = typeof data.allowedIps === "string" ? data.allowedIps.trim() : "";
+    const expiresAt = data.expiresAt ? String(data.expiresAt) : null;
 
     const token = AuthService.generateClientToken({
       clientId: safeClientId,
@@ -596,6 +649,9 @@ export class SDKManager {
       secret,
       token,
       rateLimit,
+      storageQuotaMb,
+      allowedIps,
+      expiresAt,
       status: "active",
       totalEvents: 0,
       createdAt: new Date().toISOString(),
@@ -683,7 +739,17 @@ export class SDKManager {
 
   public static updateClient(
     clientId: string,
-    updates: Partial<Pick<ClientSDK, "name" | "rateLimit" | "status">>,
+    updates: Partial<
+      Pick<
+        ClientSDK,
+        | "name"
+        | "rateLimit"
+        | "storageQuotaMb"
+        | "allowedIps"
+        | "expiresAt"
+        | "status"
+      >
+    >,
   ): ClientSDK | null {
     const normalizedId = this.normalizeClientId(clientId);
     const client = getClientsMap().get(normalizedId);
@@ -694,6 +760,20 @@ export class SDKManager {
       ...(updates.name !== undefined ? { name: updates.name.trim() } : {}),
       ...(updates.rateLimit !== undefined
         ? { rateLimit: Math.max(1, Number(updates.rateLimit) || 100) }
+        : {}),
+      ...(updates.storageQuotaMb !== undefined
+        ? {
+            storageQuotaMb: Math.max(
+              0,
+              Math.floor(Number(updates.storageQuotaMb) || 0),
+            ),
+          }
+        : {}),
+      ...(updates.allowedIps !== undefined
+        ? { allowedIps: String(updates.allowedIps).trim() }
+        : {}),
+      ...(updates.expiresAt !== undefined
+        ? { expiresAt: updates.expiresAt ? String(updates.expiresAt) : null }
         : {}),
       ...(updates.status !== undefined ? { status: updates.status } : {}),
     };
@@ -722,9 +802,17 @@ export class SDKManager {
     try {
       await pool.query(
         `UPDATE client_sdks
-         SET name = $2, rate_limit = $3, status = $4, updated_at = NOW()
+         SET name = $2, rate_limit = $3, storage_quota_mb = $4, allowed_ips = $5, expires_at = $6, status = $7, updated_at = NOW()
          WHERE client_id = $1`,
-        [client.clientId, client.name, client.rateLimit, client.status],
+        [
+          client.clientId,
+          client.name,
+          client.rateLimit,
+          client.storageQuotaMb,
+          client.allowedIps || "",
+          client.expiresAt ?? null,
+          client.status,
+        ],
       );
     } catch (err: unknown) {
       const detail = err instanceof Error ? err.message : "Unknown DB error";
@@ -734,7 +822,17 @@ export class SDKManager {
 
   public static async updateClientAsync(
     clientId: string,
-    updates: Partial<Pick<ClientSDK, "name" | "rateLimit" | "status">>,
+    updates: Partial<
+      Pick<
+        ClientSDK,
+        | "name"
+        | "rateLimit"
+        | "storageQuotaMb"
+        | "allowedIps"
+        | "expiresAt"
+        | "status"
+      >
+    >,
   ): Promise<ClientSDK | null> {
     await ensureDbSettingsHydrated();
     const normalizedId = this.normalizeClientId(clientId);
@@ -746,6 +844,20 @@ export class SDKManager {
       ...(updates.name !== undefined ? { name: updates.name.trim() } : {}),
       ...(updates.rateLimit !== undefined
         ? { rateLimit: Math.max(1, Number(updates.rateLimit) || 100) }
+        : {}),
+      ...(updates.storageQuotaMb !== undefined
+        ? {
+            storageQuotaMb: Math.max(
+              0,
+              Math.floor(Number(updates.storageQuotaMb) || 0),
+            ),
+          }
+        : {}),
+      ...(updates.allowedIps !== undefined
+        ? { allowedIps: String(updates.allowedIps).trim() }
+        : {}),
+      ...(updates.expiresAt !== undefined
+        ? { expiresAt: updates.expiresAt ? String(updates.expiresAt) : null }
         : {}),
       ...(updates.status !== undefined ? { status: updates.status } : {}),
     };
@@ -853,7 +965,7 @@ export class SDKManager {
       const dirStat = lstatSync(targetDir);
       if (!dirStat.isSymbolicLink() && dirStat.isDirectory()) {
         for (const entry of readdirSync(targetDir)) {
-          if (!entry.endsWith(".csv")) continue;
+          if (!CSVStorageManager.isPartitionFilename(entry)) continue;
           const entryPath = resolve(targetDir, entry);
           try {
             const entryStat = lstatSync(entryPath);
@@ -871,6 +983,7 @@ export class SDKManager {
 
     rmSync(targetDir, { recursive: true, force: true });
     CSVStorageManager.clearRowCountCache();
+    CSVStorageManager.clearQuotaCaches(safeId);
     return purgedFiles;
   }
 

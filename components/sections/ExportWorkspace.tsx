@@ -33,7 +33,7 @@ interface StorageFile {
   modifiedAt: string;
 }
 
-type ExportFormat = 'csv' | 'json';
+type ExportFormat = 'csv' | 'json' | 'ndjson';
 type RangePreset = 'today' | '7d' | '30d' | 'all' | 'custom';
 
 function formatBytes(bytes: number) {
@@ -368,7 +368,7 @@ export function ExportWorkspace() {
               Format
             </legend>
             <div
-              className="grid grid-cols-2 gap-2"
+              className="grid grid-cols-3 gap-2"
               role="radiogroup"
               aria-label="Export format"
             >
@@ -382,6 +382,12 @@ export function ExportWorkspace() {
                 value="json"
                 selected={format === 'json'}
                 label="JSON"
+                onSelect={setFormat}
+              />
+              <FormatOption
+                value="ndjson"
+                selected={format === 'ndjson'}
+                label="NDJSON"
                 onSelect={setFormat}
               />
             </div>

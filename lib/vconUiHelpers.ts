@@ -6,7 +6,40 @@ export interface EditableSettings {
   fileRotationMb: number;
   enableIdempotency: boolean;
   autoPruneDays: number;
+  compressAfterDays: number;
+  diskPauseThresholdPct: number;
+  webhookCooldownSec: number;
 }
+
+export interface S3SettingsFields {
+  enableS3Backup: boolean;
+  s3Endpoint: string;
+  s3Region: string;
+  s3Bucket: string;
+  s3Prefix: string;
+  s3AccessKeyId: string;
+}
+
+export interface AlertingAndMetricsSettingsFields {
+  enableWebhookAlerts: boolean;
+  webhookUrl: string;
+  enablePrometheusMetrics: boolean;
+}
+
+export const DEFAULT_S3_SETTINGS: S3SettingsFields = {
+  enableS3Backup: false,
+  s3Endpoint: '',
+  s3Region: 'auto',
+  s3Bucket: '',
+  s3Prefix: 'datastack/',
+  s3AccessKeyId: '',
+};
+
+export const DEFAULT_ALERTING_SETTINGS: AlertingAndMetricsSettingsFields = {
+  enableWebhookAlerts: false,
+  webhookUrl: '',
+  enablePrometheusMetrics: false,
+};
 
 export const SETTINGS_LIMITS = {
   maxEventsPerSec: { min: 1, max: 100000, defaultValue: 100 },
@@ -15,6 +48,9 @@ export const SETTINGS_LIMITS = {
   batchFlushIntervalMs: { min: 100, max: 60000, defaultValue: 2000 },
   fileRotationMb: { min: 1, max: 2048, defaultValue: 100 },
   autoPruneDays: { min: 0, max: 3650, defaultValue: 30 },
+  compressAfterDays: { min: 0, max: 3650, defaultValue: 0 },
+  diskPauseThresholdPct: { min: 0, max: 99, defaultValue: 95 },
+  webhookCooldownSec: { min: 10, max: 86400, defaultValue: 300 },
 } as const;
 
 export const DEFAULT_EDITABLE_SETTINGS: EditableSettings = {
@@ -25,6 +61,9 @@ export const DEFAULT_EDITABLE_SETTINGS: EditableSettings = {
   fileRotationMb: SETTINGS_LIMITS.fileRotationMb.defaultValue,
   enableIdempotency: true,
   autoPruneDays: SETTINGS_LIMITS.autoPruneDays.defaultValue,
+  compressAfterDays: SETTINGS_LIMITS.compressAfterDays.defaultValue,
+  diskPauseThresholdPct: SETTINGS_LIMITS.diskPauseThresholdPct.defaultValue,
+  webhookCooldownSec: SETTINGS_LIMITS.webhookCooldownSec.defaultValue,
 };
 
 function clampInt(raw: unknown, min: number, max: number, fallback: number): number {
@@ -32,6 +71,57 @@ function clampInt(raw: unknown, min: number, max: number, fallback: number): num
   if (!Number.isFinite(numeric)) return fallback;
   const rounded = Math.trunc(numeric);
   return Math.max(min, Math.min(max, rounded));
+}
+
+function normalizeDiskPauseThresholdPct(raw: unknown): number {
+  const clamped = clampInt(
+    raw,
+    SETTINGS_LIMITS.diskPauseThresholdPct.min,
+    SETTINGS_LIMITS.diskPauseThresholdPct.max,
+    SETTINGS_LIMITS.diskPauseThresholdPct.defaultValue,
+  );
+  if (clamped !== 0 && clamped < 50) {
+    return 50;
+  }
+  return clamped;
+}
+
+export function normalizeS3Settings(
+  input: Partial<S3SettingsFields> | null | undefined,
+): S3SettingsFields {
+  return {
+    enableS3Backup:
+      typeof input?.enableS3Backup === 'boolean'
+        ? input.enableS3Backup
+        : DEFAULT_S3_SETTINGS.enableS3Backup,
+    s3Endpoint: typeof input?.s3Endpoint === 'string' ? input.s3Endpoint.trim() : '',
+    s3Region:
+      typeof input?.s3Region === 'string' && input.s3Region.trim()
+        ? input.s3Region.trim()
+        : DEFAULT_S3_SETTINGS.s3Region,
+    s3Bucket: typeof input?.s3Bucket === 'string' ? input.s3Bucket.trim() : '',
+    s3Prefix:
+      typeof input?.s3Prefix === 'string' ? input.s3Prefix.trim() : DEFAULT_S3_SETTINGS.s3Prefix,
+    s3AccessKeyId:
+      typeof input?.s3AccessKeyId === 'string' ? input.s3AccessKeyId.trim() : '',
+  };
+}
+
+export function normalizeAlertingSettings(
+  input: Partial<AlertingAndMetricsSettingsFields> | null | undefined,
+): AlertingAndMetricsSettingsFields {
+  return {
+    enableWebhookAlerts:
+      typeof input?.enableWebhookAlerts === 'boolean'
+        ? input.enableWebhookAlerts
+        : DEFAULT_ALERTING_SETTINGS.enableWebhookAlerts,
+    webhookUrl:
+      typeof input?.webhookUrl === 'string' ? input.webhookUrl.trim() : '',
+    enablePrometheusMetrics:
+      typeof input?.enablePrometheusMetrics === 'boolean'
+        ? input.enablePrometheusMetrics
+        : DEFAULT_ALERTING_SETTINGS.enablePrometheusMetrics,
+  };
 }
 
 export function normalizeEditableSettings(
@@ -77,6 +167,21 @@ export function normalizeEditableSettings(
       SETTINGS_LIMITS.autoPruneDays.min,
       SETTINGS_LIMITS.autoPruneDays.max,
       SETTINGS_LIMITS.autoPruneDays.defaultValue,
+    ),
+    compressAfterDays: clampInt(
+      input.compressAfterDays,
+      SETTINGS_LIMITS.compressAfterDays.min,
+      SETTINGS_LIMITS.compressAfterDays.max,
+      SETTINGS_LIMITS.compressAfterDays.defaultValue,
+    ),
+    diskPauseThresholdPct: normalizeDiskPauseThresholdPct(
+      input.diskPauseThresholdPct,
+    ),
+    webhookCooldownSec: clampInt(
+      input.webhookCooldownSec,
+      SETTINGS_LIMITS.webhookCooldownSec.min,
+      SETTINGS_LIMITS.webhookCooldownSec.max,
+      SETTINGS_LIMITS.webhookCooldownSec.defaultValue,
     ),
   };
 }
@@ -398,6 +503,9 @@ export const NUMERIC_SETTING_KEYS: readonly NumericSettingKey[] = [
   'batchFlushIntervalMs',
   'fileRotationMb',
   'autoPruneDays',
+  'compressAfterDays',
+  'diskPauseThresholdPct',
+  'webhookCooldownSec',
 ] as const;
 
 export function settingsToNumericDrafts(
@@ -410,6 +518,9 @@ export function settingsToNumericDrafts(
     batchFlushIntervalMs: String(settings.batchFlushIntervalMs),
     fileRotationMb: String(settings.fileRotationMb),
     autoPruneDays: String(settings.autoPruneDays),
+    compressAfterDays: String(settings.compressAfterDays),
+    diskPauseThresholdPct: String(settings.diskPauseThresholdPct),
+    webhookCooldownSec: String(settings.webhookCooldownSec),
   };
 }
 
@@ -428,6 +539,15 @@ export function validateSingleNumericSetting(
   const parsed = Number(trimmed);
   if (!Number.isSafeInteger(parsed)) {
     return { valid: false, error: 'Enter a valid integer.' };
+  }
+  if (key === 'diskPauseThresholdPct') {
+    if (parsed !== 0 && (parsed < 50 || parsed > max)) {
+      return {
+        valid: false,
+        error: 'Must be 0 (disabled) or between 50 and 99.',
+      };
+    }
+    return { valid: true, value: parsed };
   }
   if (parsed < min || parsed > max) {
     return {
@@ -475,6 +595,9 @@ export function validateEditableSettingsDraft(
       batchFlushIntervalMs: parsedValues.batchFlushIntervalMs!,
       fileRotationMb: parsedValues.fileRotationMb!,
       autoPruneDays: parsedValues.autoPruneDays!,
+      compressAfterDays: parsedValues.compressAfterDays!,
+      diskPauseThresholdPct: parsedValues.diskPauseThresholdPct!,
+      webhookCooldownSec: parsedValues.webhookCooldownSec!,
       enableIdempotency: Boolean(enableIdempotency),
     },
   };

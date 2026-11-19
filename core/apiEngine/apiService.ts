@@ -13,11 +13,13 @@ export class ApiEngine {
    */
   public static async getDashboardMetrics() {
     const settings = await SettingsManager.getSettingsAsync();
-    const [storageStats, localBufferStats, clients] = await Promise.all([
-      CSVStorageManager.getStorageStatsAsync(),
-      DataBufferEngine.getBufferStatsAsync(),
-      SDKManager.listClientsAsync(),
-    ]);
+    const [storageStats, diskUsage, localBufferStats, clients] =
+      await Promise.all([
+        CSVStorageManager.getStorageStatsAsync(),
+        CSVStorageManager.getDiskUsageAsync(),
+        DataBufferEngine.getBufferStatsAsync(),
+        SDKManager.listClientsAsync(),
+      ]);
     const activeClients = clients.filter((c) => c.status === 'active').length;
     let activeSockets = 0;
     let ingestionLocalBufferSize = 0;
@@ -129,6 +131,7 @@ export class ApiEngine {
       activeClients,
       bufferStats,
       storageStats,
+      diskUsage,
       securityStats,
       runtime: {
         serverPort: liveServerPort,

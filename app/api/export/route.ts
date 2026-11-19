@@ -12,7 +12,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createReadStream } from "node:fs";
 import path from "node:path";
 
-type ExportFormat = "csv" | "json";
+type ExportFormat = "csv" | "json" | "ndjson";
 type CsvRecord = Record<string, string>;
 type StreamChunk = string | Uint8Array;
 
@@ -46,10 +46,13 @@ function toByteStream(chunks: AsyncIterable<StreamChunk>) {
 async function* readFileRecords(
   file: StorageFileMeta,
 ): AsyncGenerator<CsvRecord> {
-  const fileStream = createReadStream(file.filePath);
+  const fileStream = CSVStorageManager.openPartitionTextStream(file.filePath);
   const parser = fileStream.pipe(
     parse({ columns: true, skip_empty_lines: true, bom: true }),
   );
+  fileStream.on("error", (err) => {
+    if (!parser.destroyed) parser.destroy(err);
+  });
 
   try {
     for await (const record of parser as AsyncIterable<CsvRecord>) {
@@ -72,13 +75,13 @@ function makeExportStream(
 
     if (format === "json") {
       yield "[";
-    } else if (includeHeader) {
+    } else if (format === "csv" && includeHeader) {
       yield `${fields.join(",")}\n`;
     }
 
     for (const file of files) {
       for await (const record of readFileRecords(file)) {
-        if (format === "json") {
+        if (format === "json" || format === "ndjson") {
           const payload = record.payload ?? "";
           let parsedPayload: unknown = payload;
           try {
@@ -86,7 +89,15 @@ function makeExportStream(
           } catch {
             // Keep non-JSON payloads as strings.
           }
-          yield `${isFirst ? "" : ","}${JSON.stringify({ ...record, payload: parsedPayload })}`;
+          const serialized = JSON.stringify({
+            ...record,
+            payload: parsedPayload,
+          });
+          if (format === "ndjson") {
+            yield `${serialized}\n`;
+          } else {
+            yield `${isFirst ? "" : ","}${serialized}`;
+          }
         } else {
           const line = fields
             .map((field) => `"${String(record[field] ?? "").replaceAll('"', '""')}"`)
@@ -224,9 +235,14 @@ export async function GET(request: NextRequest) {
         : SDKManager.normalizeClientId(rawClientId) || "all";
     const sanitizedClientId =
       clientId === "all" ? "all" : CSVStorageManager.sanitizeClientId(clientId);
-    const filename = searchParams.get("filename");
-    const rawFormat = searchParams.get("format");
-    const format: ExportFormat = rawFormat === "json" ? "json" : "csv";
+    const filename = searchParams.get("filename") || searchParams.get("file");
+    const rawFormat = (searchParams.get("format") || "csv").toLowerCase();
+    const format: ExportFormat =
+      rawFormat === "json"
+        ? "json"
+        : rawFormat === "ndjson"
+          ? "ndjson"
+          : "csv";
     const includeHeader = searchParams.get("includeHeader") !== "false";
 
     let files = await CSVStorageManager.listAllFilesAsync();
@@ -259,21 +275,31 @@ export async function GET(request: NextRequest) {
         );
       }
       const file = matches[0];
+      const baseStem = file.filename.replace(/\.csv(?:\.gz)?$/i, "");
       const downloadName =
         format === "json"
-          ? `${file.filename.replace(/\.csv$/i, "")}.json`
-          : file.filename;
+          ? `${baseStem}.json`
+          : format === "ndjson"
+            ? `${baseStem}.ndjson`
+            : !includeHeader && file.compressed
+              ? `${baseStem}.csv`
+              : file.filename;
       const bodyStream =
-        format === "json" || !includeHeader
+        format === "json" || format === "ndjson" || !includeHeader
           ? makeExportStream([file], format, includeHeader)
           : streamFile(file);
+      const contentType =
+        format === "json"
+          ? "application/json; charset=utf-8"
+          : format === "ndjson"
+            ? "application/x-ndjson; charset=utf-8"
+            : file.compressed && includeHeader
+              ? "application/gzip"
+              : "text/csv; charset=utf-8";
       return new NextResponse(bodyStream, {
         status: 200,
         headers: {
-          "Content-Type":
-            format === "json"
-              ? "application/json; charset=utf-8"
-              : "text/csv; charset=utf-8",
+          "Content-Type": contentType,
           "Content-Disposition": `attachment; filename="${downloadName.replace(/"/g, "")}"`,
           "Cache-Control": "no-store",
         },
@@ -294,7 +320,9 @@ export async function GET(request: NextRequest) {
         "Content-Type":
           format === "json"
             ? "application/json; charset=utf-8"
-            : "text/csv; charset=utf-8",
+            : format === "ndjson"
+              ? "application/x-ndjson; charset=utf-8"
+              : "text/csv; charset=utf-8",
         "Content-Disposition": `attachment; filename="${baseName}_${datePart}.${format}"`,
         "Cache-Control": "no-store",
       },
