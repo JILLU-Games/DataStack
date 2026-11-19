@@ -13,12 +13,15 @@ Features:
   and lossless partial-batch rate-limit retry (`429 RATE_LIMIT_EXCEEDED`).
 """
 
+from __future__ import annotations
+
 import base64
 import csv
 import hashlib
 import json
 import logging
 import random
+import re
 import threading
 import time
 import urllib.error
@@ -26,7 +29,7 @@ import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 try:
     import socketio  # type: ignore
@@ -72,6 +75,14 @@ def _make_deterministic_file_event_id(
         ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in file_stem
     )[:32]
     return f"file_{safe_stem}_{row_index}_{digest}"
+
+
+def _normalize_client_id(value: Optional[str]) -> str:
+    """Matches server SDKManager.normalizeClientId() normalization rules."""
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    return re.sub(r"[^a-z0-9_-]", "_", raw)
 
 
 def _decode_jwt_client_id(token: str) -> str:
@@ -136,16 +147,18 @@ class DataStackClient:
 
         configured_client_id = (self.config.client_id or "").strip()
         token_client_id = _decode_jwt_client_id(self.token)
+        norm_configured = _normalize_client_id(configured_client_id)
+        norm_token = _normalize_client_id(token_client_id)
         if (
-            configured_client_id
-            and token_client_id
-            and configured_client_id != token_client_id
+            norm_configured
+            and norm_token
+            and norm_configured != norm_token
         ):
             raise DataStackConfigError(
                 f"Configured CLIENT_ID '{configured_client_id}' does not match "
                 f"CLIENT_TOKEN subject '{token_client_id}'."
             )
-        self.client_id: str = configured_client_id or token_client_id
+        self.client_id: str = norm_token or norm_configured
 
         self.is_connected = False
         self._lock = threading.RLock()
@@ -186,6 +199,18 @@ class DataStackClient:
                 self.connect()
             except DataStackAuthError:
                 raise
+            except DataStackConnectionError:
+                if (
+                    not self.config.enable_http_fallback
+                    and not self.config.offline_spool_enabled
+                ):
+                    self.heartbeat.stop(
+                        reason="Initial connect failed with fallback and spool disabled"
+                    )
+                    raise
+                logger.warning(
+                    "[DataStack] Initial connect entered fallback/recovery mode.",
+                )
             except Exception as exc:
                 logger.warning(
                     "[DataStack] Initial connect entered fallback/recovery mode: %s",
@@ -202,6 +227,15 @@ class DataStackClient:
                 self.connect()
             except DataStackAuthError:
                 raise
+            except DataStackConnectionError:
+                if (
+                    not self.config.enable_http_fallback
+                    and not self.config.offline_spool_enabled
+                ):
+                    self.heartbeat.stop(
+                        reason="Context connect failed with fallback and spool disabled"
+                    )
+                    raise
             except Exception:
                 pass
         return self
@@ -295,13 +329,16 @@ class DataStackClient:
             )
             return False
 
+        self.heartbeat.stop(
+            reason="WebSocket and HTTP unreachable with fallback and spool disabled"
+        )
         raise DataStackConnectionError(
             f"Unable to connect to DataStack WebSocket ({self.server_url}) or HTTP API ({self.api_url})."
         )
 
     def disconnect(self) -> None:
         """Gracefully stops the Heartbeat Monitor and disconnects the WebSocket."""
-        self.heartbeat.stop(reason="Client closed by application")
+        self.heartbeat.stop(reason="Client closed by application", join_timeout=0.5)
         with self._lock:
             self.is_connected = False
             if self.sio is not None and self.sio.connected:
@@ -347,9 +384,24 @@ class DataStackClient:
                 return False
 
             # Verify handshake & PostgreSQL client status via `ping_verify` while still serialized under RLock
-            verified = self._verify_websocket_handshake(timeout=effective_timeout)
+            try:
+                verified = self._verify_websocket_handshake(timeout=effective_timeout)
+            except Exception:
+                self.is_connected = False
+                if self.sio.connected:
+                    try:
+                        self.sio.disconnect()
+                    except Exception:
+                        pass
+                raise
+
             if not verified:
                 self.is_connected = False
+                if self.sio.connected:
+                    try:
+                        self.sio.disconnect()
+                    except Exception:
+                        pass
             return verified
 
     def _verify_websocket_handshake(
@@ -455,7 +507,7 @@ class DataStackClient:
         url: str,
         payload: Optional[Dict[str, Any]] = None,
         timeout: Optional[float] = None,
-    ) -> tuple[int, Dict[str, Any]]:
+    ) -> Tuple[int, Dict[str, Any]]:
         req_timeout = timeout or self.config.request_timeout_sec
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -869,7 +921,16 @@ class DataStackClient:
             is_envelope = "data" in safe_item and set(safe_item.keys()).issubset(
                 envelope_keys
             )
-            evt_data = safe_item["data"] if is_envelope else safe_item
+            if is_envelope:
+                evt_data = safe_item["data"]
+            elif "data" in safe_item:
+                evt_data = safe_item
+            else:
+                evt_data = {
+                    k: v
+                    for k, v in safe_item.items()
+                    if k not in ("eventId", "timestamp", "clientId")
+                }
             evt_client_id = (
                 str(safe_item.get("clientId") or "").strip() or self.client_id
             )
@@ -993,14 +1054,18 @@ class DataStackClient:
                         if file_name
                         else {"batch": remaining_items}
                     )
-                    sub_res = self._execute_with_retry_and_fallback(
-                        ws_event="batch_sync",
-                        ws_payload=remaining_items,
-                        http_payload=sub_http_payload,
-                        spool_items=remaining_items,
-                        timeout=timeout,
-                        allow_spool=allow_spool,
-                    )
+                    try:
+                        sub_res = self._execute_with_retry_and_fallback(
+                            ws_event="batch_sync",
+                            ws_payload=remaining_items,
+                            http_payload=sub_http_payload,
+                            spool_items=remaining_items,
+                            timeout=timeout,
+                            allow_spool=allow_spool,
+                        )
+                    except (DataStackRateLimitError, DataStackConnectionError):
+                        break
+
                     total_processed += int(sub_res.get("processed", 0))
                     total_duplicates += int(sub_res.get("duplicates", 0))
                     total_spooled += int(sub_res.get("spooledCount", 0))
@@ -1088,6 +1153,20 @@ class DataStackClient:
         total_spooled = 0
         chunks_sent = 0
         last_transport = "WEBSOCKET"
+        unprocessed_items: List[Dict[str, Any]] = []
+
+        def _flush_chunk(chunk_items: List[Dict[str, Any]]) -> None:
+            nonlocal total_processed, total_rejected, total_duplicates, total_spooled, chunks_sent, last_transport
+            res = self.send_batch(chunk_items, file_name=path.name)
+            total_processed += int(res.get("processed", 0))
+            total_rejected += int(res.get("rejected", 0))
+            total_duplicates += int(res.get("duplicates", 0))
+            total_spooled += int(res.get("spooledCount", 0))
+            last_transport = str(res.get("transport", last_transport))
+            chunk_unprocessed = res.get("unprocessedItems")
+            if isinstance(chunk_unprocessed, list) and chunk_unprocessed:
+                unprocessed_items.extend(chunk_unprocessed)
+            chunks_sent += 1
 
         buffer: List[Dict[str, Any]] = []
         for idx, record in enumerate(self._iter_file_records(path, ext), start=1):
@@ -1111,35 +1190,44 @@ class DataStackClient:
             )
             evt_ts = existing_ts or _utc_now_iso()
 
+            if isinstance(enriched, dict):
+                is_file_envelope = "data" in enriched and set(
+                    enriched.keys()
+                ).issubset({"eventId", "timestamp", "data", "clientId"})
+                if is_file_envelope:
+                    file_data: Any = enriched["data"]
+                elif "data" in enriched:
+                    file_data = enriched
+                else:
+                    file_data = {
+                        k: v
+                        for k, v in enriched.items()
+                        if k not in ("eventId", "timestamp", "clientId")
+                    }
+            else:
+                file_data = enriched
+
             file_entry: Dict[str, Any] = {
                 "eventId": evt_id,
                 "timestamp": evt_ts,
-                "data": enriched,
+                "data": file_data,
             }
             if self.client_id:
                 file_entry["clientId"] = self.client_id
             buffer.append(file_entry)
             if len(buffer) >= effective_chunk:
-                res = self.send_batch(buffer, file_name=path.name)
-                total_processed += int(res.get("processed", 0))
-                total_rejected += int(res.get("rejected", 0))
-                total_duplicates += int(res.get("duplicates", 0))
-                total_spooled += int(res.get("spooledCount", 0))
-                last_transport = str(res.get("transport", last_transport))
-                chunks_sent += 1
+                _flush_chunk(buffer)
                 buffer = []
 
         if buffer:
-            res = self.send_batch(buffer, file_name=path.name)
-            total_processed += int(res.get("processed", 0))
-            total_rejected += int(res.get("rejected", 0))
-            total_duplicates += int(res.get("duplicates", 0))
-            total_spooled += int(res.get("spooledCount", 0))
-            last_transport = str(res.get("transport", last_transport))
-            chunks_sent += 1
+            _flush_chunk(buffer)
 
-        return {
-            "success": True,
+        summary: Dict[str, Any] = {
+            "success": (
+                total_rejected == 0
+                or total_processed > 0
+                or total_spooled > 0
+            ),
             "fileName": path.name,
             "fileType": ext.lstrip("."),
             "chunksSent": chunks_sent,
@@ -1149,15 +1237,22 @@ class DataStackClient:
             "spooledCount": total_spooled,
             "transport": last_transport,
         }
+        if unprocessed_items:
+            summary["unprocessedItems"] = unprocessed_items
+        return summary
 
     @staticmethod
     def _iter_file_records(path: Path, ext: str) -> Iterable[Dict[str, Any]]:
         try:
             if ext == ".csv":
                 with path.open("r", encoding="utf-8-sig", newline="") as fh:
-                    reader = csv.DictReader(fh)
+                    reader = csv.DictReader(fh, restkey="_extra")
                     for row in reader:
-                        yield dict(row)
+                        clean_row = {
+                            ("_extra" if k is None else str(k)): v
+                            for k, v in row.items()
+                        }
+                        yield clean_row
             elif ext in (".jsonl", ".ndjson"):
                 with path.open("r", encoding="utf-8-sig") as fh:
                     for line_no, line in enumerate(fh, start=1):

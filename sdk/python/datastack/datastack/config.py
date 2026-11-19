@@ -182,6 +182,22 @@ def load_config(
             return default
         return bool(val)
 
+    def to_float(val: Any, name: str) -> float:
+        try:
+            return float(val)
+        except (TypeError, ValueError) as exc:
+            raise DataStackConfigError(
+                f"Invalid numeric configuration for '{name}': {val!r}"
+            ) from exc
+
+    def to_int(val: Any, name: str) -> int:
+        try:
+            return int(val)
+        except (TypeError, ValueError) as exc:
+            raise DataStackConfigError(
+                f"Invalid integer configuration for '{name}': {val!r}"
+            ) from exc
+
     server_url = str(
         pick(
             ["SERVER_URL", "SOCKET_URL", "WS_URL"],
@@ -233,52 +249,57 @@ def load_config(
         ),
         heartbeat_interval_sec=max(
             1.0,
-            float(
+            to_float(
                 pick(
                     ["HEARTBEAT_INTERVAL_SEC", "HEARTBEAT_INTERVAL"],
                     ["DATASTACK_HEARTBEAT_INTERVAL_SEC"],
                     5.0,
-                )
+                ),
+                "HEARTBEAT_INTERVAL_SEC",
             ),
         ),
         request_timeout_sec=max(
             1.0,
-            float(
+            to_float(
                 pick(
                     ["REQUEST_TIMEOUT_SEC", "TIMEOUT"],
                     ["DATASTACK_REQUEST_TIMEOUT_SEC"],
                     8.0,
-                )
+                ),
+                "REQUEST_TIMEOUT_SEC",
             ),
         ),
         max_retries=max(
             0,
-            int(
+            to_int(
                 pick(
                     ["MAX_RETRIES", "RETRIES"],
                     ["DATASTACK_MAX_RETRIES"],
                     3,
-                )
+                ),
+                "MAX_RETRIES",
             ),
         ),
         retry_backoff_base_sec=max(
             0.1,
-            float(
+            to_float(
                 pick(
                     ["RETRY_BACKOFF_BASE_SEC"],
                     ["DATASTACK_RETRY_BACKOFF_BASE_SEC"],
                     0.5,
-                )
+                ),
+                "RETRY_BACKOFF_BASE_SEC",
             ),
         ),
         batch_chunk_size=max(
             1,
-            int(
+            to_int(
                 pick(
                     ["BATCH_CHUNK_SIZE", "CHUNK_SIZE"],
                     ["DATASTACK_BATCH_CHUNK_SIZE"],
                     250,
-                )
+                ),
+                "BATCH_CHUNK_SIZE",
             ),
         ),
         offline_spool_enabled=to_bool(
@@ -298,12 +319,13 @@ def load_config(
         ),
         max_spool_size_mb=max(
             1,
-            int(
+            to_int(
                 pick(
                     ["MAX_SPOOL_SIZE_MB"],
                     ["DATASTACK_MAX_SPOOL_SIZE_MB"],
                     50,
-                )
+                ),
+                "MAX_SPOOL_SIZE_MB",
             ),
         ),
         config_source_path=resolved_source,

@@ -1,5 +1,7 @@
+import crypto from 'node:crypto';
 import fs from 'fs';
 import path from 'path';
+import { StringDecoder } from 'node:string_decoder';
 import { Parser } from 'json2csv';
 
 export interface DataEvent {
@@ -34,9 +36,17 @@ function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export function resolveDefaultStorageDir(): string {
+  const configured = (process.env.DATASTACK_STORAGE_DIR || '').trim();
+  if (configured) {
+    return path.resolve(configured);
+  }
+  return path.resolve(process.cwd(), 'storage', 'data');
+}
+
 export class CSVStorageManager {
-  // Base storage directory: /storage/data
-  public static baseStorageDir = path.resolve(process.cwd(), 'storage', 'data');
+  // Base storage directory: DATASTACK_STORAGE_DIR or /storage/data
+  public static baseStorageDir = resolveDefaultStorageDir();
   public static maxFileSizeBytes = 100 * 1024 * 1024; // 100MB rotation limit
   private static rowCountCache = new Map<string, RowCountCacheEntry>();
 
@@ -44,12 +54,94 @@ export class CSVStorageManager {
     this.rowCountCache.clear();
   }
 
+  public static sanitizeClientId(clientId: string): string {
+    const raw = String(clientId || 'unknown').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+    return raw || 'unknown';
+  }
+
   /**
-   * Ensures client directory exists
+   * Checks whether the last byte of a non-empty file is LF (\n)
+   */
+  private static fileEndsWithNewline(filePath: string, sizeBytes: number): boolean {
+    if (sizeBytes <= 0) return false;
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const lastByte = Buffer.allocUnsafe(1);
+      const read = fs.readSync(fd, lastByte, 0, 1, sizeBytes - 1);
+      return read === 1 && lastByte[0] === 0x0a;
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+
+  private static removeStaleLockAtomically(lockPath: string): void {
+    try {
+      const lockStat = fs.lstatSync(lockPath);
+      if (Date.now() - lockStat.mtimeMs <= STALE_LOCK_AGE_MS) {
+        return;
+      }
+      const staleTmp = `${lockPath}.stale.${crypto.randomUUID()}`;
+      fs.renameSync(lockPath, staleTmp);
+      try {
+        fs.unlinkSync(staleTmp);
+      } catch {
+        // Ignore cleanup failure of already-renamed stale token
+      }
+    } catch {
+      // Lock was released or claimed concurrently
+    }
+  }
+
+  private static releaseLockIfOwned(lockPath: string, lockValue: string): void {
+    try {
+      if (!fs.existsSync(lockPath)) return;
+      const current = fs.readFileSync(lockPath, 'utf8');
+      if (current === lockValue) {
+        fs.unlinkSync(lockPath);
+      }
+    } catch {
+      // Ignore cleanup failure if already unlinked
+    }
+  }
+
+  private static async removeStaleLockAtomicallyAsync(lockPath: string): Promise<void> {
+    try {
+      const lockStat = await fs.promises.lstat(lockPath);
+      if (Date.now() - lockStat.mtimeMs <= STALE_LOCK_AGE_MS) {
+        return;
+      }
+      const staleTmp = `${lockPath}.stale.${crypto.randomUUID()}`;
+      await fs.promises.rename(lockPath, staleTmp);
+      await fs.promises.unlink(staleTmp).catch(() => undefined);
+    } catch {
+      // Lock was released or claimed concurrently
+    }
+  }
+
+  private static async releaseLockIfOwnedAsync(
+    lockPath: string,
+    lockValue: string,
+  ): Promise<void> {
+    try {
+      const current = await fs.promises.readFile(lockPath, 'utf8');
+      if (current === lockValue) {
+        await fs.promises.unlink(lockPath);
+      }
+    } catch {
+      // Ignore cleanup failure if already unlinked
+    }
+  }
+
+  /**
+   * Ensures client directory exists safely within baseStorageDir
    */
   public static ensureClientDir(clientId: string): string {
-    const safeClientId = clientId.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const clientDir = path.join(this.baseStorageDir, safeClientId);
+    const safeClientId = this.sanitizeClientId(clientId);
+    const resolvedBase = path.resolve(this.baseStorageDir);
+    const clientDir = path.resolve(resolvedBase, safeClientId);
+    if (!clientDir.startsWith(resolvedBase + path.sep)) {
+      throw new Error(`Invalid storage client directory: ${clientId}`);
+    }
     if (!fs.existsSync(clientDir)) {
       fs.mkdirSync(clientDir, { recursive: true });
     }
@@ -67,6 +159,7 @@ export class CSVStorageManager {
     const clientDir = this.ensureClientDir(clientId);
     const date = this.extractSafePartitionDate(dateStr);
     const lockPath = path.join(clientDir, `.${date}.csv.lock`);
+    const lockValue = `${process.pid}:${Date.now()}:${crypto.randomUUID()}`;
     const deadline = Date.now() + LOCK_TIMEOUT_MS;
 
     let acquired = false;
@@ -74,7 +167,7 @@ export class CSVStorageManager {
       try {
         const fd = fs.openSync(lockPath, 'wx');
         try {
-          fs.writeFileSync(fd, `${process.pid}:${Date.now()}`, 'utf8');
+          fs.writeFileSync(fd, lockValue, 'utf8');
         } finally {
           fs.closeSync(fd);
         }
@@ -85,15 +178,7 @@ export class CSVStorageManager {
         if (code !== 'EEXIST') {
           throw err;
         }
-        try {
-          const lockStat = fs.statSync(lockPath);
-          if (Date.now() - lockStat.mtimeMs > STALE_LOCK_AGE_MS) {
-            fs.unlinkSync(lockPath);
-            continue;
-          }
-        } catch {
-          // Lock was released concurrently
-        }
+        this.removeStaleLockAtomically(lockPath);
         const jitter =
           LOCK_RETRY_MIN_MS +
           Math.floor(Math.random() * (LOCK_RETRY_MAX_MS - LOCK_RETRY_MIN_MS));
@@ -108,13 +193,7 @@ export class CSVStorageManager {
     try {
       return await fn();
     } finally {
-      try {
-        if (fs.existsSync(lockPath)) {
-          fs.unlinkSync(lockPath);
-        }
-      } catch {
-        // Ignore cleanup failure if already unlinked
-      }
+      this.releaseLockIfOwned(lockPath, lockValue);
     }
   }
 
@@ -158,51 +237,58 @@ export class CSVStorageManager {
    * Stateful RFC 4180 quote-aware chunked row counter so multi-100MB CSVs never load wholly into RAM
    */
   private static createChunkRowCounter() {
+    const decoder = new StringDecoder('utf8');
     let inQuotes = false;
     let pendingQuote = false;
     let currentLineHasChars = false;
     let totalRows = 0;
 
-    return {
-      pushChunk(chunk: Buffer | string) {
-        const str = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-        for (let i = 0; i < str.length; i += 1) {
-          const ch = str[i];
-          if (pendingQuote) {
-            pendingQuote = false;
-            if (ch === '"') {
-              // Escaped quote "" across chunk boundary or inline
-              continue;
-            }
-            inQuotes = !inQuotes;
-          }
-
+    const processStr = (str: string) => {
+      for (let i = 0; i < str.length; i += 1) {
+        const ch = str[i];
+        if (pendingQuote) {
+          pendingQuote = false;
           if (ch === '"') {
-            currentLineHasChars = true;
-            if (inQuotes) {
-              if (i + 1 < str.length) {
-                if (str[i + 1] === '"') {
-                  i += 1;
-                } else {
-                  inQuotes = false;
-                }
+            // Escaped quote "" across chunk boundary or inline
+            continue;
+          }
+          inQuotes = !inQuotes;
+        }
+
+        if (ch === '"') {
+          currentLineHasChars = true;
+          if (inQuotes) {
+            if (i + 1 < str.length) {
+              if (str[i + 1] === '"') {
+                i += 1;
               } else {
-                pendingQuote = true;
+                inQuotes = false;
               }
             } else {
-              inQuotes = true;
+              pendingQuote = true;
             }
-          } else if (ch === '\n' && !inQuotes) {
-            if (currentLineHasChars) {
-              totalRows += 1;
-              currentLineHasChars = false;
-            }
-          } else if (ch !== '\r' && ch !== ' ' && ch !== '\t') {
-            currentLineHasChars = true;
+          } else {
+            inQuotes = true;
           }
+        } else if (ch === '\n' && !inQuotes) {
+          if (currentLineHasChars) {
+            totalRows += 1;
+            currentLineHasChars = false;
+          }
+        } else if (ch !== '\r' && ch !== ' ' && ch !== '\t') {
+          currentLineHasChars = true;
         }
+      }
+    };
+
+    return {
+      pushChunk(chunk: Buffer | string) {
+        const str = typeof chunk === 'string' ? chunk : decoder.write(chunk);
+        if (str) processStr(str);
       },
       finish(): number {
+        const trailing = decoder.end();
+        if (trailing) processStr(trailing);
         if (currentLineHasChars) {
           totalRows += 1;
         }
@@ -243,7 +329,11 @@ export class CSVStorageManager {
   /**
    * Resolves target CSV file path with daily and configured MB rotation rules
    */
-  public static getTargetFilePath(clientId: string, dateStr?: string): string {
+  public static getTargetFilePath(
+    clientId: string,
+    dateStr?: string,
+    incomingBytes = 0,
+  ): string {
     const clientDir = this.ensureClientDir(clientId);
     const date = this.extractSafePartitionDate(dateStr);
     let baseFileName = `${date}.csv`;
@@ -252,16 +342,24 @@ export class CSVStorageManager {
     // Check for file rotation
     let partIndex = 1;
     while (fs.existsSync(targetPath)) {
+      let stats: fs.Stats;
       try {
-        const stats = fs.statSync(targetPath);
-        if (stats.size >= this.maxFileSizeBytes) {
-          partIndex += 1;
-          baseFileName = `${date}-part${partIndex}.csv`;
-          targetPath = path.join(clientDir, baseFileName);
-        } else {
+        stats = fs.statSync(targetPath);
+      } catch (err: unknown) {
+        if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
           break;
         }
-      } catch {
+        throw err;
+      }
+      const overflowsLimit =
+        stats.size > 0 &&
+        incomingBytes > 0 &&
+        stats.size + incomingBytes > this.maxFileSizeBytes;
+      if (stats.size >= this.maxFileSizeBytes || overflowsLimit) {
+        partIndex += 1;
+        baseFileName = `${date}-part${partIndex}.csv`;
+        targetPath = path.join(clientDir, baseFileName);
+      } else {
         break;
       }
     }
@@ -280,49 +378,63 @@ export class CSVStorageManager {
       return { written: 0, filesUpdated: [] };
     }
 
-    // Group events by client + date
-    const grouped = new Map<string, DataEvent[]>();
+    // Group events by client + date without ambiguous delimiter splitting
+    const grouped = new Map<string, { clientId: string; date: string; events: DataEvent[] }>();
     for (const evt of events) {
       const date = this.extractSafePartitionDate(evt.timestamp);
-      const key = `${evt.clientId}:::${date}`;
-      if (!grouped.has(key)) {
-        grouped.set(key, []);
+      const clientId = String(evt.clientId || 'unknown');
+      const key = JSON.stringify([clientId, date]);
+      let bucket = grouped.get(key);
+      if (!bucket) {
+        bucket = { clientId, date, events: [] };
+        grouped.set(key, bucket);
       }
-      grouped.get(key)!.push(evt);
+      bucket.events.push(evt);
     }
 
     const filesUpdated: string[] = [];
     const fields = ['clientId', 'eventId', 'timestamp', 'payload'];
 
-    for (const [key, batch] of grouped.entries()) {
-      const [clientId, date] = key.split(':::');
+    for (const { clientId, date, events: batch } of grouped.values()) {
+      const cleanBatch = batch.map((item) => ({
+        clientId: item.clientId,
+        eventId: item.eventId,
+        timestamp: item.timestamp,
+        payload:
+          typeof item.payload === 'string'
+            ? item.payload
+            : JSON.stringify(item.payload),
+      }));
+
+      const bodyCsvNoHeader = new Parser({ fields, header: false, eol: '\n' }).parse(
+        cleanBatch,
+      );
+      const incomingBytes = Buffer.byteLength(bodyCsvNoHeader, 'utf8') + 1;
+
       const targetPath = await this.withPartitionLock(clientId, date, () => {
-        const resolvedPath = this.getTargetFilePath(clientId, date);
-        let hasContent = false;
+        const resolvedPath = this.getTargetFilePath(clientId, date, incomingBytes);
+        let sizeBytes = 0;
         try {
-          hasContent =
-            fs.existsSync(resolvedPath) && fs.statSync(resolvedPath).size > 0;
+          if (fs.existsSync(resolvedPath)) {
+            sizeBytes = fs.statSync(resolvedPath).size;
+          }
         } catch {
-          hasContent = false;
+          sizeBytes = 0;
         }
-
-        const cleanBatch = batch.map((item) => ({
-          clientId: item.clientId,
-          eventId: item.eventId,
-          timestamp: item.timestamp,
-          payload:
-            typeof item.payload === 'string'
-              ? item.payload
-              : JSON.stringify(item.payload),
-        }));
-
-        const parser = new Parser({ fields, header: !hasContent, eol: '\n' });
-        const csvData = parser.parse(cleanBatch);
+        const hasContent = sizeBytes > 0;
 
         if (hasContent) {
-          fs.appendFileSync(resolvedPath, '\n' + csvData, 'utf8');
+          const endsWithNl = this.fileEndsWithNewline(resolvedPath, sizeBytes);
+          fs.appendFileSync(
+            resolvedPath,
+            (endsWithNl ? '' : '\n') + bodyCsvNoHeader,
+            'utf8',
+          );
         } else {
-          fs.writeFileSync(resolvedPath, csvData, 'utf8');
+          const fullCsv = new Parser({ fields, header: true, eol: '\n' }).parse(
+            cleanBatch,
+          );
+          fs.writeFileSync(resolvedPath, fullCsv, 'utf8');
         }
 
         // Invalidate row cache for modified file immediately
@@ -351,13 +463,25 @@ export class CSVStorageManager {
       const clientDirs = fs.readdirSync(this.baseStorageDir);
       for (const clientDir of clientDirs) {
         const fullClientPath = path.join(this.baseStorageDir, clientDir);
-        if (!fs.statSync(fullClientPath).isDirectory()) continue;
+        let dirLstat: fs.Stats;
+        try {
+          dirLstat = fs.lstatSync(fullClientPath);
+        } catch {
+          continue;
+        }
+        if (dirLstat.isSymbolicLink() || !dirLstat.isDirectory()) continue;
 
         const files = fs.readdirSync(fullClientPath);
         for (const file of files) {
           if (!file.endsWith('.csv')) continue;
           const fullFilePath = path.join(fullClientPath, file);
-          const stats = fs.statSync(fullFilePath);
+          let stats: fs.Stats;
+          try {
+            stats = fs.lstatSync(fullFilePath);
+          } catch {
+            continue;
+          }
+          if (stats.isSymbolicLink() || !stats.isFile()) continue;
           activePaths.add(fullFilePath);
 
           const cached = this.rowCountCache.get(fullFilePath);
@@ -422,15 +546,15 @@ export class CSVStorageManager {
       const clientDirs = await fs.promises.readdir(this.baseStorageDir);
       for (const clientDir of clientDirs) {
         const fullClientPath = path.join(this.baseStorageDir, clientDir);
-        const dirStat = await fs.promises.stat(fullClientPath).catch(() => null);
-        if (!dirStat || !dirStat.isDirectory()) continue;
+        const dirLstat = await fs.promises.lstat(fullClientPath).catch(() => null);
+        if (!dirLstat || dirLstat.isSymbolicLink() || !dirLstat.isDirectory()) continue;
 
         const files = await fs.promises.readdir(fullClientPath);
         for (const file of files) {
           if (!file.endsWith('.csv')) continue;
           const fullFilePath = path.join(fullClientPath, file);
-          const stats = await fs.promises.stat(fullFilePath).catch(() => null);
-          if (!stats) continue;
+          const stats = await fs.promises.lstat(fullFilePath).catch(() => null);
+          if (!stats || stats.isSymbolicLink() || !stats.isFile()) continue;
           activePaths.add(fullFilePath);
 
           const cached = this.rowCountCache.get(fullFilePath);
@@ -481,7 +605,7 @@ export class CSVStorageManager {
   }
 
   /**
-   * Prune CSV partitions older than autoPruneDays without counting row contents
+   * Prune CSV partitions older than autoPruneDays under cooperative partition locks
    */
   public static pruneExpiredPartitions(autoPruneDays: number): number {
     if (!Number.isFinite(autoPruneDays) || autoPruneDays <= 0) {
@@ -502,7 +626,13 @@ export class CSVStorageManager {
       const clientDirs = fs.readdirSync(this.baseStorageDir);
       for (const clientDir of clientDirs) {
         const fullClientPath = path.join(this.baseStorageDir, clientDir);
-        if (!fs.statSync(fullClientPath).isDirectory()) continue;
+        let dirLstat: fs.Stats;
+        try {
+          dirLstat = fs.lstatSync(fullClientPath);
+        } catch {
+          continue;
+        }
+        if (dirLstat.isSymbolicLink() || !dirLstat.isDirectory()) continue;
 
         const files = fs.readdirSync(fullClientPath);
         for (const file of files) {
@@ -510,6 +640,45 @@ export class CSVStorageManager {
           const datePart = file.replace('.csv', '').split('-part')[0];
           if (/^\d{4}-\d{2}-\d{2}$/.test(datePart) && datePart < cutoffDate) {
             const fullPath = path.join(fullClientPath, file);
+            let fileLstat: fs.Stats;
+            try {
+              fileLstat = fs.lstatSync(fullPath);
+            } catch {
+              continue;
+            }
+            if (fileLstat.isSymbolicLink() || !fileLstat.isFile()) continue;
+
+            const lockPath = path.join(fullClientPath, `.${datePart}.csv.lock`);
+            const lockValue = `${process.pid}:${Date.now()}:${crypto.randomUUID()}`;
+            let acquired = false;
+            try {
+              const fd = fs.openSync(lockPath, 'wx');
+              try {
+                fs.writeFileSync(fd, lockValue, 'utf8');
+              } finally {
+                fs.closeSync(fd);
+              }
+              acquired = true;
+            } catch (err: unknown) {
+              if ((err as NodeJS.ErrnoException)?.code === 'EEXIST') {
+                this.removeStaleLockAtomically(lockPath);
+                try {
+                  const fd = fs.openSync(lockPath, 'wx');
+                  try {
+                    fs.writeFileSync(fd, lockValue, 'utf8');
+                  } finally {
+                    fs.closeSync(fd);
+                  }
+                  acquired = true;
+                } catch {
+                  // Partition is currently locked by an active writer; skip safely
+                  acquired = false;
+                }
+              }
+            }
+
+            if (!acquired) continue;
+
             try {
               if (fs.existsSync(fullPath)) {
                 fs.unlinkSync(fullPath);
@@ -518,6 +687,8 @@ export class CSVStorageManager {
               }
             } catch {
               // Ignore file removal error
+            } finally {
+              this.releaseLockIfOwned(lockPath, lockValue);
             }
           }
         }
@@ -529,7 +700,96 @@ export class CSVStorageManager {
     return prunedCount;
   }
 
-  private static formatStorageStats(files: StorageFileMeta[]) {
+  /**
+   * Non-blocking async partition pruner using fs.promises under cooperative partition locks
+   */
+  public static async pruneExpiredPartitionsAsync(
+    autoPruneDays: number,
+  ): Promise<number> {
+    if (!Number.isFinite(autoPruneDays) || autoPruneDays <= 0) {
+      return 0;
+    }
+
+    const baseStat = await fs.promises.lstat(this.baseStorageDir).catch(() => null);
+    if (!baseStat || !baseStat.isDirectory()) {
+      return 0;
+    }
+
+    const cutoffDate = new Date(
+      Date.now() - Math.floor(autoPruneDays) * 86_400_000,
+    )
+      .toISOString()
+      .split('T')[0];
+
+    let prunedCount = 0;
+    try {
+      const clientDirs = await fs.promises.readdir(this.baseStorageDir);
+      for (const clientDir of clientDirs) {
+        const fullClientPath = path.join(this.baseStorageDir, clientDir);
+        const dirLstat = await fs.promises.lstat(fullClientPath).catch(() => null);
+        if (!dirLstat || dirLstat.isSymbolicLink() || !dirLstat.isDirectory()) {
+          continue;
+        }
+
+        const files = await fs.promises.readdir(fullClientPath).catch(() => [] as string[]);
+        for (const file of files) {
+          if (!file.endsWith('.csv')) continue;
+          const datePart = file.replace('.csv', '').split('-part')[0];
+          if (/^\d{4}-\d{2}-\d{2}$/.test(datePart) && datePart < cutoffDate) {
+            const fullPath = path.join(fullClientPath, file);
+            const fileLstat = await fs.promises.lstat(fullPath).catch(() => null);
+            if (!fileLstat || fileLstat.isSymbolicLink() || !fileLstat.isFile()) {
+              continue;
+            }
+
+            const lockPath = path.join(fullClientPath, `.${datePart}.csv.lock`);
+            const lockValue = `${process.pid}:${Date.now()}:${crypto.randomUUID()}`;
+            let acquired = false;
+            const tryAcquireLock = async (): Promise<boolean> => {
+              const handle = await fs.promises.open(lockPath, 'wx');
+              try {
+                await handle.writeFile(lockValue, 'utf8');
+              } finally {
+                await handle.close();
+              }
+              return true;
+            };
+
+            try {
+              acquired = await tryAcquireLock();
+            } catch (err: unknown) {
+              if ((err as NodeJS.ErrnoException)?.code === 'EEXIST') {
+                await this.removeStaleLockAtomicallyAsync(lockPath);
+                try {
+                  acquired = await tryAcquireLock();
+                } catch {
+                  acquired = false;
+                }
+              }
+            }
+
+            if (!acquired) continue;
+
+            try {
+              await fs.promises.unlink(fullPath);
+              this.rowCountCache.delete(fullPath);
+              prunedCount += 1;
+            } catch {
+              // Ignore individual unlink error or concurrent removal
+            } finally {
+              await this.releaseLockIfOwnedAsync(lockPath, lockValue);
+            }
+          }
+        }
+      }
+    } catch {
+      // Ignore directory scan failure
+    }
+
+    return prunedCount;
+  }
+
+  public static formatStorageStats(files: StorageFileMeta[]) {
     const totalBytes = files.reduce((acc, f) => acc + f.sizeBytes, 0);
     const totalRows = files.reduce((acc, f) => acc + f.linesCount, 0);
     const uniqueClients = new Set(files.map((f) => f.clientId)).size;
@@ -569,17 +829,21 @@ export class CSVStorageManager {
    * Reads file content for export / download with path traversal protection
    */
   public static getFileContent(clientId: string, filename: string): string | null {
-    const safeClientId = String(clientId || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const safeClientId = this.sanitizeClientId(clientId);
     const safeFilename = path.basename(String(filename || ''));
     if (!safeClientId || !safeFilename || !safeFilename.endsWith('.csv')) {
       return null;
     }
-    const fullPath = path.resolve(this.baseStorageDir, safeClientId, safeFilename);
     const resolvedBase = path.resolve(this.baseStorageDir);
+    const fullPath = path.resolve(resolvedBase, safeClientId, safeFilename);
     if (!fullPath.startsWith(resolvedBase + path.sep)) {
       return null;
     }
     if (fs.existsSync(fullPath)) {
+      const stats = fs.lstatSync(fullPath);
+      if (stats.isSymbolicLink() || !stats.isFile()) {
+        return null;
+      }
       return fs.readFileSync(fullPath, 'utf8');
     }
     return null;

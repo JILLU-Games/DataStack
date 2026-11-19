@@ -6,12 +6,15 @@ batches once the Heartbeat Monitor restores connectivity.
 """
 
 import json
+import logging
 import os
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .exceptions import DataStackOfflineSpoolError
+
+logger = logging.getLogger("datastack.spool")
 
 
 class DiskSpooler:
@@ -121,6 +124,7 @@ class DiskSpooler:
             if not self.spool_file.exists():
                 return 0
 
+            tmp_file = self.spool_dir / "spool.jsonl.tmp"
             try:
                 with self.spool_file.open("r", encoding="utf-8") as fh:
                     all_lines = [ln for ln in fh if ln.strip()]
@@ -130,13 +134,15 @@ class DiskSpooler:
                     return len(all_lines)
 
                 remaining = all_lines[count:]
-                tmp_file = self.spool_dir / "spool.jsonl.tmp"
                 with tmp_file.open("w", encoding="utf-8") as fh:
                     fh.writelines(remaining)
                     fh.flush()
+                    os.fsync(fh.fileno())
                 os.replace(str(tmp_file), str(self.spool_file))
                 return count
-            except Exception:
+            except Exception as exc:
+                tmp_file.unlink(missing_ok=True)
+                logger.warning("[DataStack Spool] ack_batch failed: %s", exc)
                 return 0
 
     def ack_and_requeue_front(
@@ -156,6 +162,7 @@ class DiskSpooler:
             if not self.spool_file.exists():
                 return 0
 
+            tmp_file = self.spool_dir / "spool.jsonl.tmp"
             try:
                 with self.spool_file.open("r", encoding="utf-8") as fh:
                     all_lines = [ln for ln in fh if ln.strip()]
@@ -173,13 +180,17 @@ class DiskSpooler:
                     return consumed
 
                 self._ensure_dir()
-                tmp_file = self.spool_dir / "spool.jsonl.tmp"
                 with tmp_file.open("w", encoding="utf-8") as fh:
                     fh.writelines(combined)
                     fh.flush()
+                    os.fsync(fh.fileno())
                 os.replace(str(tmp_file), str(self.spool_file))
                 return max(0, consumed - len(head_lines))
-            except Exception:
+            except Exception as exc:
+                tmp_file.unlink(missing_ok=True)
+                logger.warning(
+                    "[DataStack Spool] ack_and_requeue_front failed: %s", exc
+                )
                 return 0
 
     def pending_count(self) -> int:

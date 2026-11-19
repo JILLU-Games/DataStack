@@ -5,12 +5,13 @@ import {
   scrypt as scryptCallback,
   timingSafeEqual,
 } from "node:crypto";
-import { Pool, type PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
 import {
   type AdminSessionPayload,
   getAdminSessionPayload,
   getAdminSessionSecret,
 } from "./adminSession";
+import { DatabaseEngine, ensureCoreSchemaOnPool } from "../Database/database";
 
 const PASSWORD_HASH_BYTES = 64;
 const PASSWORD_SALT_BYTES = 16;
@@ -50,7 +51,6 @@ interface InMemoryAdmin {
 }
 
 type AdminDatabaseGlobals = typeof globalThis & {
-  __dataStackAdminPool?: Pool | null;
   __dataStackAdminSchema?: Promise<void>;
   __dataStackInMemoryAdmin?: InMemoryAdmin;
 };
@@ -60,67 +60,51 @@ const localLoginThrottle = new Map<string, LoginThrottleEntry>();
 let lastLocalThrottleCleanup = 0;
 let lastDatabaseThrottleCleanup = 0;
 
+export class AdminSetupRequiredError extends Error {
+  public readonly code = "SETUP_REQUIRED";
+
+  constructor(message = "Admin account has not completed initial setup.") {
+    super(message);
+    this.name = "AdminSetupRequiredError";
+  }
+}
+
+export class AdminDatabaseRequiredError extends Error {
+  public readonly code = "DATABASE_NOT_CONFIGURED";
+
+  constructor(
+    message = "PostgreSQL DATABASE_URL is required for initial admin setup in production.",
+  ) {
+    super(message);
+    this.name = "AdminDatabaseRequiredError";
+  }
+}
+
 function isProductionEnv() {
   return process.env.NODE_ENV === "production";
 }
 
+export function isAdminDatabaseConfigured(): boolean {
+  return Boolean(getPool());
+}
+
+export function requiresPersistentAdminDatabase(): boolean {
+  return (
+    isProductionEnv() &&
+    !getPool() &&
+    !process.env.DATASTACK_ADMIN_PASSWORD
+  );
+}
+
 function getPool(): Pool | null {
-  const connectionString = process.env.DATABASE_URL?.trim();
-  if (!connectionString) {
-    return null;
-  }
-
-  if (globals.__dataStackAdminPool === undefined) {
-    try {
-      globals.__dataStackAdminPool = new Pool({
-        connectionString,
-        connectionTimeoutMillis: 3000,
-        idleTimeoutMillis: 30000,
-        max: 5,
-      });
-    } catch {
-      globals.__dataStackAdminPool = null;
-    }
-  }
-
-  return globals.__dataStackAdminPool ?? null;
+  return DatabaseEngine.getPool();
 }
 
 async function ensureAdminTable() {
   const pool = getPool();
   if (!pool) return;
 
-  globals.__dataStackAdminSchema ??= Promise.all([
-    pool
-      .query(
-        `
-      CREATE TABLE IF NOT EXISTS admin_users (
-        id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-        email TEXT NOT NULL UNIQUE,
-        password_salt BYTEA NOT NULL,
-        password_hash BYTEA NOT NULL,
-        token_version INTEGER NOT NULL DEFAULT 1,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `,
-      )
-      .then(() =>
-        pool.query(
-          `ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 1`,
-        ),
-      ),
-    pool.query(
-      `
-      CREATE TABLE IF NOT EXISTS admin_login_attempts (
-        key_hash TEXT PRIMARY KEY,
-        window_started_at TIMESTAMPTZ NOT NULL,
-        failed_attempts INTEGER NOT NULL,
-        blocked_until TIMESTAMPTZ,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `,
-    ),
-  ]).then(() => undefined);
+  globals.__dataStackAdminSchema ??= ensureCoreSchemaOnPool(pool);
 
   try {
     await globals.__dataStackAdminSchema;
@@ -342,7 +326,7 @@ async function getOrInitInMemoryAdmin(): Promise<InMemoryAdmin> {
       !isProductionEnv() && process.env.DATASTACK_ALLOW_DEMO_ADMIN !== "false";
 
     if (!envPassword && !allowDemo) {
-      throw new Error("Admin account has not completed initial setup.");
+      throw new AdminSetupRequiredError();
     }
 
     const defaultEmail = (
@@ -443,6 +427,9 @@ export async function createInitialAdmin(email: string, password: string) {
   const pool = getPool();
 
   if (!pool) {
+    if (isProductionEnv()) {
+      throw new AdminDatabaseRequiredError();
+    }
     if (globals.__dataStackInMemoryAdmin) {
       return false;
     }
@@ -669,6 +656,28 @@ export async function updateAdminAccount({
     createdAt: existing.createdAt,
   };
   return { ok: true as const, email: cleanEmail, tokenVersion: nextVersion };
+}
+
+export async function revokeAdminSessions(): Promise<number> {
+  const pool = getPool();
+  if (pool) {
+    await ensureAdminTable();
+    const updated = await pool.query(
+      `UPDATE admin_users
+       SET token_version = COALESCE(token_version, 1) + 1
+       WHERE id = 1
+       RETURNING token_version`,
+    );
+    if (!updated.rowCount || updated.rowCount === 0) {
+      return 0;
+    }
+    return Number(updated.rows[0].token_version) || 1;
+  }
+
+  const existing = globals.__dataStackInMemoryAdmin ?? (await getOrInitInMemoryAdmin());
+  existing.tokenVersion += 1;
+  globals.__dataStackInMemoryAdmin = existing;
+  return existing.tokenVersion;
 }
 
 export function resetAdminStateForTests() {

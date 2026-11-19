@@ -9,6 +9,10 @@ import { Pill } from '@/components/ui/Pill';
 import { StatStrip } from '@/components/ui/StatStrip';
 import { useToast } from '@/components/ui/Toast';
 import { getCached, setCached } from '@/lib/vconCache';
+import {
+  resolvePublicEndpoints,
+  summarizeHttpBatchResult,
+} from '@/lib/vconUiHelpers';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { io } from 'socket.io-client';
@@ -22,11 +26,8 @@ interface SimulatorClient {
 type TransportMode = 'http' | 'websocket';
 type DispatchStatus = 'Ready' | 'Accepted' | 'Rejected' | 'Error';
 
-function getSocketOrigin(): string {
-  const isLocalDev = window.location.port === '3000';
-  const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
-  const host = isLocalDev ? `${window.location.hostname}:4000` : window.location.host;
-  return `${protocol}//${host}`;
+function getSocketOrigin(serverPort: number): string {
+  return resolvePublicEndpoints(window.location, serverPort).serverUrl;
 }
 
 export default function SimulatorPage() {
@@ -52,20 +53,26 @@ export default function SimulatorPage() {
       2
     )
   );
+  const [serverPort, setServerPort] = useState<number>(() =>
+    getCached<number>('vcon:server-port', 4000)
+  );
   const [sending, setSending] = useState(false);
   const [dispatchStatus, setDispatchStatus] = useState<DispatchStatus>('Ready');
   const [lastResponse, setLastResponse] = useState<Record<string, unknown> | null>(null);
 
   useEffect(() => {
-    async function loadClients() {
+    async function loadSimulatorContext() {
       try {
-        const res = await fetch('/api/clients', { cache: 'no-store' });
-        if (res.status === 401) {
+        const [clientsRes, metricsRes] = await Promise.all([
+          fetch('/api/clients', { cache: 'no-store' }),
+          fetch('/api/metrics', { cache: 'no-store' }).catch(() => null),
+        ]);
+        if (clientsRes.status === 401 || metricsRes?.status === 401) {
           window.location.assign('/vcon/login');
           return;
         }
-        if (res.ok) {
-          const data = await res.json();
+        if (clientsRes.ok) {
+          const data = await clientsRes.json();
           const list = setCached<SimulatorClient[]>('vcon:clients', data.clients || []);
           setClients(list);
           setSelectedClient((prev) => {
@@ -73,11 +80,18 @@ export default function SimulatorPage() {
             return list.find((c) => c.status === 'active')?.clientId ?? list[0]?.clientId ?? '';
           });
         }
+        if (metricsRes && metricsRes.ok) {
+          const metricsData = await metricsRes.json().catch(() => null);
+          const runtimePort = Number(metricsData?.runtime?.serverPort);
+          if (Number.isFinite(runtimePort) && runtimePort > 0) {
+            setServerPort(setCached('vcon:server-port', runtimePort));
+          }
+        }
       } catch {
         // Ignore transient failure and retain cached list
       }
     }
-    void loadClients();
+    void loadSimulatorContext();
   }, []);
 
   const fetchClientJwt = async (clientId: string): Promise<string> => {
@@ -100,7 +114,7 @@ export default function SimulatorPage() {
     items: Array<Record<string, unknown>>
   ): Promise<{ accepted: number; rejected: number; responses: Record<string, unknown>[] }> => {
     const token = await fetchClientJwt(clientId);
-    const socketUrl = getSocketOrigin();
+    const socketUrl = getSocketOrigin(serverPort);
 
     return new Promise((resolve, reject) => {
       const socket = io(socketUrl, {
@@ -112,7 +126,7 @@ export default function SimulatorPage() {
 
       const timer = window.setTimeout(() => {
         socket.disconnect();
-        reject(new Error('WebSocket timeout (is Port 4000 ingestion server running?)'));
+        reject(new Error(`WebSocket timeout (is Port ${serverPort} ingestion server running?)`));
       }, 5000);
 
       socket.on('connect_error', (connectErr) => {
@@ -271,55 +285,47 @@ export default function SimulatorPage() {
         return;
       }
 
-      let accepted = 0;
-      let rejected = 0;
-      const errors: string[] = [];
-
-      for (const item of items) {
-        const res = await fetch('/api/events', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            clientId: selectedClient,
-            data: item,
-          }),
-        });
-        if (res.status === 401) {
-          window.location.assign('/vcon/login');
-          return;
-        }
-        if (res.ok) {
-          accepted++;
-        } else {
-          rejected++;
-          try {
-            const errJson = await res.json();
-            if (errJson?.error && errors.length < 3) {
-              errors.push(String(errJson.error));
-            }
-          } catch {
-            // ignore non-json error body
-          }
-        }
+      const batchPayload = items.map((item, idx) => ({
+        eventId: `sim_http_${Date.now()}_${idx}`,
+        timestamp: item.timestamp,
+        data: item,
+      }));
+      const res = await fetch('/api/events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clientId: selectedClient,
+          batch: batchPayload,
+        }),
+      });
+      if (res.status === 401) {
+        window.location.assign('/vcon/login');
+        return;
       }
 
+      const data = await res.json().catch(() => ({}));
+      const summary = summarizeHttpBatchResult(
+        res.ok,
+        data && typeof data === 'object' ? (data as Record<string, unknown>) : null,
+        count,
+      );
       setLastResponse({
         transport: 'http',
+        status: res.status,
         batchSent: count,
-        accepted,
-        rejected,
-        ...(errors.length > 0 ? { errors } : {}),
+        accepted: summary.accepted,
+        rejected: summary.rejected,
+        duplicates: summary.duplicates,
+        ...(data && typeof data === 'object' ? data : {}),
       });
 
-      if (accepted === 0) {
-        setDispatchStatus('Rejected');
-        error('Batch Rejected', `0/${count} ingested${errors[0] ? ` (${errors[0]})` : ''}`);
-      } else if (accepted < count) {
-        setDispatchStatus('Rejected');
-        warning('Batch Partial', `${accepted}/${count} ingested (${rejected} rejected)`);
+      setDispatchStatus(summary.status);
+      if (summary.level === 'error') {
+        error(summary.title, summary.message);
+      } else if (summary.level === 'warning') {
+        warning(summary.title, summary.message);
       } else {
-        setDispatchStatus('Accepted');
-        success('Batch Streamed', `${accepted}/${count} ingested`);
+        success(summary.title, summary.message);
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Batch dispatch error';
@@ -379,7 +385,7 @@ export default function SimulatorPage() {
           },
           {
             label: 'Ingest transport',
-            value: transport === 'http' ? 'POST /api/events' : 'WS Port 4000',
+            value: transport === 'http' ? 'POST /api/events' : `WS Port ${serverPort}`,
           },
           { label: 'Payload format', value: 'JSON' },
           {
@@ -412,7 +418,7 @@ export default function SimulatorPage() {
                 active={transport === 'websocket'}
                 onClick={() => setTransport('websocket')}
               >
-                WebSocket Port 4000
+                WebSocket Port {serverPort}
               </Pill>
             </div>
           </div>

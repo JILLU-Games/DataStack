@@ -24,6 +24,8 @@ setup(
     url="https://vibtools.top/",
     license="MIT",
     packages=find_packages(include=["datastack", "datastack.*"]),
+    package_data={"datastack": ["py.typed"]},
+    include_package_data=True,
     install_requires=[
         "python-socketio[client]>=5.8.0",
         "requests>=2.28.0",
@@ -40,5 +42,6 @@ setup(
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
     ],
 )

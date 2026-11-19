@@ -293,7 +293,7 @@ DataStack includes a production-ready Docker Compose stack in [`docker/docker-co
 
 ### Coolify Deployment Steps
 1. Create a **Docker Compose** resource in Coolify pointing to your repository.
-2. Set **Base Directory** to `/docker` and **Docker Compose Location** to `/docker/docker-compose.yml`.
+2. Set **Base Directory** to `/` and **Docker Compose Location** to `/docker/docker-compose.yml`.
 3. Attach your HTTPS domain to the `proxy` service on port `80`.
 4. Deploy the stack, open `https://your-domain.example/vcon/setup`, and enter your administrator email, password (8+ characters), and the generated `SERVICE_REALBASE64_64_ADMININSTALL` key from Coolify's environment variables.
 

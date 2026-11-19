@@ -68,7 +68,8 @@ class HeartbeatMonitor:
         Monitor into IDLE mode (`_wake_event.clear()`).
         """
         with self._lock:
-            self._closed = False
+            if self._closed or self._stop_event.is_set():
+                return
             self._state = ConnectionState.CONNECTED_IDLE
             self._recovery_attempts = 0
             self._last_error = None
@@ -112,7 +113,8 @@ class HeartbeatMonitor:
             self._stop_event.clear()
             self._ensure_thread_started()
 
-    def stop(self, reason: Optional[str] = None) -> None:
+    def stop(self, reason: Optional[str] = None, join_timeout: float = 0.0) -> None:
+        thread_to_join: Optional[threading.Thread] = None
         with self._lock:
             self._closed = True
             self._state = ConnectionState.STOPPED
@@ -120,6 +122,14 @@ class HeartbeatMonitor:
                 self._last_error = reason
             self._stop_event.set()
             self._wake_event.set()
+            thread_to_join = self._thread
+        if (
+            join_timeout > 0
+            and thread_to_join is not None
+            and thread_to_join.is_alive()
+            and threading.current_thread() is not thread_to_join
+        ):
+            thread_to_join.join(timeout=join_timeout)
 
     def status_snapshot(self) -> Dict[str, Any]:
         with self._lock:
@@ -181,10 +191,17 @@ class HeartbeatMonitor:
             try:
                 recovered_to_idle = self._recovery_callback()
                 if recovered_to_idle:
-                    self.set_idle_connected()
-                    logger.info(
-                        "[DataStack Heartbeat] WebSocket reconnected & verified. Returning to IDLE mode."
-                    )
+                    with self._lock:
+                        still_active = (
+                            not self._closed
+                            and not self._stop_event.is_set()
+                            and self._state != ConnectionState.STOPPED
+                        )
+                    if still_active:
+                        self.set_idle_connected()
+                        logger.info(
+                            "[DataStack Heartbeat] WebSocket reconnected & verified. Returning to IDLE mode."
+                        )
             except Exception as exc:
                 with self._lock:
                     self._last_error = str(exc)

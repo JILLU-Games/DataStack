@@ -60,17 +60,29 @@ export async function POST(req: NextRequest) {
   try {
     const { clientId, name, rateLimit } = body;
 
-    if (!clientId || !name) {
+    if (typeof clientId !== "string" || typeof name !== "string" || !clientId.trim() || !name.trim()) {
       return NextResponse.json(
-        { error: "clientId and name are required" },
+        { error: "clientId and name are required strings", code: "VALIDATION_ERROR" },
         { status: 400 },
       );
     }
 
-    const safeClientId = String(clientId)
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9_-]/g, "_");
+    const safeClientId = SDKManager.normalizeClientId(clientId);
+    if (!safeClientId) {
+      return NextResponse.json(
+        { error: "clientId is invalid", code: "VALIDATION_ERROR" },
+        { status: 400 },
+      );
+    }
+
+    const parsedRateLimit = rateLimit === undefined ? 100 : Number(rateLimit);
+    if (!Number.isInteger(parsedRateLimit) || parsedRateLimit < 1 || parsedRateLimit > 100000) {
+      return NextResponse.json(
+        { error: "rateLimit must be an integer between 1 and 100000.", code: "VALIDATION_ERROR" },
+        { status: 400 },
+      );
+    }
+
     const existing = await SDKManager.getClientAsync(safeClientId);
     if (existing) {
       return NextResponse.json(
@@ -81,8 +93,8 @@ export async function POST(req: NextRequest) {
 
     const newClient = await SDKManager.registerClientAsync({
       clientId: safeClientId,
-      name: String(name),
-      rateLimit: rateLimit ? Number(rateLimit) : 100,
+      name: name.trim().slice(0, 120),
+      rateLimit: parsedRateLimit,
     });
 
     return NextResponse.json({ client: newClient }, { status: 201 });

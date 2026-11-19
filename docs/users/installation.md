@@ -72,7 +72,7 @@ DataStack is optimized for deployment via [Coolify](https://coolify.io/):
 1. **Create Resource**: In Coolify, click **+ Add Resource** → **Docker Compose**.
 2. **Repository Settings**:
    - Point to your DataStack Git repository.
-   - Set **Base Directory** to `/docker`.
+   - Set **Base Directory** to `/` (so Compose build context `..` from `/docker` resolves cleanly to the repository root; if an existing VPS deployment already has saved working Coolify paths, keep its current settings).
    - Set **Docker Compose Location** to `/docker/docker-compose.yml`.
 3. **Domain Assignment**:
    - Attach your custom domain (e.g. `https://datastack.yourdomain.com`) to the **`proxy`** service on internal port `80`.

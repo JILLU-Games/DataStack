@@ -1,5 +1,17 @@
 import { createHash } from "node:crypto";
 import { AuthService } from "../auth/jwt";
+import { DataBufferEngine, type RedisBufferClient } from "../data/buffer";
+
+const REDIS_IDEMPOTENCY_PREFIX = "datastack:idem:";
+const REDIS_RATE_LIMIT_PREFIX = "datastack:rl:";
+export const REDIS_RATE_LIMIT_LUA_SCRIPT = `
+-- DATASTACK_RATE_LIMIT_INCR
+local c = redis.call("INCR", KEYS[1])
+if c == 1 or redis.call("PTTL", KEYS[1]) < 0 then
+  redis.call("PEXPIRE", KEYS[1], tonumber(ARGV[1]))
+end
+return c
+`.trim();
 
 export function resolveInternalIngestionSecret(
   jwtSecretOverride?: string,
@@ -43,9 +55,15 @@ export interface ValidationResult {
     | "MALFORMED_PAYLOAD";
 }
 
+export type SecurityMode =
+  | "redis_shared"
+  | "bridge_coordinated"
+  | "degraded_local";
+
 export class SecurityEngine {
   public static maxEventsPerSec = 100;
   public static enableIdempotency = true;
+  private static lastSecurityMode: SecurityMode = "degraded_local";
 
   // Idempotency cache: key -> timestamp (expires after TTL)
   private static idempotencySet = new Map<string, number>();
@@ -126,6 +144,32 @@ export class SecurityEngine {
     return true;
   }
 
+  private static trackLocalRateWindow(clientId: string): void {
+    const now = Date.now();
+    const current = this.rateLimitMap.get(clientId);
+    if (!current || now - current.windowStart >= 1000) {
+      this.rateLimitMap.set(clientId, { count: 1, windowStart: now });
+    } else {
+      current.count += 1;
+    }
+  }
+
+  private static supportsSharedSecurityRedis(
+    redis: RedisBufferClient | null,
+  ): redis is RedisBufferClient & {
+    get: (key: string) => Promise<string | null>;
+    incr: (key: string) => Promise<number>;
+    pexpire: (key: string, ttlMs: number) => Promise<number>;
+  } {
+    return Boolean(
+      redis &&
+        typeof redis.get === "function" &&
+        typeof redis.incr === "function" &&
+        typeof redis.pexpire === "function" &&
+        typeof redis.set === "function",
+    );
+  }
+
   /**
    * Validates incoming event payload:
    * Checks duplicate idempotency (read-only), max byte size, and rate limit,
@@ -148,7 +192,7 @@ export class SecurityEngine {
 
     // 2. Check payload size before consuming rate-limit quota
     const payloadStr =
-      typeof payload === "string" ? payload : JSON.stringify(payload);
+      typeof payload === "string" ? payload : JSON.stringify(payload ?? {});
     const byteLength = Buffer.byteLength(payloadStr, "utf8");
 
     if (byteLength > this.maxPayloadSizeBytes) {
@@ -178,6 +222,158 @@ export class SecurityEngine {
     return { allowed: true };
   }
 
+  /**
+   * Shared Redis-backed async validator with Port 4000 internal-bridge fallback
+   * (so HTTP + WS share rate limits & idempotency even when Redis is unconfigured)
+   * and final local-Map fallback for isolated single-process dev.
+   */
+  public static async validateEventAsync(
+    clientId: string,
+    eventId: string,
+    payload: unknown,
+    clientMaxRate = 100,
+  ): Promise<ValidationResult> {
+    const redis = DataBufferEngine.getRedisClient();
+    if (!this.supportsSharedSecurityRedis(redis)) {
+      const payloadStr =
+        typeof payload === "string" ? payload : JSON.stringify(payload ?? {});
+      const payloadBytes = Buffer.byteLength(payloadStr, "utf8");
+      if (payloadBytes > this.maxPayloadSizeBytes) {
+        return {
+          allowed: false,
+          reason: `Payload size (${(payloadBytes / 1024).toFixed(1)} KB) exceeds limit of ${this.maxPayloadSizeBytes / 1024} KB`,
+          code: "PAYLOAD_TOO_LARGE",
+        };
+      }
+
+      const headers = getInternalIngestionHeaders();
+      if (headers["x-datastack-internal-secret"]) {
+        const ingestionBaseUrl = (
+          process.env.INGESTION_INTERNAL_URL || "http://127.0.0.1:4000"
+        ).replace(/\/$/, "");
+        try {
+          const res = await fetch(`${ingestionBaseUrl}/internal/security-check`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...headers,
+            },
+            body: JSON.stringify({
+              clientId,
+              eventId,
+              payloadBytes,
+              clientMaxRate,
+            }),
+            cache: "no-store",
+            signal: AbortSignal.timeout(400),
+          });
+          if (res.ok) {
+            const data = (await res.json()) as {
+              allowed?: boolean;
+              code?: ValidationResult["code"];
+              reason?: string;
+            };
+            this.lastSecurityMode = "bridge_coordinated";
+            return {
+              allowed: Boolean(data.allowed),
+              ...(data.code ? { code: data.code } : {}),
+              ...(data.reason ? { reason: data.reason } : {}),
+            };
+          }
+        } catch {
+          // Port 4000 unreachable — fall back to local validation
+        }
+      }
+
+      this.lastSecurityMode = "degraded_local";
+      return this.validateEvent(clientId, eventId, payload, clientMaxRate);
+    }
+
+    this.lastSecurityMode = "redis_shared";
+    const idemKey = `${REDIS_IDEMPOTENCY_PREFIX}${clientId}:${eventId}`;
+    try {
+      // 1. Read-only idempotency check
+      if (this.enableIdempotency && eventId) {
+        if (this.hasDuplicate(clientId, eventId)) {
+          return {
+            allowed: false,
+            reason: "Duplicate event dropped silently",
+            code: "DUPLICATE_EVENT",
+          };
+        }
+        const existing = await redis.get(idemKey);
+        if (existing !== null) {
+          this.recordIdempotency(clientId, eventId);
+          return {
+            allowed: false,
+            reason: "Duplicate event dropped silently",
+            code: "DUPLICATE_EVENT",
+          };
+        }
+      }
+
+      // 2. Payload byte size check before rate-limit consumption
+      const payloadStr =
+        typeof payload === "string" ? payload : JSON.stringify(payload ?? {});
+      const byteLength = Buffer.byteLength(payloadStr, "utf8");
+      if (byteLength > this.maxPayloadSizeBytes) {
+        return {
+          allowed: false,
+          reason: `Payload size (${(byteLength / 1024).toFixed(1)} KB) exceeds limit of ${this.maxPayloadSizeBytes / 1024} KB`,
+          code: "PAYLOAD_TOO_LARGE",
+        };
+      }
+
+      // 3. Shared atomic per-second rate-limit counter in Redis (single Lua round-trip)
+      const effectiveRateLimit = Math.min(clientMaxRate, this.maxEventsPerSec);
+      const windowBucket = Math.floor(Date.now() / 1000);
+      const rlKey = `${REDIS_RATE_LIMIT_PREFIX}${clientId}:${windowBucket}`;
+      let count: number;
+      if (typeof redis.eval === "function") {
+        count = Number(
+          await redis.eval(REDIS_RATE_LIMIT_LUA_SCRIPT, 1, rlKey, "2000"),
+        );
+      } else {
+        count = Number(await redis.incr(rlKey));
+        if (count === 1) {
+          await redis.pexpire(rlKey, 2000);
+        }
+      }
+      this.trackLocalRateWindow(clientId);
+
+      if (count > effectiveRateLimit) {
+        return {
+          allowed: false,
+          reason: `Rate limit of ${effectiveRateLimit} events/sec exceeded for client ${clientId}`,
+          code: "RATE_LIMIT_EXCEEDED",
+        };
+      }
+
+      // 4. Atomic claim of idempotency key after all checks succeed
+      if (this.enableIdempotency && eventId) {
+        const claimed = await redis.set(
+          idemKey,
+          "1",
+          "PX",
+          this.IDEMPOTENCY_TTL_MS,
+          "NX",
+        );
+        this.recordIdempotency(clientId, eventId);
+        if (claimed !== "OK") {
+          return {
+            allowed: false,
+            reason: "Duplicate event dropped silently",
+            code: "DUPLICATE_EVENT",
+          };
+        }
+      }
+
+      return { allowed: true };
+    } catch {
+      return this.validateEvent(clientId, eventId, payload, clientMaxRate);
+    }
+  }
+
   public static getStats() {
     const now = Date.now();
     for (const [k, timestamp] of this.idempotencySet.entries()) {
@@ -191,10 +387,19 @@ export class SecurityEngine {
       }
     }
 
+    const mode: SecurityMode = this.supportsSharedSecurityRedis(
+      DataBufferEngine.getRedisClient(),
+    )
+      ? "redis_shared"
+      : this.lastSecurityMode === "redis_shared"
+        ? "degraded_local"
+        : this.lastSecurityMode;
+
     return {
       activeIdempotencyKeys: this.idempotencySet.size,
       rateLimitedClientsCount: this.rateLimitMap.size,
       maxPayloadSizeBytes: this.maxPayloadSizeBytes,
+      mode,
     };
   }
 }

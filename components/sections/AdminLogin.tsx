@@ -16,15 +16,19 @@ function safeNextPath() {
 
 export function AdminLogin({
   showDemoHint = false,
+  databaseReady = true,
 }: {
   showDemoHint?: boolean;
+  databaseReady?: boolean;
 }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [remember, setRemember] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [errorMessage, setErrorMessage] = useState('');
+  const [errorMessage, setErrorMessage] = useState(
+    databaseReady ? '' : 'Database connection unavailable. Retry once PostgreSQL recovers.',
+  );
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
 
   useEffect(() => {

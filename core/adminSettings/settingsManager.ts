@@ -22,11 +22,23 @@ export interface AdminSettings {
   updatedAt: string;
 }
 
+export interface SettingsBridgeSyncStatus {
+  attempted: boolean;
+  ok: boolean;
+  synced: boolean;
+  status?: number;
+  error?: string;
+  checkedAt: string;
+}
+
 type SettingsGlobals = typeof globalThis & {
   __dataStackAdminSettings?: AdminSettings;
   __dataStackSettingsHydrated?: boolean;
+  __dataStackLastSettingsBridgeSync?: SettingsBridgeSyncStatus;
+  __dataStackLastPruneMeta?: { days: number; ranAtMs: number };
 };
 
+const PRUNE_COOLDOWN_MS = 60 * 60 * 1000;
 const globals = globalThis as SettingsGlobals;
 
 function getDefaultSettings(): AdminSettings {
@@ -53,7 +65,7 @@ function getSettingsState(): AdminSettings {
 }
 
 export class SettingsManager {
-  private static applyRuntimeSettings(settings: AdminSettings) {
+  private static applyRuntimeSettings(settings: AdminSettings, forcePrune = false) {
     SecurityEngine.maxEventsPerSec = settings.maxEventsPerSec;
     SecurityEngine.enableIdempotency = settings.enableIdempotency;
     SecurityEngine.maxPayloadSizeBytes = settings.maxPayloadSizeKb * 1024;
@@ -68,7 +80,27 @@ export class SettingsManager {
       settings.autoPruneDays > 0 &&
       (!hasConfiguredDb || globals.__dataStackSettingsHydrated === true)
     ) {
-      CSVStorageManager.pruneExpiredPartitions(settings.autoPruneDays);
+      const prev = globals.__dataStackLastPruneMeta;
+      const now = Date.now();
+      const shouldPrune =
+        forcePrune ||
+        !prev ||
+        prev.days !== settings.autoPruneDays ||
+        now - prev.ranAtMs >= PRUNE_COOLDOWN_MS;
+      if (shouldPrune) {
+        globals.__dataStackLastPruneMeta = {
+          days: settings.autoPruneDays,
+          ranAtMs: now,
+        };
+        void CSVStorageManager.pruneExpiredPartitionsAsync(
+          settings.autoPruneDays,
+        ).catch((err) => {
+          console.warn(
+            "[DataStack Storage] Background async partition prune failed:",
+            err,
+          );
+        });
+      }
     }
   }
 
@@ -94,9 +126,17 @@ export class SettingsManager {
           row.auto_prune_days !== undefined && row.auto_prune_days !== null
             ? Number(row.auto_prune_days)
             : NaN;
+        const envSocketPort = Number(process.env.PORT_SOCKET);
+        const envWebPort = Number(process.env.PORT);
         const loaded: AdminSettings = {
-          serverPort: Number(row.server_port) || 4000,
-          webPort: Number(row.web_port) || 3000,
+          serverPort:
+            Number.isFinite(envSocketPort) && envSocketPort > 0
+              ? envSocketPort
+              : Number(row.server_port) || 4000,
+          webPort:
+            Number.isFinite(envWebPort) && envWebPort > 0
+              ? envWebPort
+              : Number(row.web_port) || 3000,
           maxEventsPerSec: Number(row.max_events_per_sec) || 100,
           maxPayloadSizeKb: Number(row.max_payload_size_kb) || 100,
           batchFlushThreshold: Number(row.batch_flush_threshold) || 500,
@@ -117,6 +157,12 @@ export class SettingsManager {
 
       // Initialize default row in PostgreSQL if not present yet
       const defaults = getSettingsState();
+      const hasValidProductionJwt =
+        process.env.NODE_ENV !== "production" ||
+        defaults.jwtSecret.trim().length >= 32;
+      if (!hasValidProductionJwt) {
+        return defaults;
+      }
       await this.persistSettingsToDb(defaults);
       globals.__dataStackSettingsHydrated = true;
       return defaults;
@@ -131,8 +177,23 @@ export class SettingsManager {
     const pool = DatabaseEngine.getPool();
     if (!pool) return;
 
+    if (
+      process.env.NODE_ENV === "production" &&
+      settings.jwtSecret.trim().length < 32
+    ) {
+      throw new Error(
+        "DATABASE_WRITE_FAILED: Cannot persist settings without a valid DATASTACK_JWT_SECRET (>= 32 characters) in production.",
+      );
+    }
+
+    const ready = await DatabaseEngine.ensureSchema();
+    if (!ready) {
+      throw new Error(
+        "DATABASE_WRITE_FAILED: PostgreSQL schema is unavailable while saving settings.",
+      );
+    }
+
     try {
-      await DatabaseEngine.ensureSchema();
       await pool.query(
         `INSERT INTO admin_settings (
            id, server_port, web_port, max_events_per_sec, max_payload_size_kb,
@@ -164,8 +225,9 @@ export class SettingsManager {
           settings.autoPruneDays,
         ],
       );
-    } catch {
-      // Ignore DB failure; in-memory state remains active
+    } catch (err: unknown) {
+      const detail = err instanceof Error ? err.message : "Unknown DB error";
+      throw new Error(`DATABASE_WRITE_FAILED: Failed to persist settings (${detail})`);
     }
   }
 
@@ -222,20 +284,35 @@ export class SettingsManager {
     };
   }
 
+  public static getLastBridgeSyncStatus(): SettingsBridgeSyncStatus | null {
+    return globals.__dataStackLastSettingsBridgeSync ?? null;
+  }
+
   private static async notifyIngestionSettingsSync(
     settings: AdminSettings,
     authJwtSecret: string,
     jwtSecretChanged: boolean,
-  ): Promise<void> {
+  ): Promise<SettingsBridgeSyncStatus> {
+    const checkedAt = new Date().toISOString();
     const headers = getInternalIngestionHeaders(authJwtSecret);
-    if (!headers["x-datastack-internal-secret"]) return;
+    if (!headers["x-datastack-internal-secret"]) {
+      const result: SettingsBridgeSyncStatus = {
+        attempted: true,
+        ok: false,
+        synced: false,
+        error: "Internal bridge secret is not configured",
+        checkedAt,
+      };
+      globals.__dataStackLastSettingsBridgeSync = result;
+      return result;
+    }
 
     const ingestionBaseUrl = (
       process.env.INGESTION_INTERNAL_URL || "http://127.0.0.1:4000"
     ).replace(/\/$/, "");
 
     try {
-      await fetch(`${ingestionBaseUrl}/internal/settings-sync`, {
+      const res = await fetch(`${ingestionBaseUrl}/internal/settings-sync`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -254,8 +331,46 @@ export class SettingsManager {
         cache: "no-store",
         signal: AbortSignal.timeout(1500),
       });
-    } catch {
-      // Port 4000 may not be running in isolated single-process dev mode
+      if (!res.ok) {
+        const errorMsg = `Port 4000 settings-sync failed with HTTP ${res.status}`;
+        console.warn(`[DataStack Bridge] ${errorMsg}`);
+        const result: SettingsBridgeSyncStatus = {
+          attempted: true,
+          ok: false,
+          synced: false,
+          status: res.status,
+          error: errorMsg,
+          checkedAt,
+        };
+        globals.__dataStackLastSettingsBridgeSync = result;
+        return result;
+      }
+      const result: SettingsBridgeSyncStatus = {
+        attempted: true,
+        ok: true,
+        synced: true,
+        status: res.status,
+        checkedAt,
+      };
+      globals.__dataStackLastSettingsBridgeSync = result;
+      return result;
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Port 4000 settings-sync unreachable";
+      if (
+        process.env.NODE_ENV === "production" ||
+        Boolean(process.env.INGESTION_INTERNAL_URL)
+      ) {
+        console.warn(`[DataStack Bridge] ${message}`);
+      }
+      const result: SettingsBridgeSyncStatus = {
+        attempted: true,
+        ok: false,
+        synced: false,
+        error: message,
+        checkedAt,
+      };
+      globals.__dataStackLastSettingsBridgeSync = result;
+      return result;
     }
   }
 
@@ -270,11 +385,13 @@ export class SettingsManager {
       updatedAt: new Date().toISOString(),
     };
     globals.__dataStackAdminSettings = nextSettings;
-    this.applyRuntimeSettings(nextSettings);
+    this.applyRuntimeSettings(nextSettings, updates.autoPruneDays !== undefined);
     if (jwtSecretChanged) {
       SDKManager.resignAllClientTokens();
     }
-    void this.persistSettingsToDb(nextSettings);
+    void this.persistSettingsToDb(nextSettings).catch((err) => {
+      console.error("[DataStack Settings] Background DB persist failed:", err);
+    });
     void this.notifyIngestionSettingsSync(
       nextSettings,
       previousJwtSecret,
@@ -297,20 +414,80 @@ export class SettingsManager {
       ...updates,
       updatedAt: new Date().toISOString(),
     };
-    globals.__dataStackAdminSettings = nextSettings;
-    this.applyRuntimeSettings(nextSettings);
-    if (jwtSecretChanged) {
-      await SDKManager.resignAllClientTokensAsync();
+
+    if (
+      jwtSecretChanged &&
+      process.env.NODE_ENV === "production" &&
+      nextSettings.jwtSecret.trim().length < 32
+    ) {
+      throw new Error(
+        "INVALID_JWT_SECRET: JWT secret must be at least 32 characters in production.",
+      );
     }
+
+    if (jwtSecretChanged) {
+      // BUG-17: Coordinate Port 4000 BEFORE committing JWT rotation on Port 3000
+      // so a bridge rejection or unreachable production ingestion server never causes secret split-brain.
+      const preSyncStatus = await this.notifyIngestionSettingsSync(
+        nextSettings,
+        previousJwtSecret,
+        true,
+      );
+
+      if (!preSyncStatus.synced) {
+        const isExplicitHttpRejection = typeof preSyncStatus.status === "number";
+        const isProductionBridgeRequired =
+          process.env.NODE_ENV === "production" &&
+          Boolean(process.env.INGESTION_INTERNAL_URL);
+
+        if (isExplicitHttpRejection || isProductionBridgeRequired) {
+          throw new Error(
+            `JWT_ROTATION_BRIDGE_FAILED: Aborted JWT rotation because Port 4000 could not synchronize (${preSyncStatus.error || "bridge error"}).`,
+          );
+        }
+      }
+
+      try {
+        await this.persistSettingsToDb(nextSettings);
+        globals.__dataStackAdminSettings = nextSettings;
+        this.applyRuntimeSettings(nextSettings, updates.autoPruneDays !== undefined);
+        await SDKManager.resignAllClientTokensAsync();
+      } catch (err) {
+        globals.__dataStackAdminSettings = current;
+        this.applyRuntimeSettings(current, false);
+        await this.persistSettingsToDb(current).catch(() => undefined);
+        if (preSyncStatus.synced) {
+          await this.notifyIngestionSettingsSync(
+            current,
+            nextSettings.jwtSecret,
+            true,
+          ).catch(() => undefined);
+        }
+        throw err;
+      }
+
+      const clientSync = await SDKManager.syncAllClientsToIngestionAsync();
+      if (!clientSync.synced && preSyncStatus.synced) {
+        globals.__dataStackLastSettingsBridgeSync = {
+          attempted: true,
+          ok: false,
+          synced: false,
+          status: clientSync.status,
+          error: clientSync.error,
+          checkedAt: new Date().toISOString(),
+        };
+      }
+      return { ...nextSettings };
+    }
+
     await this.persistSettingsToDb(nextSettings);
+    globals.__dataStackAdminSettings = nextSettings;
+    this.applyRuntimeSettings(nextSettings, updates.autoPruneDays !== undefined);
     await this.notifyIngestionSettingsSync(
       nextSettings,
       previousJwtSecret,
-      jwtSecretChanged,
+      false,
     );
-    if (jwtSecretChanged) {
-      await SDKManager.syncAllClientsToIngestionAsync();
-    }
     return { ...nextSettings };
   }
 }

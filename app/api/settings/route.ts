@@ -188,9 +188,24 @@ export async function POST(req: NextRequest) {
 
     await SettingsManager.updateSettingsAsync(validated);
     const settings = await SettingsManager.getPublicSettingsAsync();
+    const bridgeSync = SettingsManager.getLastBridgeSyncStatus();
     return NextResponse.json({
       settings,
       success: true,
+      ...(bridgeSync
+        ? {
+            bridgeSync: {
+              attempted: bridgeSync.attempted ?? true,
+              ok: bridgeSync.ok ?? bridgeSync.synced,
+              synced: bridgeSync.synced,
+              ...(bridgeSync.status !== undefined
+                ? { status: bridgeSync.status }
+                : {}),
+              ...(bridgeSync.error ? { error: bridgeSync.error } : {}),
+              checkedAt: bridgeSync.checkedAt,
+            },
+          }
+        : {}),
     });
   } catch (err: unknown) {
     const message =

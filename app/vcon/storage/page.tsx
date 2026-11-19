@@ -18,52 +18,96 @@ import { useToast } from '@/components/ui/Toast';
 import { getCached, setCached } from '@/lib/vconCache';
 import { useCallback, useEffect, useState } from 'react';
 
+interface StorageStatsSummary {
+  totalMB?: string;
+  totalFiles?: number;
+  totalRows?: number;
+  rotationRule?: string;
+  rotationMb?: number;
+}
+
+interface StoragePartitionFile {
+  clientId: string;
+  filename: string;
+  sizeBytes: number;
+  linesCount: number;
+  modifiedAt: string;
+}
+
 export default function StoragePage() {
   const { success, warning, error } = useToast();
-  const [stats, setStats] = useState<any>(() =>
-    getCached<any>('vcon:storage-stats', null)
+  const [stats, setStats] = useState<StorageStatsSummary | null>(() =>
+    getCached<StorageStatsSummary | null>('vcon:storage-stats', null)
   );
-  const [files, setFiles] = useState<any[]>(() =>
-    getCached<any[]>('vcon:storage-files', [])
+  const [files, setFiles] = useState<StoragePartitionFile[]>(() =>
+    getCached<StoragePartitionFile[]>('vcon:storage-files', [])
   );
+  const [refreshing, setRefreshing] = useState(false);
   const [flushing, setFlushing] = useState(false);
 
   const fetchStorageData = useCallback(async () => {
+    setRefreshing(true);
     try {
-      const res = await fetch('/api/storage');
-      if (!res.ok) throw new Error('Unable to load storage partitions');
-      const data = await res.json();
-      setStats(setCached('vcon:storage-stats', data.stats));
+      const res = await fetch('/api/storage', { cache: 'no-store' });
+      if (res.status === 401) {
+        window.location.assign('/vcon/login');
+        return;
+      }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Unable to load storage partitions');
+      }
+      setStats(setCached('vcon:storage-stats', data.stats ?? null));
       setFiles(setCached('vcon:storage-files', data.files || []));
-    } catch {
-      error('Storage load failed', 'Could not load storage partitions.');
+    } catch (loadErr) {
+      error(
+        'Storage load failed',
+        loadErr instanceof Error
+          ? loadErr.message
+          : 'Could not load storage partitions.'
+      );
+    } finally {
+      setRefreshing(false);
     }
   }, [error]);
 
   useEffect(() => {
-    fetchStorageData();
+    void fetchStorageData();
   }, [fetchStorageData]);
 
   const handleManualFlush = async () => {
     setFlushing(true);
     try {
-      const res = await fetch('/api/storage', { method: 'POST' });
+      const res = await fetch('/api/storage', {
+        method: 'POST',
+        cache: 'no-store',
+      });
+      if (res.status === 401) {
+        window.location.assign('/vcon/login');
+        return;
+      }
       const data = await res.json().catch(() => ({}));
 
       if (res.ok && data.success) {
         const count = Number(data.flushedCount) || 0;
-        success(
-          'Buffer Flushed',
-          `Flushed ${count} event${count === 1 ? '' : 's'} to CSV${data.warning ? ` (${data.warning})` : ''}`
-        );
-        fetchStorageData();
-      } else if (data.flushedCount !== undefined && data.flushedCount > 0) {
-        // Partial flush: local events persisted, remote Port 4000 flush returned error
+        if (data.warning) {
+          warning(
+            'Partial Flush (Web Only)',
+            `Flushed ${count} event${count === 1 ? '' : 's'}. ${String(data.warning)}`
+          );
+        } else {
+          success(
+            'Buffer Flushed',
+            `Flushed ${count} event${count === 1 ? '' : 's'} to CSV.`
+          );
+        }
+        await fetchStorageData();
+      } else if (data.flushedCount !== undefined && Number(data.flushedCount) > 0) {
         warning(
           'Partial Flush',
           `Flushed ${data.flushedCount} local events. Ingestion server: ${data.error || 'flush failed'}`
         );
-        fetchStorageData();
+        await fetchStorageData();
       } else {
         error('Flush Failed', data.error || 'Could not flush buffer');
       }
@@ -84,7 +128,9 @@ export default function StoragePage() {
             size="xs"
             variant="secondary"
             icon="RotateCw"
-            onClick={fetchStorageData}
+            loading={refreshing}
+            disabled={refreshing || flushing}
+            onClick={() => void fetchStorageData()}
           >
             Refresh
           </Button>
@@ -93,7 +139,8 @@ export default function StoragePage() {
             variant="primary"
             icon="HardDrive"
             loading={flushing}
-            onClick={handleManualFlush}
+            disabled={flushing}
+            onClick={() => void handleManualFlush()}
           >
             Flush Buffer
           </Button>
@@ -131,8 +178,8 @@ export default function StoragePage() {
               {files.length === 0 ? (
                 <TableEmpty colSpan={5} message="No CSV files" />
               ) : (
-                files.map((file, idx) => (
-                  <TableRow key={idx}>
+                files.map((file) => (
+                  <TableRow key={`${file.clientId}/${file.filename}`}>
                     <TableCell className="font-mono text-[var(--accent)]">
                       {file.clientId}
                     </TableCell>

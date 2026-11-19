@@ -45,6 +45,8 @@ test('BUG-25: PWA manifest, icons (192/512/maskable/apple-touch), and Service Wo
   assert.match(swContent, /request\.method !== ['"]GET['"]/);
   assert.match(swContent, /\/api\//);
   assert.match(swContent, /\/socket\.io\//);
+  assert.match(swContent, /\/vcon\//);
+  assert.match(swContent, /CLEAR_AUTH_CACHE/);
   assert.match(swContent, /new Response\(/);
 
   const layoutContent = fs.readFileSync(path.join(ROOT, 'app/layout.tsx'), 'utf8');
@@ -78,4 +80,38 @@ test('BUG-17: Landing/Navbar/Footer/404 navigation uses root-relative anchors an
   const notFoundContent = fs.readFileSync(path.join(ROOT, 'app/not-found.tsx'), 'utf8');
   assert.match(notFoundContent, /href=["']\/["']/);
   assert.match(notFoundContent, /href=["']\/vcon\/dashboard["']/);
+});
+
+test('FORENSIC BUG-15: RootLayout injects pre-hydration theme bootstrap script and AdminSetup supports theme restoration & toggle', () => {
+  const layoutContent = fs.readFileSync(path.join(ROOT, 'app/layout.tsx'), 'utf8');
+  assert.match(layoutContent, /<html[^>]*suppressHydrationWarning/);
+  assert.match(layoutContent, /datastack-theme/);
+  assert.match(layoutContent, /<head>/);
+
+  const setupContent = fs.readFileSync(
+    path.join(ROOT, 'components/sections/AdminSetup.tsx'),
+    'utf8',
+  );
+  assert.match(setupContent, /datastack-theme/);
+  assert.match(setupContent, /Toggle theme/);
+  assert.match(setupContent, /document\.documentElement\.classList\.toggle\(['"]light['"]/);
+});
+
+test('FORENSIC BUG-16: Service Worker serves uncached HTML offline fallback shell for /vcon/dashboard PWA navigations', () => {
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(ROOT, 'public/manifest.json'), 'utf8'),
+  );
+  assert.equal(manifest.start_url, '/vcon/dashboard');
+
+  const swContent = fs.readFileSync(path.join(ROOT, 'public/sw.js'), 'utf8');
+  assert.match(swContent, /buildOfflineShellResponse/);
+  assert.match(swContent, /request\.mode !== ['"]navigate['"]/);
+  assert.match(swContent, /text\/html; charset=utf-8/);
+  assert.match(swContent, /Cache-Control['"]:\s*['"]no-store['"]/);
+  // Ensure /vcon/* branch never calls cache.put on authenticated admin HTML
+  const vconBranch = swContent.match(
+    /if \(url\.pathname === '\/vcon' \|\| url\.pathname\.startsWith\('\/vcon\/'\)\) \{[\s\S]*?return;\s*\}/,
+  );
+  assert.ok(vconBranch, 'Expected dedicated /vcon/* navigation fallback branch in public/sw.js');
+  assert.doesNotMatch(vconBranch[0], /cache\.put/);
 });

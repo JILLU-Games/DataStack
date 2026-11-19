@@ -25,6 +25,7 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    stop_grace_period: 20s
     healthcheck:
       test:
         [
@@ -54,12 +55,14 @@ services:
       DATASTACK_INTERNAL_SECRET: "${DATASTACK_INTERNAL_SECRET:-${SERVICE_REALBASE64_64_INTERNAL:-}}"
       DATABASE_URL: "postgresql://datastack:${SERVICE_PASSWORD_64_POSTGRES:?Coolify must generate SERVICE_PASSWORD_64_POSTGRES}@postgres:5432/${SERVICE_HEX_32_DATABASENAME:?Coolify must generate SERVICE_HEX_32_DATABASENAME}"
       REDIS_URL: "redis://redis:6379"
+      DATASTACK_CORS_ORIGINS: "${DATASTACK_CORS_ORIGINS:-}"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
+    stop_grace_period: 20s
     healthcheck:
       test:
         [

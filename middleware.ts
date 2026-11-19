@@ -36,6 +36,10 @@ function matchesRequestHost(candidateUrl: string, request: NextRequest) {
 }
 
 export function isSameOriginRequest(request: NextRequest) {
+  const secFetchSite = request.headers.get("sec-fetch-site")?.toLowerCase();
+  if (secFetchSite === "cross-site") {
+    return false;
+  }
   const originHeader = request.headers.get("origin");
   if (originHeader) {
     return matchesRequestHost(originHeader, request);
@@ -43,6 +47,9 @@ export function isSameOriginRequest(request: NextRequest) {
   const refererHeader = request.headers.get("referer");
   if (refererHeader) {
     return matchesRequestHost(refererHeader, request);
+  }
+  if (secFetchSite === "same-origin") {
+    return true;
   }
   return false;
 }
@@ -61,34 +68,29 @@ export async function middleware(request: NextRequest) {
   );
   const isStateChangingApi =
     pathname.startsWith("/api/") &&
-    !SAFE_METHODS.has(request.method) &&
+    !SAFE_METHODS.has(request.method.toUpperCase()) &&
     !(pathname === "/api/events" && hasBearerAuth);
 
-  if (isSetupPage) return NextResponse.next();
-  if (
-    !isConsolePage &&
-    !isAdminApi &&
-    !isLoginPage &&
-    !(pathname === "/api/events" && request.method === "POST")
-  ) {
-    return NextResponse.next();
-  }
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.set("x-datastack-pathname", pathname);
+  const nextWithPathname = () =>
+    NextResponse.next({
+      request: {
+        headers: requestHeaders,
+      },
+    });
 
-  const isHeadlessAdminClient =
-    request.headers.get("x-datastack-admin-client") === "true" ||
-    Boolean(request.headers.get("user-agent")?.startsWith("DataStack-CLI"));
+  if (isSetupPage) return nextWithPathname();
 
   if (isStateChangingApi && !isSameOriginRequest(request)) {
-    if (!isHeadlessAdminClient) {
-      return NextResponse.json(
-        { error: "Cross-origin request rejected." },
-        { status: 403 },
-      );
-    }
+    return NextResponse.json(
+      { error: "Cross-origin request rejected." },
+      { status: 403 },
+    );
   }
 
-  if (pathname === "/api/events" && request.method === "POST") {
-    return NextResponse.next();
+  if (!isConsolePage && !isAdminApi && !isLoginPage) {
+    return nextWithPathname();
   }
 
   const sessionSecret = getAdminSessionSecret();
@@ -99,6 +101,10 @@ export async function middleware(request: NextRequest) {
     );
   }
 
+  if (isLoginPage) {
+    return nextWithPathname();
+  }
+
   const token = request.cookies.get(SESSION_COOKIE)?.value;
   const authenticated = Boolean(
     sessionSecret &&
@@ -106,13 +112,7 @@ export async function middleware(request: NextRequest) {
       (await verifyAdminSessionToken(token, sessionSecret)),
   );
 
-  if (isLoginPage) {
-    if (authenticated)
-      return NextResponse.redirect(new URL("/vcon/dashboard", request.url));
-    return NextResponse.next();
-  }
-
-  if (authenticated) return NextResponse.next();
+  if (authenticated) return nextWithPathname();
 
   if (isAdminApi) {
     return NextResponse.json(

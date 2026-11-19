@@ -4,14 +4,20 @@ import {
   getSessionCookieOptions,
 } from "@/core/auth/adminSession";
 import {
+  AdminDatabaseRequiredError,
+  clearAdminLoginAttempts,
+  consumeAdminLoginAttempt,
   createInitialAdmin,
   isAdminSetupComplete,
+  requiresPersistentAdminDatabase,
   verifyAdminSetupKey,
 } from "@/core/auth/adminUsers";
+import { extractClientIp } from "@/lib/adminAuth";
 import { NextRequest, NextResponse } from "next/server";
 
 const SESSION_COOKIE = "datastack_admin_session";
 const SESSION_SECONDS = 8 * 60 * 60;
+const SETUP_THROTTLE_BUCKET = "__admin_setup__";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,6 +31,17 @@ export async function POST(request: NextRequest) {
   if (!sessionSecret || sessionSecret.length < 32) {
     return NextResponse.json(
       { error: "Admin session configuration is unavailable." },
+      { status: 503 },
+    );
+  }
+
+  if (requiresPersistentAdminDatabase()) {
+    return NextResponse.json(
+      {
+        error:
+          "PostgreSQL DATABASE_URL must be configured in production before initial admin setup.",
+        code: "DATABASE_NOT_CONFIGURED",
+      },
       { status: 503 },
     );
   }
@@ -61,16 +78,39 @@ export async function POST(request: NextRequest) {
         { status: 400 },
       );
     }
-    if (!verifyAdminSetupKey(setupKey)) {
-      return NextResponse.json(
-        { error: "The installation key is invalid." },
-        { status: 403 },
-      );
-    }
+
     if (await isAdminSetupComplete()) {
       return NextResponse.json(
         { error: "Initial admin setup has already been completed." },
         { status: 409 },
+      );
+    }
+
+    const clientIp = extractClientIp(request);
+    const throttleDecision = await consumeAdminLoginAttempt(
+      SETUP_THROTTLE_BUCKET,
+      sessionSecret,
+      clientIp,
+    );
+    if (!throttleDecision.allowed) {
+      return NextResponse.json(
+        {
+          error: "Too many setup attempts. Try again later.",
+          code: "TOO_MANY_ATTEMPTS",
+        },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": String(throttleDecision.retryAfterSeconds),
+          },
+        },
+      );
+    }
+
+    if (!verifyAdminSetupKey(setupKey)) {
+      return NextResponse.json(
+        { error: "The installation key is invalid." },
+        { status: 403 },
       );
     }
 
@@ -81,6 +121,12 @@ export async function POST(request: NextRequest) {
         { status: 409 },
       );
     }
+
+    await clearAdminLoginAttempts(
+      SETUP_THROTTLE_BUCKET,
+      sessionSecret,
+      clientIp,
+    ).catch(() => undefined);
 
     const token = await createAdminSessionToken(
       email,
@@ -95,7 +141,13 @@ export async function POST(request: NextRequest) {
       getSessionCookieOptions(request, SESSION_SECONDS),
     );
     return response;
-  } catch {
+  } catch (err) {
+    if (err instanceof AdminDatabaseRequiredError) {
+      return NextResponse.json(
+        { error: err.message, code: err.code },
+        { status: 503 },
+      );
+    }
     return NextResponse.json(
       { error: "Admin setup is temporarily unavailable." },
       { status: 503 },

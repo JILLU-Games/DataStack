@@ -23,10 +23,10 @@ export async function GET(req: NextRequest) {
         );
       }
 
-      const clientId = String(verified.payload.clientId || '')
-        .trim()
-        .toLowerCase();
-      if (SDKManager.isClientDeleted(clientId)) {
+      const clientId = SDKManager.normalizeClientId(
+        String(verified.payload.clientId || ''),
+      );
+      if (await SDKManager.isClientDeletedAsync(clientId)) {
         return NextResponse.json(
           {
             status: 'error',
@@ -37,27 +37,35 @@ export async function GET(req: NextRequest) {
         );
       }
       const registeredClient = await SDKManager.getClientAsync(clientId);
-      if (registeredClient) {
-        if (registeredClient.status === 'revoked') {
-          return NextResponse.json(
-            {
-              status: 'error',
-              code: 'CLIENT_REVOKED',
-              error: `CLIENT_REVOKED: Client '${clientId}' access has been revoked by administrator.`,
-            },
-            { status: 403 },
-          );
-        }
-        if (registeredClient.token && registeredClient.token !== rawToken) {
-          return NextResponse.json(
-            {
-              status: 'error',
-              code: 'TOKEN_ROTATED',
-              error: 'TOKEN_ROTATED: Client credentials have been rotated. Use the latest token.',
-            },
-            { status: 401 },
-          );
-        }
+      if (!registeredClient) {
+        return NextResponse.json(
+          {
+            status: 'error',
+            code: 'CLIENT_REVOKED',
+            error: `CLIENT_REVOKED: Client '${clientId}' registration not found or has been deleted.`,
+          },
+          { status: 403 },
+        );
+      }
+      if (registeredClient.status === 'revoked') {
+        return NextResponse.json(
+          {
+            status: 'error',
+            code: 'CLIENT_REVOKED',
+            error: `CLIENT_REVOKED: Client '${clientId}' access has been revoked by administrator.`,
+          },
+          { status: 403 },
+        );
+      }
+      if (registeredClient.token && registeredClient.token !== rawToken) {
+        return NextResponse.json(
+          {
+            status: 'error',
+            code: 'TOKEN_ROTATED',
+            error: 'TOKEN_ROTATED: Client credentials have been rotated. Use the latest token.',
+          },
+          { status: 401 },
+        );
       }
     }
 

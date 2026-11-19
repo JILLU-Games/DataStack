@@ -9,6 +9,7 @@ import { Panel } from '@/components/ui/Panel';
 import { StatStrip } from '@/components/ui/StatStrip';
 import { useToast } from '@/components/ui/Toast';
 import { getCached, setCached } from '@/lib/vconCache';
+import { resolvePublicEndpoints } from '@/lib/vconUiHelpers';
 import { useEffect, useState } from 'react';
 
 interface SdkClientItem {
@@ -34,23 +35,23 @@ export default function SdkGuidePage() {
   const [apiUrl, setApiUrl] = useState<string>('http://localhost:3000');
 
   useEffect(() => {
-    const isLocalDev = window.location.port === '3000';
-    setServerUrl(
-      isLocalDev
-        ? `${window.location.protocol}//${window.location.hostname}:4000`
-        : window.location.origin
-    );
-    setApiUrl(window.location.origin);
+    const initialPort = getCached<number>('vcon:server-port', 4000);
+    const initialEndpoints = resolvePublicEndpoints(window.location, initialPort);
+    setServerUrl(initialEndpoints.serverUrl);
+    setApiUrl(initialEndpoints.apiUrl);
 
-    async function loadClients() {
+    async function loadSdkContext() {
       try {
-        const res = await fetch('/api/clients', { cache: 'no-store' });
-        if (res.status === 401) {
+        const [clientsRes, metricsRes] = await Promise.all([
+          fetch('/api/clients', { cache: 'no-store' }),
+          fetch('/api/metrics', { cache: 'no-store' }).catch(() => null),
+        ]);
+        if (clientsRes.status === 401 || metricsRes?.status === 401) {
           window.location.assign('/vcon/login');
           return;
         }
-        if (res.ok) {
-          const data = await res.json();
+        if (clientsRes.ok) {
+          const data = await clientsRes.json();
           const list = setCached<SdkClientItem[]>('vcon:clients', data.clients || []);
           setClients(list);
           if (list.length > 0) {
@@ -61,11 +62,21 @@ export default function SdkGuidePage() {
             );
           }
         }
+        if (metricsRes && metricsRes.ok) {
+          const metricsData = await metricsRes.json().catch(() => null);
+          const runtimePort = Number(metricsData?.runtime?.serverPort);
+          if (Number.isFinite(runtimePort) && runtimePort > 0) {
+            setCached('vcon:server-port', runtimePort);
+            const resolved = resolvePublicEndpoints(window.location, runtimePort);
+            setServerUrl(resolved.serverUrl);
+            setApiUrl(resolved.apiUrl);
+          }
+        }
       } catch {
         // Retain cached list on transient network error
       }
     }
-    void loadClients();
+    void loadSdkContext();
   }, []);
 
   useEffect(() => {
@@ -75,6 +86,7 @@ export default function SdkGuidePage() {
     }
 
     let cancelled = false;
+    setSelectedClientToken('');
     setLoadingToken(true);
 
     async function fetchToken() {
@@ -110,8 +122,12 @@ export default function SdkGuidePage() {
 
   const activeClient =
     clients.find((c) => c.clientId === selectedClientId) || clients[0];
-  const resolvedToken = selectedClientToken || activeClient?.token || '';
-  const sampleToken = resolvedToken || 'YOUR_SIGNED_CLIENT_JWT_TOKEN';
+  const resolvedToken = loadingToken
+    ? ''
+    : selectedClientToken || activeClient?.token || '';
+  const sampleToken = loadingToken
+    ? 'LOADING_CLIENT_JWT_TOKEN...'
+    : resolvedToken || 'YOUR_SIGNED_CLIENT_JWT_TOKEN';
 
   const configSnippet = `# config.datastack.py — Place in your Python project root
 DATASTACK_CONFIG = {
@@ -194,6 +210,7 @@ client.disconnect()`;
             size="xs"
             variant="secondary"
             icon="FileCode"
+            disabled={loadingToken}
             onClick={() => void copySnippet(configSnippet, 'config.datastack.py')}
           >
             Copy Config
@@ -216,27 +233,42 @@ client.disconnect()`;
           { label: 'Server endpoint', value: serverUrl },
           {
             label: 'Active client',
-            value: activeClient?.clientId || 'None selected',
+            value: activeClient
+              ? activeClient.status === 'revoked'
+                ? `${activeClient.clientId} (revoked)`
+                : activeClient.clientId
+              : 'None selected',
+            dot: activeClient?.status === 'revoked' ? 'off' : activeClient ? 'ok' : undefined,
           },
         ]}
       />
 
       <Card
         compact
-        className="flex w-full items-center justify-between bg-[var(--surface)] px-3 py-2 font-mono text-[11.5px]"
+        className="flex w-full flex-col gap-1.5 bg-[var(--surface)] px-3 py-2.5"
       >
-        <span className="text-[var(--accent)]">
-          pip install ./sdk/python/datastack
-        </span>
-        <Button
-          size="xs"
-          variant="ghost"
-          icon="Copy"
-          aria-label="Copy pip install command"
-          onClick={() =>
-            void copySnippet('pip install ./sdk/python/datastack', 'Pip command')
-          }
-        />
+        <div className="flex items-center justify-between gap-2 font-mono text-[11.5px]">
+          <span className="truncate text-[var(--accent)]">
+            pip install /path/to/datastack/sdk/python/datastack
+          </span>
+          <Button
+            size="xs"
+            variant="ghost"
+            icon="Copy"
+            aria-label="Copy pip install command"
+            onClick={() =>
+              void copySnippet(
+                'pip install /path/to/datastack/sdk/python/datastack',
+                'Pip command'
+              )
+            }
+          />
+        </div>
+        <p className="text-[11px] text-[var(--text-faint)]">
+          Self-hosted package bundled in <code className="font-mono text-[var(--text-muted)]">sdk/python/datastack</code>. From inside the repo run{' '}
+          <code className="font-mono text-[var(--text-muted)]">pip install ./sdk/python/datastack</code>, or build a portable wheel with{' '}
+          <code className="font-mono text-[var(--text-muted)]">pip wheel ./sdk/python/datastack -w dist/</code> for external projects.
+        </p>
       </Card>
 
       <Panel
@@ -265,6 +297,7 @@ client.disconnect()`;
               variant="ghost"
               icon="Copy"
               aria-label="Copy config.datastack.py"
+              disabled={loadingToken}
               onClick={() => void copySnippet(configSnippet, 'config.datastack.py')}
             />
           </div>

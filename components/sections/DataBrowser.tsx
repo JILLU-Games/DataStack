@@ -19,6 +19,7 @@ import {
   TableRow,
   TableWrap,
 } from '@/components/ui/Table';
+import { formatEventTimeLabel } from '@/lib/vconUiHelpers';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 
@@ -86,8 +87,10 @@ export function DataBrowser() {
         window.location.assign('/vcon/login');
         return;
       }
-      if (!response.ok) throw new Error('Unable to load events');
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || 'Unable to load events');
+      }
       setEvents(data.events || []);
       setTotal(data.total || 0);
       setPageCount(data.pageCount || 1);
@@ -124,6 +127,8 @@ export function DataBrowser() {
     fetchEvents();
   }, [fetchEvents, filtersReady]);
 
+  const invalidRange = Boolean(fromFilter && toFilter && fromFilter > toFilter);
+
   const firstVisible = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
   const lastVisible = Math.min(page * PAGE_SIZE, total);
   const firstPage = Math.max(1, Math.min(page - 1, pageCount - 2));
@@ -133,6 +138,11 @@ export function DataBrowser() {
   );
 
   const applyFilters = () => {
+    if (invalidRange) {
+      setErrorMessage('Start date ("From") must be on or before end date ("To").');
+      return;
+    }
+    setErrorMessage('');
     setAppliedFilters({
       clientId: clientFilter,
       from: fromFilter,
@@ -147,6 +157,7 @@ export function DataBrowser() {
     setFromFilter('');
     setToFilter('');
     setSearchFilter('');
+    setErrorMessage('');
     setAppliedFilters({ clientId: 'all', from: '', to: '', search: '' });
     setPage(1);
   };
@@ -189,7 +200,13 @@ export function DataBrowser() {
       }
     >
       <Card compact className="p-0">
-        <div className="grid grid-cols-1 gap-px bg-[var(--border)] sm:grid-cols-2 lg:grid-cols-5">
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            applyFilters();
+          }}
+          className="grid grid-cols-1 gap-px bg-[var(--border)] sm:grid-cols-2 lg:grid-cols-5"
+        >
           <div className="bg-[var(--surface)] p-2.5">
             <Select
               label="Client"
@@ -237,11 +254,21 @@ export function DataBrowser() {
             <Button type="button" size="xs" icon="X" onClick={resetFilters}>
               Reset
             </Button>
-            <Button type="button" size="xs" variant="primary" onClick={applyFilters}>
+            <Button
+              type="submit"
+              size="xs"
+              variant="primary"
+              disabled={invalidRange}
+            >
               Apply
             </Button>
           </div>
-        </div>
+        </form>
+        {invalidRange && (
+          <p role="alert" className="border-t border-[var(--border)] bg-[var(--surface-2)] px-3 py-1.5 text-[11px] text-[var(--danger)]">
+            Start date must be on or before end date.
+          </p>
+        )}
       </Card>
 
       <Panel
@@ -274,12 +301,7 @@ export function DataBrowser() {
                     onClick={() => setSelectedEvent(event)}
                   >
                     <TableCell className="font-mono tabular-nums text-[var(--text)]">
-                      {new Date(event.timestamp).toLocaleTimeString([], {
-                        hour: '2-digit',
-                        minute: '2-digit',
-                        second: '2-digit',
-                        hour12: false,
-                      })}
+                      {formatEventTimeLabel(event.timestamp)}
                     </TableCell>
                     <TableCell className="font-mono text-[var(--accent)]">
                       {event.clientId}

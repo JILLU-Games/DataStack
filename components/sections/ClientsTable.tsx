@@ -43,11 +43,17 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
     type: 'rotate' | 'revoke' | 'delete';
     client: ClientItem;
   } | null>(null);
+  const [purgeFilesOnDelete, setPurgeFilesOnDelete] = useState(false);
   const [editClient, setEditClient] = useState<ClientItem | null>(null);
   const [editName, setEditName] = useState('');
   const [editRateLimit, setEditRateLimit] = useState('100');
   const [editError, setEditError] = useState('');
   const [processing, setProcessing] = useState(false);
+
+  const closeConfirmModal = () => {
+    setConfirmAction(null);
+    setPurgeFilesOnDelete(false);
+  };
 
   const openEditModal = (client: ClientItem) => {
     setEditClient(client);
@@ -66,8 +72,8 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
       setEditError('Display name is required.');
       return;
     }
-    if (!Number.isFinite(numericRateLimit) || numericRateLimit < 1 || numericRateLimit > 10000) {
-      setEditError('Rate limit must be between 1 and 10,000 events/s.');
+    if (!Number.isInteger(numericRateLimit) || numericRateLimit < 1 || numericRateLimit > 100000) {
+      setEditError('Rate limit must be an integer between 1 and 100,000 events/s.');
       return;
     }
 
@@ -147,20 +153,30 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
     }
   };
 
-  const executeDeleteClient = async (client: ClientItem) => {
+  const executeDeleteClient = async (client: ClientItem, purgeFiles: boolean) => {
     setProcessing(true);
     try {
-      const response = await fetch(`/api/clients/${encodeURIComponent(client.clientId)}`, {
-        method: 'DELETE',
-      });
+      const query = purgeFiles ? '?purgeFiles=true' : '';
+      const response = await fetch(
+        `/api/clients/${encodeURIComponent(client.clientId)}${query}`,
+        {
+          method: 'DELETE',
+        },
+      );
       if (response.status === 401) {
         window.location.assign('/vcon/login');
         return;
       }
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Unable to delete client');
-      setConfirmAction(null);
-      success('Client deleted', `${client.clientId} has been permanently removed.`);
+      closeConfirmModal();
+      const purgedCount = Number(data?.purgedFiles ?? 0);
+      success(
+        'Client deleted',
+        purgeFiles
+          ? `${client.clientId} removed and ${purgedCount} stored CSV file${purgedCount === 1 ? '' : 's'} purged.`
+          : `${client.clientId} has been permanently removed (stored CSV files retained).`,
+      );
       await onStatusChange();
     } catch (deleteError) {
       error('Client deletion failed', deleteError instanceof Error ? deleteError.message : 'Unknown error');
@@ -171,6 +187,7 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
 
   const toggleStatus = (client: ClientItem) => {
     if (client.status === 'active') {
+      setPurgeFilesOnDelete(false);
       setConfirmAction({ type: 'revoke', client });
     } else {
       void executeStatusChange(client, 'active');
@@ -182,7 +199,7 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
     if (confirmAction.type === 'rotate') {
       await executeRotateKey(confirmAction.client);
     } else if (confirmAction.type === 'delete') {
-      await executeDeleteClient(confirmAction.client);
+      await executeDeleteClient(confirmAction.client, purgeFilesOnDelete);
     } else {
       await executeStatusChange(confirmAction.client, 'revoked');
     }
@@ -302,7 +319,10 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
                           className="h-6 w-6 border border-transparent hover:border-[var(--danger)] hover:text-[var(--danger)]"
                           title={`Delete ${client.clientId}`}
                           aria-label={`Delete ${client.clientId}`}
-                          onClick={() => setConfirmAction({ type: 'delete', client })}
+                          onClick={() => {
+                            setPurgeFilesOnDelete(false);
+                            setConfirmAction({ type: 'delete', client });
+                          }}
                         />
                       </div>
                     </TableCell>
@@ -350,7 +370,7 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
             compact
             type="number"
             min="1"
-            max="10000"
+            max="100000"
             value={editRateLimit}
             onChange={(event) => setEditRateLimit(event.target.value)}
             required
@@ -365,7 +385,7 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
 
       <Modal
         isOpen={Boolean(confirmAction)}
-        onClose={() => !processing && setConfirmAction(null)}
+        onClose={() => !processing && closeConfirmModal()}
         title={
           confirmAction?.type === 'rotate'
             ? 'Rotate credentials'
@@ -376,7 +396,7 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
         maxWidth="xs"
         footer={
           <>
-            <Button type="button" variant="ghost" size="xs" disabled={processing} onClick={() => setConfirmAction(null)}>
+            <Button type="button" variant="ghost" size="xs" disabled={processing} onClick={closeConfirmModal}>
               Cancel
             </Button>
             <Button
@@ -402,6 +422,22 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
               ? `Permanently delete client ${confirmAction.client.clientId}? This removes the client registration and credentials.`
               : `Revoke access for ${confirmAction?.client.clientId || ''}?`}
         </p>
+        {confirmAction?.type === 'delete' && (
+          <label className="mt-3 flex cursor-pointer items-start gap-2 border border-[var(--border)] bg-[var(--surface-2)] p-2.5 text-[11.5px] text-[var(--text)]">
+            <input
+              type="checkbox"
+              checked={purgeFilesOnDelete}
+              onChange={(event) => setPurgeFilesOnDelete(event.target.checked)}
+              className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-[var(--danger)]"
+            />
+            <span>
+              Also purge stored CSV files for this client
+              <span className="mt-0.5 block text-[10.5px] text-[var(--text-faint)]">
+                Deletes partitioned disk CSV files along with the client registration.
+              </span>
+            </span>
+          </label>
+        )}
       </Modal>
 
       <Modal
@@ -420,7 +456,6 @@ export function CredentialsDisplay({ credentials }: { credentials: ClientCredent
   return (
     <div className="flex flex-col gap-2.5">
       <CredentialItem label="Client ID" value={credentials.clientId} />
-      <CredentialItem label="Secret key" value={credentials.secret} />
       <div className="flex flex-col gap-1">
         <div className="flex items-center justify-between gap-2">
           <label htmlFor={`token-${credentials.clientId}`} className="text-[10px] uppercase tracking-wider text-[var(--text-faint)]">
@@ -435,6 +470,9 @@ export function CredentialsDisplay({ credentials }: { credentials: ClientCredent
           rows={3}
           className="font-mono text-[11px] text-[var(--accent)]"
         />
+        <p className="text-[10.5px] text-[var(--text-faint)]">
+          Use this signed JWT token for both Socket.IO handshakes and HTTP Bearer ingestion.
+        </p>
       </div>
     </div>
   );

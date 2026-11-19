@@ -4,26 +4,17 @@ import {
   getSessionCookieOptions,
 } from "@/core/auth/adminSession";
 import {
+  AdminSetupRequiredError,
   authenticateAdminCredentials,
   clearAdminLoginAttempts,
   consumeAdminLoginAttempt,
 } from "@/core/auth/adminUsers";
+import { extractClientIp } from "@/lib/adminAuth";
 import { NextRequest, NextResponse } from "next/server";
 
 const SESSION_COOKIE = "datastack_admin_session";
 const SESSION_SECONDS = 8 * 60 * 60;
 const REMEMBERED_SESSION_SECONDS = 30 * 24 * 60 * 60;
-
-function extractClientIp(request: NextRequest) {
-  const forwardedFor = request.headers.get("x-forwarded-for");
-  if (forwardedFor) {
-    const first = forwardedFor.split(",")[0]?.trim();
-    if (first) return first;
-  }
-  const realIp = request.headers.get("x-real-ip")?.trim();
-  if (realIp) return realIp;
-  return "unknown";
-}
 
 export async function POST(request: NextRequest) {
   const sessionSecret = getAdminSessionSecret();
@@ -91,7 +82,16 @@ export async function POST(request: NextRequest) {
   let authResult: { authenticated: boolean; tokenVersion: number };
   try {
     authResult = await authenticateAdminCredentials(email, password);
-  } catch {
+  } catch (err) {
+    if (err instanceof AdminSetupRequiredError) {
+      return NextResponse.json(
+        {
+          error: "Initial admin setup is required before signing in.",
+          code: err.code,
+        },
+        { status: 409 },
+      );
+    }
     return NextResponse.json(
       { error: "Admin authentication is temporarily unavailable." },
       { status: 503 },

@@ -1,10 +1,13 @@
 import { SettingsManager } from "@/core/adminSettings/settingsManager";
 import { DataBufferEngine } from "@/core/data/buffer";
+import { SDKManager } from "@/core/sdk/sdkManager";
 import { getInternalIngestionHeaders } from "@/core/Security/security";
 import { CSVStorageManager } from "@/core/Storage/csvStorage";
+import { requireAdminApiSession } from "@/lib/adminAuth";
 import { parse } from "csv-parse";
 import { NextRequest, NextResponse } from "next/server";
-import { createReadStream, readdirSync, statSync } from "node:fs";
+import { createReadStream } from "node:fs";
+import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 
 interface DataEvent {
@@ -15,10 +18,40 @@ interface DataEvent {
   status: "stored" | "buffered";
 }
 
+function parseTimestampMs(raw: string): number {
+  const trimmed = String(raw || "").trim();
+  if (/^\d+(\.\d+)?$/.test(trimmed)) {
+    const num = Number(trimmed);
+    return num < 1e11 ? num * 1000 : num;
+  }
+  const parsed = Date.parse(trimmed);
+  return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+}
+
+function compareEventsDesc(a: DataEvent, b: DataEvent): number {
+  const aMs = parseTimestampMs(a.timestamp);
+  const bMs = parseTimestampMs(b.timestamp);
+  if (aMs !== bMs) {
+    return bMs - aMs;
+  }
+  return b.timestamp > a.timestamp ? 1 : b.timestamp < a.timestamp ? -1 : 0;
+}
+
 export async function GET(request: NextRequest) {
+  const auth = await requireAdminApiSession(request);
+  if (!auth.valid) {
+    return auth.response;
+  }
+
   try {
     const { searchParams } = new URL(request.url);
-    const clientId = searchParams.get("clientId") || "all";
+    const rawClientId = searchParams.get("clientId") || "all";
+    const clientId =
+      rawClientId === "all"
+        ? "all"
+        : SDKManager.normalizeClientId(rawClientId) || "all";
+    const sanitizedClientId =
+      clientId === "all" ? "all" : CSVStorageManager.sanitizeClientId(clientId);
     const from = searchParams.get("from") || "";
     const to = searchParams.get("to") || "";
     const search = (searchParams.get("search") || "").toLowerCase();
@@ -34,7 +67,12 @@ export async function GET(request: NextRequest) {
 
     const addIfMatching = (event: DataEvent) => {
       const eventDate = CSVStorageManager.extractSafePartitionDate(event.timestamp, null);
-      const dedupeKey = `${event.clientId}:${event.eventId}`;
+      const normEventClient = SDKManager.normalizeClientId(event.clientId) || event.clientId;
+      const dedupeKey = `${normEventClient}:${event.eventId}`;
+      const matchesClient =
+        clientId === "all" ||
+        normEventClient === clientId ||
+        CSVStorageManager.sanitizeClientId(normEventClient) === sanitizedClientId;
       const matchesSearch =
         !search ||
         event.payload.toLowerCase().includes(search) ||
@@ -42,7 +80,7 @@ export async function GET(request: NextRequest) {
         event.clientId.toLowerCase().includes(search);
 
       if (
-        (clientId !== "all" && event.clientId !== clientId) ||
+        !matchesClient ||
         ((from || to) && (!eventDate || (from && eventDate < from) || (to && eventDate > to))) ||
         !matchesSearch ||
         eventIds.has(dedupeKey)
@@ -57,7 +95,7 @@ export async function GET(request: NextRequest) {
       let high = selectedRows.length;
       while (low < high) {
         const middle = (low + high) >>> 1;
-        if (selectedRows[middle].timestamp >= event.timestamp) low = middle + 1;
+        if (compareEventsDesc(selectedRows[middle], event) <= 0) low = middle + 1;
         else high = middle;
       }
 
@@ -70,31 +108,61 @@ export async function GET(request: NextRequest) {
     const storageDir = CSVStorageManager.baseStorageDir;
     let clientDirs: string[] = [];
     try {
-      clientDirs = readdirSync(storageDir);
+      clientDirs = await readdir(storageDir);
     } catch {
       clientDirs = [];
     }
 
     for (const storedClientId of clientDirs) {
-      if (clientId !== "all" && storedClientId !== clientId) continue;
+      if (
+        clientId !== "all" &&
+        storedClientId !== clientId &&
+        storedClientId !== sanitizedClientId
+      ) {
+        continue;
+      }
 
       const clientDir = path.join(storageDir, storedClientId);
-      if (!statSync(clientDir).isDirectory()) continue;
+      let dirLstat;
+      try {
+        dirLstat = await lstat(clientDir);
+      } catch {
+        continue;
+      }
+      if (dirLstat.isSymbolicLink() || !dirLstat.isDirectory()) continue;
 
       let filenames: string[];
       try {
-        filenames = readdirSync(clientDir).filter((filename) =>
-          /^\d{4}-\d{2}-\d{2}(?:-part\d+)?\.csv$/.test(filename),
-        );
+        filenames = (await readdir(clientDir))
+          .filter((filename) => {
+            if (!/^\d{4}-\d{2}-\d{2}(?:-part\d+)?\.csv$/.test(filename)) {
+              return false;
+            }
+            const fileDate = filename.slice(0, 10);
+            if ((from && fileDate < from) || (to && fileDate > to)) {
+              return false;
+            }
+            return true;
+          })
+          .sort((a, b) => b.localeCompare(a));
       } catch {
         continue;
       }
 
       for (const filename of filenames) {
         const fileDate = filename.slice(0, 10);
-        if ((from && fileDate < from) || (to && fileDate > to)) continue;
 
-        const parser = createReadStream(path.join(clientDir, filename)).pipe(
+        const filePath = path.join(clientDir, filename);
+        let fileLstat;
+        try {
+          fileLstat = await lstat(filePath);
+        } catch {
+          continue;
+        }
+        if (fileLstat.isSymbolicLink() || !fileLstat.isFile()) continue;
+
+        const fileStream = createReadStream(filePath);
+        const parser = fileStream.pipe(
           parse({ columns: true, skip_empty_lines: true, bom: true }),
         );
 
@@ -111,17 +179,17 @@ export async function GET(request: NextRequest) {
             };
             if (event.eventId) addIfMatching(event);
           }
-        } catch {
-          parser.destroy();
+        } catch (err) {
+          console.warn(`[API /data] Failed reading CSV partition ${filePath}:`, err);
+        } finally {
+          if (!parser.destroyed) parser.destroy();
+          if (!fileStream.destroyed) fileStream.destroy();
         }
       }
     }
 
-    const settings = await SettingsManager.getSettingsAsync();
-    const recentWindowLimit = Math.min(
-      2000,
-      Math.max(200, settings.batchFlushThreshold || 500),
-    );
+    await SettingsManager.getSettingsAsync();
+    const recentWindowLimit = DataBufferEngine.getRecentLimit();
 
     for (const event of await DataBufferEngine.getRecentEventsAsync(
       recentWindowLimit,

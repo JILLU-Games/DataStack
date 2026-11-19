@@ -22,11 +22,13 @@ export async function GET(request: NextRequest) {
 
   if (!auth.valid) {
     const status = auth.reason === "UNAUTHORIZED" ? 401 : 503;
+    const code =
+      auth.reason === "UNAUTHORIZED" ? "SESSION_EXPIRED" : "AUTH_UNAVAILABLE";
     const message =
       auth.reason === "UNAUTHORIZED"
         ? "Authentication required."
         : "Admin authentication is temporarily unavailable.";
-    return NextResponse.json({ error: message }, { status });
+    return NextResponse.json({ error: message, code }, { status });
   }
 
   try {
@@ -54,11 +56,13 @@ export async function PUT(request: NextRequest) {
 
   if (!auth.valid) {
     const status = auth.reason === "UNAUTHORIZED" ? 401 : 503;
+    const code =
+      auth.reason === "UNAUTHORIZED" ? "SESSION_EXPIRED" : "AUTH_UNAVAILABLE";
     const message =
       auth.reason === "UNAUTHORIZED"
         ? "Authentication required."
         : "Admin authentication is temporarily unavailable.";
-    return NextResponse.json({ error: message }, { status });
+    return NextResponse.json({ error: message, code }, { status });
   }
 
   let body: Record<string, unknown>;
@@ -115,7 +119,10 @@ export async function PUT(request: NextRequest) {
     });
 
     if (!result.ok) {
-      return NextResponse.json({ error: result.error }, { status: 401 });
+      return NextResponse.json(
+        { error: result.error, code: "INVALID_PASSWORD" },
+        { status: 401 },
+      );
     }
 
     // Preserve remaining session duration (e.g., 30-day "Remember me" session)

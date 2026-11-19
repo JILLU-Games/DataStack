@@ -1,23 +1,43 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { SettingsManager } from '@/core/adminSettings/settingsManager';
+import { SDKManager } from '@/core/sdk/sdkManager';
 import { getInternalIngestionHeaders } from '@/core/Security/security';
 import { CSVStorageManager } from '@/core/Storage/csvStorage';
 import { DataBufferEngine } from '@/core/data/buffer';
+import { requireAdminApiSession } from '@/lib/adminAuth';
 
 export async function GET(req: NextRequest) {
+  const auth = await requireAdminApiSession(req);
+  if (!auth.valid) {
+    return auth.response;
+  }
+
   try {
     const { searchParams } = new URL(req.url);
-    const clientId = searchParams.get('clientId') || undefined;
+    const rawClientId = searchParams.get('clientId');
+    const clientId =
+      rawClientId && rawClientId !== 'all'
+        ? SDKManager.normalizeClientId(rawClientId)
+        : undefined;
+    const sanitizedClientId = clientId
+      ? CSVStorageManager.sanitizeClientId(clientId)
+      : undefined;
 
-    const [stats, allFiles] = await Promise.all([
-      CSVStorageManager.getStorageStatsAsync(),
-      CSVStorageManager.listAllFilesAsync(),
-    ]);
+    const allFiles = await CSVStorageManager.listAllFilesAsync();
     let files = allFiles;
 
-    if (clientId && clientId !== 'all') {
-      files = files.filter((f) => f.clientId === clientId);
+    if (clientId) {
+      files = allFiles.filter((f) => {
+        const normFolder = SDKManager.normalizeClientId(f.clientId);
+        return (
+          normFolder === clientId ||
+          f.clientId === clientId ||
+          f.clientId === sanitizedClientId
+        );
+      });
     }
+
+    const stats = CSVStorageManager.formatStorageStats(files);
 
     return NextResponse.json({ stats, files });
   } catch (err: unknown) {
@@ -26,12 +46,20 @@ export async function GET(req: NextRequest) {
   }
 }
 
-export async function POST(_req: NextRequest) {
+export async function POST(req: NextRequest) {
+  const auth = await requireAdminApiSession(req);
+  if (!auth.valid) {
+    return auth.response;
+  }
+
   try {
     await SettingsManager.getSettingsAsync();
 
     // 1. Flush local / shared Next.js DataBufferEngine
-    const localRes = await DataBufferEngine.flush();
+    const localRes = await DataBufferEngine.flush({
+      waitMs: 2500,
+      throwOnLockTimeout: true,
+    });
 
     // 2. Also flush Port 4000 Socket.IO ingestion buffer
     let remoteCount = 0;
@@ -46,9 +74,13 @@ export async function POST(_req: NextRequest) {
     try {
       const ingestRes = await fetch(`${ingestionBaseUrl}/internal/flush`, {
         method: 'POST',
-        headers: getInternalIngestionHeaders(),
+        headers: {
+          'Content-Type': 'application/json',
+          ...getInternalIngestionHeaders(),
+        },
+        body: JSON.stringify({ waitMs: 2500, throwOnLockTimeout: true }),
         cache: 'no-store',
-        signal: AbortSignal.timeout(2500),
+        signal: AbortSignal.timeout(4000),
       });
       if (!ingestRes.ok) {
         const errPayload = await ingestRes.json().catch(() => ({}));
@@ -56,6 +88,23 @@ export async function POST(_req: NextRequest) {
           typeof errPayload?.error === 'string'
             ? errPayload.error
             : `Ingestion flush returned HTTP ${ingestRes.status}`;
+        if (
+          ingestRes.status === 503 &&
+          errPayload?.code === 'FLUSH_LOCK_TIMEOUT'
+        ) {
+          return NextResponse.json(
+            {
+              success: false,
+              error: remoteErr,
+              code: 'FLUSH_LOCK_TIMEOUT',
+              flushedCount: localRes.count,
+              filesUpdated: localRes.files,
+              ingestionFlushed: false,
+              ingestionStatus: ingestRes.status,
+            },
+            { status: 503 },
+          );
+        }
         return NextResponse.json(
           {
             success: false,
@@ -108,6 +157,16 @@ export async function POST(_req: NextRequest) {
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Manual flush failed';
+    if (message.includes('FLUSH_LOCK_TIMEOUT')) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: message,
+          code: 'FLUSH_LOCK_TIMEOUT',
+        },
+        { status: 503 },
+      );
+    }
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

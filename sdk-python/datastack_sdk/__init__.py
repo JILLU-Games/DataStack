@@ -20,6 +20,15 @@ def _ensure_canonical_datastack_on_path() -> None:
         if repo_canonical.is_dir() and str(repo_canonical) not in sys.path:
             sys.path.insert(0, str(repo_canonical))
 
+    try:
+        import datastack  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "datastack-sdk requires the canonical 'datastack>=2.2.0' package. "
+            "Install it via `pip install ./sdk/python/datastack` or install "
+            "`datastack>=2.2.0` from your package index."
+        ) from exc
+
 
 _ensure_canonical_datastack_on_path()
 

@@ -3,7 +3,7 @@
 import { Button } from '@/components/ui/Button';
 import { Icon } from '@/components/ui/Icon';
 import { cn } from '@/lib/utils';
-import { getCached, setCached } from '@/lib/vconCache';
+import { getCached, setCached, clearAuthCaches } from '@/lib/vconCache';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import React, { useEffect, useState } from 'react';
@@ -69,8 +69,26 @@ export const Sidebar: React.FC<SidebarProps> = ({
       if (cached.role) setAdminRole(cached.role);
     }
 
-    fetch('/api/auth/profile', { credentials: 'include' })
-      .then((res) => (res.ok ? res.json() : null))
+    const handleProfileUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<CachedProfile>).detail;
+      if (detail?.email) {
+        setAdminEmail(detail.email);
+        if (detail.role) setAdminRole(detail.role);
+      }
+    };
+    window.addEventListener('datastack:profile-updated', handleProfileUpdated);
+
+    fetch('/api/auth/profile', {
+      credentials: 'include',
+      cache: 'no-store',
+    })
+      .then((res) => {
+        if (res.status === 401) {
+          window.location.assign('/vcon/login');
+          return null;
+        }
+        return res.ok ? res.json() : null;
+      })
       .then((data) => {
         if (data?.profile?.email) {
           setCached('vcon:profile', data.profile);
@@ -82,6 +100,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
       .catch(() => {
         // Keep cached or default identity label if offline
       });
+
+    return () => {
+      window.removeEventListener('datastack:profile-updated', handleProfileUpdated);
+    };
   }, [pathname]);
 
   const toggleTheme = () => {
@@ -100,6 +122,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         credentials: 'include',
       });
       if (!response.ok) throw new Error('Unable to sign out');
+      await clearAuthCaches();
       window.location.assign('/vcon/login');
     } catch {
       setIsSigningOut(false);

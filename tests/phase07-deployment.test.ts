@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import test, { after } from "node:test";
 import { NextRequest } from "next/server";
 import { GET as getHealthRoute } from "../app/api/health/route";
 import { SettingsManager } from "../core/adminSettings/settingsManager";
 import { DataBufferEngine, type RedisBufferClient } from "../core/data/buffer";
+
+const require = createRequire(import.meta.url);
 
 const g = globalThis as typeof globalThis & {
   __dataStackAdminSettings?: unknown;
@@ -19,6 +22,8 @@ const g = globalThis as typeof globalThis & {
 
 const prevDbUrl = process.env.DATABASE_URL;
 const prevRedisUrl = process.env.REDIS_URL;
+const prevDisableListen = process.env.DATASTACK_DISABLE_LISTEN;
+process.env.DATASTACK_DISABLE_LISTEN = "1";
 
 after(async () => {
   DataBufferEngine.setRedisClientForTests(undefined);
@@ -38,6 +43,9 @@ after(async () => {
 
   if (prevRedisUrl === undefined) delete process.env.REDIS_URL;
   else process.env.REDIS_URL = prevRedisUrl;
+
+  if (prevDisableListen === undefined) delete process.env.DATASTACK_DISABLE_LISTEN;
+  else process.env.DATASTACK_DISABLE_LISTEN = prevDisableListen;
 
   const testDirs = [
     resolve(process.cwd(), "storage", "data", "phase07_prune_guard"),
@@ -87,15 +95,20 @@ test("DEPLOY-BLK-03 & 05: Dockerfiles guard recursive chown on /app/storage/data
   assert.ok(lockJson.packages && Object.keys(lockJson.packages).length > 10);
 });
 
-test("DEPLOY-BLK-04: Both Nginx configs proxy = /health to socketio_upstream", () => {
-  for (const relPath of ["docker/coolify-nginx.conf", "nginx/default.conf"]) {
-    const conf = readFileSync(resolve(process.cwd(), relPath), "utf8");
-    assert.match(
-      conf,
-      /location\s*=\s*\/health\s*\{[\s\S]*?proxy_pass\s+http:\/\/socketio_upstream;/,
-      `${relPath} must route location = /health to socketio_upstream`,
-    );
-  }
+test("DEPLOY-BLK-04: Both Nginx configs proxy = /health to ingestion upstream", () => {
+  const defaultConf = readFileSync(resolve(process.cwd(), "nginx/default.conf"), "utf8");
+  assert.match(
+    defaultConf,
+    /location\s*=\s*\/health\s*\{[\s\S]*?proxy_pass\s+http:\/\/socketio_upstream;/,
+    "nginx/default.conf must route location = /health to socketio_upstream",
+  );
+
+  const coolifyConf = readFileSync(resolve(process.cwd(), "docker/coolify-nginx.conf"), "utf8");
+  assert.match(
+    coolifyConf,
+    /location\s*=\s*\/health\s*\{[\s\S]*?proxy_pass\s+\$socketio_upstream;/,
+    "docker/coolify-nginx.conf must route location = /health to $socketio_upstream",
+  );
 });
 
 test("DEPLOY-BLK-03 docs: manifest.md and README.md align volume mount path (/app/storage) and include sdk/python/datastack", () => {
@@ -196,4 +209,270 @@ test("DEPLOY-BLK-06 shutdown & health: DataBufferEngine.flushAndShutdownOnSignal
   const json = (await res.json()) as { status: string; bufferSize: number };
   assert.equal(json.status, "online");
   assert.equal(json.bufferSize, 7);
+});
+
+test("BUG-28: nginx/default.conf aligns Socket.IO directives and server/index.js enforces configurable DATASTACK_CORS_ORIGINS", () => {
+  const nginxDefault = readFileSync(resolve(process.cwd(), "nginx", "default.conf"), "utf8");
+  assert.match(
+    nginxDefault,
+    /location \/socket\.io\/ \{[\s\S]*proxy_read_timeout 86400s;[\s\S]*proxy_send_timeout 86400s;[\s\S]*proxy_buffering off;/,
+    "nginx/default.conf must disable proxy_buffering and set 86400s read/send timeouts on /socket.io/",
+  );
+
+  const compose = readFileSync(resolve(process.cwd(), "docker", "docker-compose.yml"), "utf8");
+  assert.match(compose, /DATASTACK_CORS_ORIGINS:\s*"\$\{DATASTACK_CORS_ORIGINS:-\}"/);
+
+  const envExample = readFileSync(resolve(process.cwd(), ".env.example"), "utf8");
+  assert.match(envExample, /DATASTACK_CORS_ORIGINS=/);
+
+  const serverSrc = readFileSync(resolve(process.cwd(), "server", "index.js"), "utf8");
+  assert.equal(
+    serverSrc.includes("origin: '*'"),
+    false,
+    "server/index.js must not hardcode wildcard origin: '*'",
+  );
+
+  process.env.DATASTACK_DISABLE_LISTEN = "1";
+  const ingestionServer = require("../server/index.js") as {
+    isOriginAllowedByCors: (origin: string | undefined, raw?: string) => boolean;
+    corsOriginDelegate: (
+      origin: string | undefined,
+      cb: (err: Error | null, allow: boolean) => void,
+    ) => void;
+    stopTimers: () => void;
+  };
+
+  try {
+    // Default / empty / wildcard allows any origin
+    assert.equal(ingestionServer.isOriginAllowedByCors("https://any.example.com", ""), true);
+    assert.equal(ingestionServer.isOriginAllowedByCors("https://any.example.com", "*"), true);
+
+    // Non-browser / SDK calls (no Origin header) remain allowed even with strict allowlist
+    const strictList = "https://console.example.com, https://admin.example.com/";
+    assert.equal(ingestionServer.isOriginAllowedByCors(undefined, strictList), true);
+    assert.equal(ingestionServer.isOriginAllowedByCors("", strictList), true);
+
+    // Allowed origins (with trailing slash normalization) pass
+    assert.equal(ingestionServer.isOriginAllowedByCors("https://console.example.com", strictList), true);
+    assert.equal(ingestionServer.isOriginAllowedByCors("https://console.example.com/", strictList), true);
+    assert.equal(ingestionServer.isOriginAllowedByCors("https://admin.example.com", strictList), true);
+
+    // Disallowed browser origins are rejected cleanly
+    assert.equal(ingestionServer.isOriginAllowedByCors("https://evil.example.com", strictList), false);
+
+    // Delegate callback respects live process.env.DATASTACK_CORS_ORIGINS without throwing
+    const prevCors = process.env.DATASTACK_CORS_ORIGINS;
+    try {
+      process.env.DATASTACK_CORS_ORIGINS = "https://allowed.datastack.dev";
+      let delegateErr: Error | null = null;
+      let delegateAllowed = true;
+      ingestionServer.corsOriginDelegate("https://blocked.datastack.dev", (err, allow) => {
+        delegateErr = err;
+        delegateAllowed = allow;
+      });
+      assert.equal(delegateErr, null);
+      assert.equal(delegateAllowed, false);
+
+      ingestionServer.corsOriginDelegate("https://allowed.datastack.dev", (err, allow) => {
+        delegateErr = err;
+        delegateAllowed = allow;
+      });
+      assert.equal(delegateErr, null);
+      assert.equal(delegateAllowed, true);
+    } finally {
+      if (prevCors === undefined) delete process.env.DATASTACK_CORS_ORIGINS;
+      else process.env.DATASTACK_CORS_ORIGINS = prevCors;
+    }
+  } finally {
+    ingestionServer.stopTimers();
+  }
+});
+
+test("R2 PHASE-04 BUG-16 & BUG-17: Nginx disables buffering on /api/export, next.config enforces ESLint during builds, and package.json prunes unused template deps", () => {
+  const nginxDefault = readFileSync(resolve(process.cwd(), "nginx/default.conf"), "utf8");
+  assert.match(
+    nginxDefault,
+    /location\s*=\s*\/api\/export\s*\{[\s\S]*?proxy_pass\s+http:\/\/nextjs_upstream;[\s\S]*?proxy_buffering\s+off;[\s\S]*?proxy_read_timeout\s+300s;/,
+    "nginx/default.conf must disable proxy_buffering and extend proxy_read_timeout on location = /api/export",
+  );
+
+  const coolifyConf = readFileSync(resolve(process.cwd(), "docker/coolify-nginx.conf"), "utf8");
+  assert.match(
+    coolifyConf,
+    /location\s*=\s*\/api\/export\s*\{[\s\S]*?proxy_pass\s+\$nextjs_upstream;[\s\S]*?proxy_buffering\s+off;[\s\S]*?proxy_read_timeout\s+300s;/,
+    "docker/coolify-nginx.conf must disable proxy_buffering and extend proxy_read_timeout on location = /api/export",
+  );
+
+  const nextConfig = readFileSync(resolve(process.cwd(), "next.config.ts"), "utf8");
+  assert.equal(
+    /ignoreDuringBuilds\s*:\s*true/.test(nextConfig),
+    false,
+    "next.config.ts must not ignore ESLint errors during builds",
+  );
+
+  const pkg = JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8")) as {
+    name?: string;
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+  };
+  assert.equal(pkg.name, "datastack");
+  assert.equal("@google/genai" in (pkg.dependencies ?? {}), false);
+  assert.equal("firebase-tools" in (pkg.devDependencies ?? {}), false);
+});
+
+test("DEPLOY-BUG-01 & 05: coolify-nginx.conf resolves Docker DNS dynamically and Coolify docs align Base Directory /", () => {
+  const coolifyConf = readFileSync(resolve(process.cwd(), "docker", "coolify-nginx.conf"), "utf8");
+  assert.match(coolifyConf, /resolver\s+127\.0\.0\.11\s+valid=10s\s+ipv6=off;/);
+  assert.match(coolifyConf, /set\s+\$nextjs_upstream\s+"http:\/\/web:3000";/);
+  assert.match(coolifyConf, /set\s+\$socketio_upstream\s+"http:\/\/ingestion:4000";/);
+  assert.equal(/\bupstream\s+\w+\s*\{/.test(coolifyConf), false, "coolify-nginx.conf must not define static upstream blocks");
+
+  const compose = readFileSync(resolve(process.cwd(), "docker", "docker-compose.yml"), "utf8");
+  const graceMatches = compose.match(/^\s+stop_grace_period:\s*20s/gm) ?? [];
+  assert.equal(graceMatches.length, 2, "web and ingestion must set stop_grace_period: 20s");
+
+  const installDoc = readFileSync(resolve(process.cwd(), "docs", "users", "installation.md"), "utf8");
+  const readmeDoc = readFileSync(resolve(process.cwd(), "README.md"), "utf8");
+  assert.match(installDoc, /\*\*Base Directory\*\*\s+to\s+`\/`/);
+  assert.match(readmeDoc, /\*\*Base Directory\*\*\s+to\s+`\/`\s+and\s+\*\*Docker Compose Location\*\*\s+to\s+`\/docker\/docker-compose\.yml`/);
+});
+
+test("DEPLOY-BUG-02, 03 & 04: Port 4000 memoizes schema DDLs, hydrates rotated JWT before listening, and drains buffers gracefully", async () => {
+  const serverSrc = readFileSync(resolve(process.cwd(), "server", "index.js"), "utf8");
+  assert.match(
+    serverSrc,
+    /async function startIngestionServer\(\)[\s\S]*syncSettingsFromDatabase\(\)[\s\S]*server\.listen\(PORT/,
+    "startIngestionServer must await bounded syncSettingsFromDatabase() before server.listen(PORT)",
+  );
+  assert.match(
+    serverSrc,
+    /async function gracefulShutdown\([\s\S]*await closeServerGracefully\(\);[\s\S]*Promise\.allSettled\(\[flushBuffer\(\),\s*flushPendingClientActivity\(\)\]\)/,
+    "gracefulShutdown must close HTTP/Socket.IO ingress before flushing buffers",
+  );
+
+  process.env.DATASTACK_DISABLE_LISTEN = "1";
+  const ingestionServer = require("../server/index.js") as {
+    runtimeConfig: { jwtSecret: string };
+    bufferQueue: Array<{ clientId: string; eventId: string; timestamp: string; payload: string }>;
+    setDbPoolForTests: (pool: unknown) => void;
+    setRedisClientForTests: (client: unknown) => void;
+    ensureDatabaseSchema: () => Promise<boolean>;
+    syncSettingsFromDatabase: () => Promise<boolean>;
+    gracefulShutdown: (signal: string, options?: { exit?: boolean }) => Promise<void>;
+    stopTimers: () => void;
+  };
+
+  const prevJwt = ingestionServer.runtimeConfig.jwtSecret;
+  let ddlCount = 0;
+  let selectCount = 0;
+  let failDdl = true;
+  let poolEnded = false;
+  const rotatedSecret = "rotated-production-jwt-secret-value-over-32-chars";
+
+  const mockPool = {
+    async query(sql: string) {
+      const normalized = sql.trim().toUpperCase();
+      if (normalized.startsWith("CREATE TABLE") || normalized.startsWith("ALTER TABLE")) {
+        ddlCount += 1;
+        if (failDdl) {
+          throw new Error("transient startup PG failure");
+        }
+        return { rowCount: 0, rows: [] };
+      }
+      if (normalized.includes("FROM ADMIN_SETTINGS")) {
+        selectCount += 1;
+        return {
+          rowCount: 1,
+          rows: [
+            {
+              max_events_per_sec: 250,
+              max_payload_size_kb: 128,
+              batch_flush_threshold: 100,
+              batch_flush_interval_ms: 2000,
+              file_rotation_mb: 50,
+              enable_idempotency: true,
+              auto_prune_days: 45,
+              jwt_secret: rotatedSecret,
+            },
+          ],
+        };
+      }
+      return { rowCount: 0, rows: [] };
+    },
+    async end() {
+      poolEnded = true;
+    },
+  };
+
+  let redisQuitCalled = false;
+  const mockRedis = {
+    status: "ready",
+    async rpush() {
+      return 0;
+    },
+    async lpush() {
+      return 0;
+    },
+    async ltrim() {
+      return "OK";
+    },
+    async lrange() {
+      return [];
+    },
+    async llen() {
+      return 0;
+    },
+    async set() {
+      return "OK";
+    },
+    async eval() {
+      return 1;
+    },
+    async sismember() {
+      return 0;
+    },
+    async quit() {
+      redisQuitCalled = true;
+      return "OK";
+    },
+  };
+
+  try {
+    ingestionServer.setDbPoolForTests(mockPool);
+    // 1. Transient DDL error must return false and allow retry
+    const failedSync = await ingestionServer.syncSettingsFromDatabase();
+    assert.equal(failedSync, false);
+    assert.equal(ddlCount, 1);
+
+    // 2. Recovery runs 8 DDLs once and hydrates rotated jwt_secret; repeated calls do zero extra DDLs
+    failDdl = false;
+    ddlCount = 0;
+    assert.equal(await ingestionServer.syncSettingsFromDatabase(), true);
+    assert.equal(ddlCount, 8);
+    assert.equal(selectCount, 1);
+    assert.equal(ingestionServer.runtimeConfig.jwtSecret, rotatedSecret);
+
+    assert.equal(await ingestionServer.syncSettingsFromDatabase(), true);
+    assert.equal(await ingestionServer.syncSettingsFromDatabase(), true);
+    assert.equal(ddlCount, 8, "Repeated 3s sync ticks must NOT re-run CREATE/ALTER DDL statements");
+    assert.equal(selectCount, 3);
+
+    // 3. Graceful shutdown flushes buffered events, quits Redis, and closes PostgreSQL pool cleanly
+    ingestionServer.setRedisClientForTests(mockRedis);
+    ingestionServer.bufferQueue.push({
+      clientId: "phase07_shutdown_flush",
+      eventId: `evt-graceful-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      payload: JSON.stringify({ ok: true }),
+    });
+    await ingestionServer.gracefulShutdown("SIGTERM", { exit: false });
+    assert.equal(ingestionServer.bufferQueue.length, 0, "gracefulShutdown must drain RAM queue to CSV");
+    assert.equal(redisQuitCalled, true, "gracefulShutdown must invoke redis.quit()");
+    assert.equal(poolEnded, true, "gracefulShutdown must close PostgreSQL pool");
+  } finally {
+    ingestionServer.runtimeConfig.jwtSecret = prevJwt;
+    ingestionServer.setDbPoolForTests(null);
+    ingestionServer.setRedisClientForTests(undefined);
+    ingestionServer.stopTimers();
+  }
 });

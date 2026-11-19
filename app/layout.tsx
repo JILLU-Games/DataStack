@@ -38,9 +38,14 @@ export const metadata: Metadata = {
   },
 };
 
+const THEME_BOOTSTRAP_SCRIPT = `(function(){try{var t=localStorage.getItem('datastack-theme');var r=document.documentElement;if(t==='light'){r.classList.remove('dark');r.classList.add('light');}else{r.classList.remove('light');r.classList.add('dark');}}catch(e){}})();`;
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className="dark">
+    <html lang="en" className="dark" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_BOOTSTRAP_SCRIPT }} />
+      </head>
       <body suppressHydrationWarning className="min-h-screen bg-[var(--bg-main)] text-[var(--text)] antialiased">
         <ToastProvider>
           {children}

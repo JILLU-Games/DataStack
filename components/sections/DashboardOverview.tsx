@@ -15,7 +15,14 @@ import {
   TableRow,
   TableWrap,
 } from '@/components/ui/Table';
+import { useToast } from '@/components/ui/Toast';
 import { getCached, setCached } from '@/lib/vconCache';
+import {
+  countMatchingBufferedEvents,
+  extractContentDispositionFilename,
+  formatEventTimeLabel,
+  type BufferedSummary,
+} from '@/lib/vconUiHelpers';
 import Link from 'next/link';
 import React, { useCallback, useEffect, useState } from 'react';
 
@@ -40,6 +47,12 @@ type DashboardMetrics = {
     totalFiles: number;
     totalRows: number;
   };
+  runtime?: {
+    ingestionBridgeStatus?: 'online' | 'auth_error' | 'error' | 'offline';
+    ingestionBridgeError?: string;
+    serverPort?: number;
+    webPort?: number;
+  };
 };
 
 type StorageFile = {
@@ -51,6 +64,7 @@ type StorageFile = {
 };
 
 export const DashboardOverview: React.FC = () => {
+  const { error, info } = useToast();
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(() =>
     getCached<DashboardMetrics | null>('vcon:metrics', null)
   );
@@ -63,7 +77,11 @@ export const DashboardOverview: React.FC = () => {
   const [files, setFiles] = useState<StorageFile[]>(() =>
     getCached<StorageFile[]>('vcon:storage-files', [])
   );
+  const [bufferedSummary, setBufferedSummary] = useState<BufferedSummary | null>(() =>
+    getCached<BufferedSummary | null>('vcon:buffered-summary', null)
+  );
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const [fetchError, setFetchError] = useState('');
 
   const refresh = useCallback(async () => {
@@ -72,7 +90,7 @@ export const DashboardOverview: React.FC = () => {
       const [metricsResponse, eventsResponse, storageResponse, clientsResponse] =
         await Promise.all([
           fetch('/api/metrics', { cache: 'no-store' }),
-          fetch('/api/events?limit=8', { cache: 'no-store' }),
+          fetch('/api/events?limit=8&includeBufferedSummary=true', { cache: 'no-store' }),
           fetch('/api/storage', { cache: 'no-store' }),
           fetch('/api/clients', { cache: 'no-store' }),
         ]);
@@ -99,6 +117,9 @@ export const DashboardOverview: React.FC = () => {
       if (eventsResponse.ok) {
         const data = await eventsResponse.json();
         setEvents(setCached('vcon:dashboard-events', data.events ?? []));
+        if (data.bufferedSummary) {
+          setBufferedSummary(setCached('vcon:buffered-summary', data.bufferedSummary));
+        }
       } else {
         errors.push('events');
       }
@@ -145,12 +166,30 @@ export const DashboardOverview: React.FC = () => {
     .filter((file) => file.date === today)
     .reduce((total, file) => total + file.linesCount, 0);
   const bufferedCount = metrics?.bufferStats.currentBufferSize ?? 0;
-  const eventsToday = storedRecordsToday + bufferedCount;
+  const bufferedTodayRaw = bufferedSummary
+    ? countMatchingBufferedEvents(bufferedSummary, {
+        clientId: 'all',
+        fromDate: today,
+        toDate: today,
+      }).matchingCount
+    : 0;
+  const bufferedTodayCount = metrics
+    ? Math.min(bufferedTodayRaw, bufferedCount)
+    : bufferedTodayRaw;
+  const eventsToday = storedRecordsToday + bufferedTodayCount;
   const activeClients =
     metrics?.activeClients ??
     clients.filter((client) => client.status === 'active').length;
   const totalClients = metrics?.totalClients ?? clients.length;
   const activeSockets = metrics?.activeSockets ?? 0;
+  const bridgeStatus = metrics?.runtime?.ingestionBridgeStatus;
+  const bridgeAuthError = bridgeStatus === 'auth_error';
+  const socketSuffix =
+    bridgeStatus === 'auth_error'
+      ? `${activeSockets} ws · auth err`
+      : bridgeStatus === 'offline'
+        ? `${activeSockets} ws · offline`
+        : `${activeSockets} ws`;
   const totalStorage = metrics?.storageStats.totalMB ?? '0.00';
   const totalStorageBytes = metrics?.storageStats.totalBytes ?? 0;
   const storageValue =
@@ -164,6 +203,41 @@ export const DashboardOverview: React.FC = () => {
   const totalRows =
     metrics?.storageStats.totalRows ??
     files.reduce((sum, file) => sum + file.linesCount, 0);
+
+  const handleQuickExport = async () => {
+    setIsExporting(true);
+    try {
+      const res = await fetch('/api/export?clientId=all', { cache: 'no-store' });
+      if (res.status === 401) {
+        window.location.assign('/vcon/login');
+        return;
+      }
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        error('Export failed', errJson.error || `Export failed with HTTP ${res.status}.`);
+        return;
+      }
+      const blob = await res.blob();
+      const filename = extractContentDispositionFilename(
+        res.headers.get('content-disposition'),
+        `datastack_export_all_${new Date().toISOString().slice(0, 10)}.csv`
+      );
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(objectUrl);
+      info('Export downloaded', `${filename} downloaded.`);
+      await refresh();
+    } catch (err) {
+      error('Export failed', err instanceof Error ? err.message : 'Unable to export dataset.');
+    } finally {
+      setIsExporting(false);
+    }
+  };
 
   return (
     <PageShell
@@ -179,11 +253,16 @@ export const DashboardOverview: React.FC = () => {
             loading={isRefreshing}
             onClick={() => void refresh()}
           />
-          <a href="/api/export?clientId=all" download>
-            <Button size="xs" variant="secondary" icon="Download">
-              Export
-            </Button>
-          </a>
+          <Button
+            size="xs"
+            variant="secondary"
+            icon="Download"
+            loading={isExporting}
+            disabled={isExporting}
+            onClick={() => void handleQuickExport()}
+          >
+            Export
+          </Button>
           <Link href="/vcon/clients">
             <Button size="xs" variant="primary" icon="Plus">
               New client
@@ -192,12 +271,14 @@ export const DashboardOverview: React.FC = () => {
         </>
       }
     >
-      {fetchError && (
+      {(fetchError || bridgeAuthError) && (
         <div
           role="alert"
           className="mb-3 border border-[var(--danger)] bg-[var(--danger-soft)] px-3 py-2 text-[11.5px] text-[var(--text)]"
         >
-          {fetchError}
+          {bridgeAuthError
+            ? `Ingestion bridge authentication mismatch (${metrics?.runtime?.ingestionBridgeError || '401'}). Check DATASTACK_INTERNAL_SECRET parity.`
+            : fetchError}
         </div>
       )}
 
@@ -206,8 +287,13 @@ export const DashboardOverview: React.FC = () => {
           { label: 'Events today', value: eventsToday.toLocaleString() },
           {
             label: 'Active clients · Sockets',
-            value: `${activeClients} / ${totalClients} · ${activeSockets} ws`,
-            dot: activeClients > 0 || activeSockets > 0 ? 'ok' : 'off',
+            value: `${activeClients} / ${totalClients} · ${socketSuffix}`,
+            dot:
+              bridgeAuthError
+                ? 'off'
+                : activeSockets > 0 || (activeClients > 0 && bridgeStatus === 'online')
+                  ? 'ok'
+                  : 'off',
           },
           { label: 'Storage used', value: `${storageValue} ${storageUnit}` },
           { label: 'Stored rows', value: totalRows.toLocaleString() },
@@ -248,9 +334,7 @@ export const DashboardOverview: React.FC = () => {
                   events.map((event) => (
                     <TableRow key={event.eventId}>
                       <TableCell className="font-mono tabular-nums text-[var(--text-faint)]">
-                        {event.timestamp.includes('T')
-                          ? new Date(event.timestamp).toLocaleTimeString()
-                          : event.timestamp}
+                        {formatEventTimeLabel(event.timestamp)}
                       </TableCell>
                       <TableCell className="font-mono text-[var(--accent)]">
                         {event.clientId}
@@ -288,13 +372,12 @@ export const DashboardOverview: React.FC = () => {
             title="Storage"
             meta={`${totalFiles}`}
             action={
-              <a
-                href="/api/export?clientId=all"
-                download
+              <Link
+                href="/vcon/storage"
                 className="text-[11px] text-[var(--text-muted)] hover:text-[var(--text)]"
               >
-                Export ↓
-              </a>
+                Files →
+              </Link>
             }
           >
             <div className="divide-y divide-[var(--border)]">

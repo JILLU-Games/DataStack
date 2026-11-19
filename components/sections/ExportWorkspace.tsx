@@ -8,9 +8,16 @@ import { Pill } from '@/components/ui/Pill';
 import { StatStrip } from '@/components/ui/StatStrip';
 import { useToast } from '@/components/ui/Toast';
 import { getCached, setCached } from '@/lib/vconCache';
+import {
+  countMatchingBufferedEvents,
+  extractContentDispositionFilename,
+  getUtcDateRangeForPreset,
+  matchesSelectedClientFolder,
+  type BufferedSummary,
+} from '@/lib/vconUiHelpers';
 import { Braces, FileText } from 'lucide-react';
 import Link from 'next/link';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 interface Client {
   clientId: string;
@@ -29,10 +36,6 @@ interface StorageFile {
 type ExportFormat = 'csv' | 'json';
 type RangePreset = 'today' | '7d' | '30d' | 'all' | 'custom';
 
-function dateString(date: Date) {
-  return date.toISOString().slice(0, 10);
-}
-
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -41,7 +44,9 @@ function formatBytes(bytes: number) {
 }
 
 function relativeTime(value: string, now: number) {
-  const elapsedSeconds = Math.max(0, Math.floor((now - new Date(value).getTime()) / 1000));
+  const ts = new Date(value).getTime();
+  if (!Number.isFinite(ts)) return '—';
+  const elapsedSeconds = Math.max(0, Math.floor((now - ts) / 1000));
   if (elapsedSeconds < 60) return `${elapsedSeconds}s ago`;
   if (elapsedSeconds < 3600) return `${Math.floor(elapsedSeconds / 60)}m ago`;
   if (elapsedSeconds < 86_400) return `${Math.floor(elapsedSeconds / 3600)}h ago`;
@@ -57,6 +62,7 @@ export function ExportWorkspace() {
     getCached<StorageFile[]>('vcon:storage-files', [])
   );
   const [bufferedCount, setBufferedCount] = useState<number>(0);
+  const [bufferedSummary, setBufferedSummary] = useState<BufferedSummary | null>(null);
   const [selectedClient, setSelectedClient] = useState('all');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
@@ -65,47 +71,62 @@ export function ExportWorkspace() {
   const [loading, setLoading] = useState(
     () => getCached<StorageFile[]>('vcon:storage-files', []).length === 0
   );
+  const [downloading, setDownloading] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [now, setNow] = useState(() => Date.now());
 
-  useEffect(() => {
-    Promise.all([
-      fetch('/api/clients', { cache: 'no-store' }).then(async (response) => {
-        if (response.status === 401) {
-          window.location.assign('/vcon/login');
-          return { clients: [] };
-        }
-        if (!response.ok) throw new Error('Unable to load clients');
-        return response.json();
-      }),
-      fetch('/api/storage', { cache: 'no-store' }).then(async (response) => {
-        if (response.status === 401) {
-          window.location.assign('/vcon/login');
-          return { files: [] };
-        }
-        if (!response.ok) throw new Error('Unable to load stored files');
-        return response.json();
-      }),
-      fetch('/api/metrics', { cache: 'no-store' })
-        .then(async (response) => (response.ok ? response.json() : null))
-        .catch(() => null),
-    ])
-      .then(([clientData, storageData, metricsData]) => {
-        setClients(setCached('vcon:clients', clientData.clients || []));
-        setFiles(setCached('vcon:storage-files', storageData.files || []));
-        if (storageData.stats) setCached('vcon:storage-stats', storageData.stats);
-        if (metricsData?.bufferStats) {
+  const refreshExportData = useCallback(async () => {
+    try {
+      const [clientData, storageData, metricsData, bufferedData] = await Promise.all([
+        fetch('/api/clients', { cache: 'no-store' }).then(async (response) => {
+          if (response.status === 401) {
+            window.location.assign('/vcon/login');
+            return { clients: [] };
+          }
+          if (!response.ok) throw new Error('Unable to load clients');
+          return response.json();
+        }),
+        fetch('/api/storage', { cache: 'no-store' }).then(async (response) => {
+          if (response.status === 401) {
+            window.location.assign('/vcon/login');
+            return { files: [] };
+          }
+          if (!response.ok) throw new Error('Unable to load stored files');
+          return response.json();
+        }),
+        fetch('/api/metrics', { cache: 'no-store' })
+          .then(async (response) => (response.ok ? response.json() : null))
+          .catch(() => null),
+        fetch('/api/events?bufferedOnly=true&limit=1', { cache: 'no-store' })
+          .then(async (response) => (response.ok ? response.json() : null))
+          .catch(() => null),
+      ]);
+
+      setClients(setCached('vcon:clients', clientData.clients || []));
+      setFiles(setCached('vcon:storage-files', storageData.files || []));
+      if (storageData.stats) setCached('vcon:storage-stats', storageData.stats);
+      if (metricsData) {
+        setCached('vcon:metrics', metricsData);
+        if (metricsData.bufferStats) {
           setBufferedCount(Number(metricsData.bufferStats.currentBufferSize) || 0);
         }
-        setLoadError('');
-      })
-      .catch((fetchError) => {
-        setLoadError(
-          fetchError instanceof Error ? fetchError.message : 'Unable to load export data'
-        );
-      })
-      .finally(() => setLoading(false));
+      }
+      if (bufferedData?.bufferedSummary) {
+        setBufferedSummary(setCached('vcon:buffered-summary', bufferedData.bufferedSummary));
+      }
+      setLoadError('');
+    } catch (fetchError) {
+      setLoadError(
+        fetchError instanceof Error ? fetchError.message : 'Unable to load export data'
+      );
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    void refreshExportData();
+  }, [refreshExportData]);
 
   useEffect(() => {
     const updateClock = () => setNow(Date.now());
@@ -118,7 +139,7 @@ export function ExportWorkspace() {
     () =>
       files.filter(
         (file) =>
-          (selectedClient === 'all' || file.clientId === selectedClient) &&
+          matchesSelectedClientFolder(file.clientId, selectedClient) &&
           (!fromDate || file.date >= fromDate) &&
           (!toDate || file.date <= toDate)
       ),
@@ -156,18 +177,9 @@ export function ExportWorkspace() {
 
   const setQuickRange = (nextPreset: Exclude<RangePreset, 'custom'>) => {
     setPreset(nextPreset);
-    if (nextPreset === 'all') {
-      setFromDate('');
-      setToDate('');
-      return;
-    }
-
-    const today = new Date();
-    const start = new Date(today);
-    if (nextPreset === '7d') start.setDate(today.getDate() - 6);
-    if (nextPreset === '30d') start.setDate(today.getDate() - 29);
-    setFromDate(dateString(start));
-    setToDate(dateString(today));
+    const range = getUtcDateRangeForPreset(nextPreset);
+    setFromDate(range.from);
+    setToDate(range.to);
   };
 
   const exportUrl = useMemo(() => {
@@ -177,10 +189,31 @@ export function ExportWorkspace() {
     return `/api/export?${params.toString()}`;
   }, [format, fromDate, selectedClient, toDate]);
 
-  const invalidRange = Boolean(fromDate && toDate && fromDate > toDate);
-  const nothingToExport = preview.rows === 0 && bufferedCount === 0;
+  const filteredBuffered = useMemo(
+    () =>
+      countMatchingBufferedEvents(
+        bufferedSummary,
+        { clientId: selectedClient, fromDate, toDate },
+        bufferedCount,
+      ),
+    [bufferedCount, bufferedSummary, fromDate, selectedClient, toDate],
+  );
 
-  const downloadExport = () => {
+  const invalidRange = Boolean(fromDate && toDate && fromDate > toDate);
+  const nothingToExport = preview.rows === 0 && !filteredBuffered.hasPotentialBuffered;
+
+  const triggerBlobDownload = (blob: Blob, filename: string) => {
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = objectUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(objectUrl);
+  };
+
+  const downloadExport = async () => {
     if (invalidRange) {
       error('Invalid date range', 'Start date must be on or before end date.');
       return;
@@ -189,33 +222,60 @@ export function ExportWorkspace() {
       error('Nothing to export', 'No stored rows or buffered events match the selected filters.');
       return;
     }
-    window.location.assign(exportUrl);
-    info(
-      'Export started',
-      bufferedCount > 0
-        ? `${format.toUpperCase()} download (${preview.rows.toLocaleString()} stored + ${bufferedCount} buffered auto-flushed).`
-        : `${format.toUpperCase()} download for ${preview.rows.toLocaleString()} rows.`
-    );
+    setDownloading(true);
+    try {
+      const res = await fetch(exportUrl, { cache: 'no-store' });
+      if (res.status === 401) {
+        window.location.assign('/vcon/login');
+        return;
+      }
+      if (!res.ok) {
+        const errorJson = await res.json().catch(() => ({}));
+        error(
+          'Export failed',
+          errorJson.error || `Export endpoint returned HTTP ${res.status}.`
+        );
+        return;
+      }
+      const blob = await res.blob();
+      const defaultName = `datastack_export_${selectedClient || 'all'}_${new Date().toISOString().slice(0, 10)}.${format}`;
+      const filename = extractContentDispositionFilename(
+        res.headers.get('content-disposition'),
+        defaultName
+      );
+      triggerBlobDownload(blob, filename);
+      info(
+        'Export downloaded',
+        filteredBuffered.matchingCount > 0
+          ? `${format.toUpperCase()} download (${preview.rows.toLocaleString()} stored + ${filteredBuffered.matchingCount.toLocaleString()} buffered flushed).`
+          : filteredBuffered.unattributedCount > 0
+            ? `${format.toUpperCase()} download (${preview.rows.toLocaleString()} stored + pending backlog flushed).`
+            : `${format.toUpperCase()} download for ${preview.rows.toLocaleString()} rows.`
+      );
+      await refreshExportData();
+    } catch (err: unknown) {
+      error('Export failed', err instanceof Error ? err.message : 'Unable to export dataset.');
+    } finally {
+      setDownloading(false);
+    }
   };
 
   const downloadFile = async (file: StorageFile) => {
     const url = `/api/export?clientId=${encodeURIComponent(file.clientId)}&filename=${encodeURIComponent(file.filename)}`;
     try {
       const res = await fetch(url, { cache: 'no-store' });
+      if (res.status === 401) {
+        window.location.assign('/vcon/login');
+        return;
+      }
       if (!res.ok) {
         const errorJson = await res.json().catch(() => ({}));
         error('Download Failed', errorJson.error || 'Requested CSV file could not be exported.');
         return;
       }
       const blob = await res.blob();
-      const objectUrl = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = objectUrl;
-      a.download = file.filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(objectUrl);
+      triggerBlobDownload(blob, file.filename);
+      await refreshExportData();
     } catch (err: unknown) {
       error('Download Failed', err instanceof Error ? err.message : 'Export download error');
     }
@@ -348,11 +408,19 @@ export function ExportWorkspace() {
                 </strong>{' '}
                 files
               </span>
-              {bufferedCount > 0 && (
+              {filteredBuffered.matchingCount > 0 && (
                 <>
                   <span aria-hidden="true">·</span>
                   <span className="text-[var(--warning)]">
-                    +{bufferedCount} buffered (flushed on export)
+                    +{filteredBuffered.matchingCount.toLocaleString()} buffered (flushed on export)
+                  </span>
+                </>
+              )}
+              {filteredBuffered.matchingCount === 0 && filteredBuffered.unattributedCount > 0 && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="text-[var(--warning)]">
+                    +{filteredBuffered.unattributedCount.toLocaleString()} queued backlog (flushed on export)
                   </span>
                 </>
               )}
@@ -382,8 +450,9 @@ export function ExportWorkspace() {
               variant="primary"
               size="xs"
               icon="Download"
-              disabled={loading || invalidRange || nothingToExport}
-              onClick={downloadExport}
+              loading={downloading}
+              disabled={loading || downloading || invalidRange || nothingToExport}
+              onClick={() => void downloadExport()}
             >
               Download {format.toUpperCase()}
             </Button>

@@ -15,33 +15,30 @@ import {
 import { StatStrip } from '@/components/ui/StatStrip';
 import { useToast } from '@/components/ui/Toast';
 import { getCached, setCached } from '@/lib/vconCache';
+import {
+  DEFAULT_EDITABLE_SETTINGS,
+  describeSettingsBridgeSync,
+  type EditableSettings,
+  mapBridgeStatusToSocketUiState,
+  normalizeEditableSettings,
+  NUMERIC_SETTING_KEYS,
+  type NumericSettingDrafts,
+  type NumericSettingKey,
+  resolvePublicEndpoints,
+  SETTINGS_LIMITS,
+  settingsToNumericDrafts,
+  type SettingsValidationErrors,
+  type SocketHealthUiState,
+  validateEditableSettingsDraft,
+  validateSingleNumericSetting,
+} from '@/lib/vconUiHelpers';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-
-interface EditableSettings {
-  maxEventsPerSec: number;
-  maxPayloadSizeKb: number;
-  batchFlushThreshold: number;
-  batchFlushIntervalMs: number;
-  fileRotationMb: number;
-  enableIdempotency: boolean;
-  autoPruneDays: number;
-}
 
 interface PublicSettings extends EditableSettings {
   serverPort: number;
   webPort: number;
   updatedAt: string;
 }
-
-const DEFAULT_SETTINGS: EditableSettings = {
-  maxEventsPerSec: 100,
-  maxPayloadSizeKb: 100,
-  batchFlushThreshold: 500,
-  batchFlushIntervalMs: 2000,
-  fileRotationMb: 100,
-  enableIdempotency: true,
-  autoPruneDays: 30,
-};
 
 const TABS = [
   { id: 'general', label: 'General' },
@@ -51,16 +48,32 @@ const TABS = [
 ];
 
 type TabId = (typeof TABS)[number]['id'];
-type SocketHealthState = 'idle' | 'checking' | 'online' | 'offline';
+
+const FIELD_TO_TAB: Record<NumericSettingKey, TabId> = {
+  maxEventsPerSec: 'general',
+  batchFlushThreshold: 'connections',
+  batchFlushIntervalMs: 'connections',
+  fileRotationMb: 'storage',
+  autoPruneDays: 'storage',
+  maxPayloadSizeKb: 'security',
+};
 
 export function SettingsWorkspace() {
-  const { success, error } = useToast();
-  const [settings, setSettings] = useState<EditableSettings>(() =>
-    getCached<EditableSettings>('vcon:settings', DEFAULT_SETTINGS)
-  );
+  const { success, warning, error } = useToast();
   const [savedSettings, setSavedSettings] = useState<EditableSettings>(() =>
-    getCached<EditableSettings>('vcon:settings', DEFAULT_SETTINGS)
+    getCached<EditableSettings>('vcon:settings', DEFAULT_EDITABLE_SETTINGS)
   );
+  const [numericDrafts, setNumericDrafts] = useState<NumericSettingDrafts>(() =>
+    settingsToNumericDrafts(
+      getCached<EditableSettings>('vcon:settings', DEFAULT_EDITABLE_SETTINGS)
+    )
+  );
+  const [enableIdempotency, setEnableIdempotency] = useState<boolean>(
+    () =>
+      getCached<EditableSettings>('vcon:settings', DEFAULT_EDITABLE_SETTINGS)
+        .enableIdempotency
+  );
+  const [fieldErrors, setFieldErrors] = useState<SettingsValidationErrors>({});
   const [activeTab, setActiveTab] = useState<TabId>('general');
   const [jwtSecret, setJwtSecret] = useState('');
   const [jwtError, setJwtError] = useState('');
@@ -69,8 +82,8 @@ export function SettingsWorkspace() {
     getCached<string>('vcon:storage-path', '')
   );
   const [baseUrl, setBaseUrl] = useState('');
-  const [webSocketUrl, setWebSocketUrl] = useState('');
-  const [socketStatus, setSocketStatus] = useState<SocketHealthState>('idle');
+  const [socketStatus, setSocketStatus] = useState<SocketHealthUiState>('idle');
+  const [bridgeError, setBridgeError] = useState('');
   const [activeSockets, setActiveSockets] = useState<number>(0);
   const [serverPort, setServerPort] = useState(() =>
     getCached<number>('vcon:server-port', 4000)
@@ -80,48 +93,46 @@ export function SettingsWorkspace() {
   );
   const [saving, setSaving] = useState(false);
 
-  const probeSocketServer = useCallback(async (port: number) => {
-    setSocketStatus('checking');
-    const isLocalHost =
-      window.location.hostname === 'localhost' ||
-      window.location.hostname === '127.0.0.1' ||
-      window.location.port === '3000';
-    const httpHost = isLocalHost
-      ? `${window.location.hostname}:${port}`
-      : window.location.host;
-    const healthUrl = `${window.location.protocol}//${httpHost}/health`;
+  const webSocketUrl = useMemo(() => {
+    if (!baseUrl || typeof window === 'undefined') return '';
+    return resolvePublicEndpoints(window.location, serverPort).webSocketUrl;
+  }, [baseUrl, serverPort]);
 
+  const probeSocketServer = useCallback(async () => {
+    setSocketStatus('checking');
     try {
-      const response = await fetch(healthUrl, {
+      const response = await fetch('/api/metrics', {
         cache: 'no-store',
-        signal: AbortSignal.timeout(1500),
+        signal: AbortSignal.timeout(3000),
       });
-      setSocketStatus(response.ok ? 'online' : 'offline');
-    } catch {
-      // In remote/preview environments where Port 4000 is proxied through web API or reverse proxy, probe /api/health
-      try {
-        const fallbackRes = await fetch('/api/health', {
-          cache: 'no-store',
-          signal: AbortSignal.timeout(1500),
-        });
-        setSocketStatus(fallbackRes.ok ? 'online' : 'offline');
-      } catch {
-        setSocketStatus('offline');
+      if (response.status === 401) {
+        window.location.assign('/vcon/login');
+        return;
       }
+      if (!response.ok) {
+        setSocketStatus('offline');
+        setBridgeError(`Metrics probe returned HTTP ${response.status}`);
+        return;
+      }
+      const metricsData = await response.json();
+      const runtimePort = Number(metricsData?.runtime?.serverPort);
+      if (Number.isFinite(runtimePort) && runtimePort > 0) {
+        setServerPort(setCached('vcon:server-port', runtimePort));
+      }
+      setActiveSockets(Number(metricsData?.activeSockets) || 0);
+      const nextState = mapBridgeStatusToSocketUiState(
+        metricsData?.runtime?.ingestionBridgeStatus
+      );
+      setSocketStatus(nextState);
+      setBridgeError(String(metricsData?.runtime?.ingestionBridgeError || ''));
+    } catch {
+      setSocketStatus('offline');
+      setBridgeError('Unable to reach /api/metrics bridge probe');
     }
   }, []);
 
   useEffect(() => {
     setBaseUrl(window.location.origin);
-    const isLocalHost =
-      window.location.hostname === 'localhost' ||
-      window.location.hostname === '127.0.0.1' ||
-      window.location.port === '3000';
-    const socketProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const socketHost = isLocalHost
-      ? `${window.location.hostname}:${serverPort}`
-      : window.location.host;
-    setWebSocketUrl(`${socketProtocol}://${socketHost}`);
 
     Promise.all([
       fetch('/api/settings', { cache: 'no-store' }).then(async (response) => {
@@ -141,46 +152,58 @@ export function SettingsWorkspace() {
         return response.json();
       }),
       fetch('/api/metrics', { cache: 'no-store' })
-        .then(async (response) => (response.ok ? response.json() : null))
+        .then(async (response) => {
+          if (response.status === 401) {
+            window.location.assign('/vcon/login');
+            return null;
+          }
+          return response.ok ? response.json() : null;
+        })
         .catch(() => null),
     ])
       .then(([settingsData, storageData, metricsData]) => {
         if (!settingsData || !storageData) return;
-        const loadedPort = Number(
+        const runtimePort = Number(metricsData?.runtime?.serverPort);
+        const settingsPort = Number(
           (settingsData.settings as PublicSettings).serverPort ?? 4000
         );
+        const loadedPort =
+          Number.isFinite(runtimePort) && runtimePort > 0 ? runtimePort : settingsPort;
         const loaded: EditableSettings = {
           maxEventsPerSec: Number(
             settingsData.settings.maxEventsPerSec ??
-              DEFAULT_SETTINGS.maxEventsPerSec
+              DEFAULT_EDITABLE_SETTINGS.maxEventsPerSec
           ),
           maxPayloadSizeKb: Number(
             settingsData.settings.maxPayloadSizeKb ??
-              DEFAULT_SETTINGS.maxPayloadSizeKb
+              DEFAULT_EDITABLE_SETTINGS.maxPayloadSizeKb
           ),
           batchFlushThreshold: Number(
             settingsData.settings.batchFlushThreshold ??
-              DEFAULT_SETTINGS.batchFlushThreshold
+              DEFAULT_EDITABLE_SETTINGS.batchFlushThreshold
           ),
           batchFlushIntervalMs: Number(
             settingsData.settings.batchFlushIntervalMs ??
-              DEFAULT_SETTINGS.batchFlushIntervalMs
+              DEFAULT_EDITABLE_SETTINGS.batchFlushIntervalMs
           ),
           fileRotationMb: Number(
             settingsData.settings.fileRotationMb ??
-              DEFAULT_SETTINGS.fileRotationMb
+              DEFAULT_EDITABLE_SETTINGS.fileRotationMb
           ),
           enableIdempotency: Boolean(
             settingsData.settings.enableIdempotency ??
-              DEFAULT_SETTINGS.enableIdempotency
+              DEFAULT_EDITABLE_SETTINGS.enableIdempotency
           ),
           autoPruneDays: Number(
             settingsData.settings.autoPruneDays ??
-              DEFAULT_SETTINGS.autoPruneDays
+              DEFAULT_EDITABLE_SETTINGS.autoPruneDays
           ),
         };
-        setSettings(setCached('vcon:settings', loaded));
-        setSavedSettings(loaded);
+        const cachedLoaded = setCached('vcon:settings', loaded);
+        setSavedSettings(cachedLoaded);
+        setNumericDrafts(settingsToNumericDrafts(cachedLoaded));
+        setEnableIdempotency(cachedLoaded.enableIdempotency);
+        setFieldErrors({});
         setServerPort(setCached('vcon:server-port', loadedPort));
         setStoragePath(
           setCached(
@@ -188,69 +211,51 @@ export function SettingsWorkspace() {
             String(storageData.stats?.storageDirectory ?? '')
           )
         );
-        if (metricsData && typeof metricsData.activeSockets === 'number') {
-          setActiveSockets(metricsData.activeSockets);
-          if (metricsData.activeSockets > 0) {
-            setSocketStatus('online');
-          }
+        if (metricsData) {
+          setActiveSockets(Number(metricsData.activeSockets) || 0);
+          setSocketStatus(
+            mapBridgeStatusToSocketUiState(
+              metricsData.runtime?.ingestionBridgeStatus
+            )
+          );
+          setBridgeError(String(metricsData.runtime?.ingestionBridgeError || ''));
         }
         setCached('vcon:settings-loaded', true);
       })
       .catch(() => {
-        error('Settings load failed', 'Using default runtime settings.');
+        error('Settings load failed', 'Using last cached runtime settings.');
       })
       .finally(() => setLoading(false));
-  }, [error, serverPort]);
+  }, [error]);
 
   const isDirty = useMemo(
     () =>
       jwtSecret.trim().length > 0 ||
-      JSON.stringify(settings) !== JSON.stringify(savedSettings),
-    [jwtSecret, savedSettings, settings]
+      enableIdempotency !== savedSettings.enableIdempotency ||
+      NUMERIC_SETTING_KEYS.some(
+        (key) => numericDrafts[key].trim() !== String(savedSettings[key])
+      ),
+    [enableIdempotency, jwtSecret, numericDrafts, savedSettings]
   );
 
-  const updateNumber = (key: keyof EditableSettings, value: string) => {
-    setSettings((current) => ({ ...current, [key]: Number(value) || 0 }));
+  const updateNumberDraft = (key: NumericSettingKey, value: string) => {
+    setNumericDrafts((current) => ({
+      ...current,
+      [key]: value,
+    }));
+    const check = validateSingleNumericSetting(key, value);
+    setFieldErrors((current) => {
+      if (check.valid) {
+        if (!current[key]) return current;
+        const next = { ...current };
+        delete next[key];
+        return next;
+      }
+      return { ...current, [key]: check.error };
+    });
   };
 
-  const buildNormalizedSettings = (): EditableSettings => {
-    const parsedPrune = Number(settings.autoPruneDays);
-    return {
-      maxEventsPerSec: Math.max(
-        1,
-        Math.min(
-          10000,
-          settings.maxEventsPerSec || DEFAULT_SETTINGS.maxEventsPerSec
-        )
-      ),
-      maxPayloadSizeKb: Math.max(
-        1,
-        Math.min(
-          5120,
-          settings.maxPayloadSizeKb || DEFAULT_SETTINGS.maxPayloadSizeKb
-        )
-      ),
-      batchFlushThreshold: Math.max(
-        1,
-        settings.batchFlushThreshold || DEFAULT_SETTINGS.batchFlushThreshold
-      ),
-      batchFlushIntervalMs: Math.max(
-        100,
-        settings.batchFlushIntervalMs || DEFAULT_SETTINGS.batchFlushIntervalMs
-      ),
-      fileRotationMb: Math.max(
-        1,
-        settings.fileRotationMb || DEFAULT_SETTINGS.fileRotationMb
-      ),
-      enableIdempotency: settings.enableIdempotency,
-      autoPruneDays: Number.isFinite(parsedPrune)
-        ? Math.max(0, Math.min(365, Math.floor(parsedPrune)))
-        : DEFAULT_SETTINGS.autoPruneDays,
-    };
-  };
-
-  const executeSave = async () => {
-    const normalized = buildNormalizedSettings();
+  const executeSave = async (validated: EditableSettings) => {
     const trimmedSecret = jwtSecret.trim();
     setConfirmRotateOpen(false);
     setSaving(true);
@@ -259,7 +264,7 @@ export function SettingsWorkspace() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ...normalized,
+          ...validated,
           ...(trimmedSecret ? { jwtSecret: trimmedSecret } : {}),
         }),
       });
@@ -269,16 +274,36 @@ export function SettingsWorkspace() {
       }
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Settings update failed');
-      setSettings(setCached('vcon:settings', normalized));
-      setSavedSettings(normalized);
+      const synced = normalizeEditableSettings(data.settings ?? validated);
+      setCached('vcon:settings', synced);
+      setSavedSettings(synced);
+      setNumericDrafts(settingsToNumericDrafts(synced));
+      setEnableIdempotency(synced.enableIdempotency);
+      setFieldErrors({});
       setJwtSecret('');
       setJwtError('');
-      success(
-        'Settings saved',
-        trimmedSecret
-          ? 'Runtime settings saved and client JWT credentials rotated.'
-          : 'Runtime settings updated.'
-      );
+
+      const bridgeSummary = describeSettingsBridgeSync(data.bridgeSync);
+      if (bridgeSummary.level === 'error') {
+        setSocketStatus('auth_error');
+        setBridgeError(bridgeSummary.message || '');
+        error(bridgeSummary.title, bridgeSummary.message);
+      } else if (bridgeSummary.level === 'warning') {
+        setSocketStatus('offline');
+        setBridgeError(bridgeSummary.message || '');
+        warning(bridgeSummary.title, bridgeSummary.message);
+      } else {
+        if (Boolean(data.bridgeSync?.ok ?? data.bridgeSync?.synced)) {
+          setSocketStatus('online');
+          setBridgeError('');
+        }
+        success(
+          'Settings saved',
+          trimmedSecret
+            ? 'Runtime settings saved and client JWT credentials rotated.'
+            : 'Runtime settings updated across Web & Ingestion.'
+        );
+      }
     } catch (saveError) {
       error(
         'Save failed',
@@ -293,6 +318,24 @@ export function SettingsWorkspace() {
 
   const handleFormSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    const validation = validateEditableSettingsDraft(
+      numericDrafts,
+      enableIdempotency
+    );
+    if (!validation.valid || !validation.values) {
+      setFieldErrors(validation.errors);
+      if (validation.firstInvalidKey) {
+        setActiveTab(FIELD_TO_TAB[validation.firstInvalidKey]);
+      }
+      const firstMessage =
+        (validation.firstInvalidKey &&
+          validation.errors[validation.firstInvalidKey]) ||
+        'Review highlighted numeric settings before saving.';
+      error('Invalid setting value', firstMessage);
+      return;
+    }
+
+    setFieldErrors({});
     const trimmedSecret = jwtSecret.trim();
     if (trimmedSecret.length > 0 && trimmedSecret.length < 32) {
       const message = 'JWT secret must be at least 32 characters.';
@@ -308,30 +351,57 @@ export function SettingsWorkspace() {
       return;
     }
 
-    await executeSave();
+    await executeSave(validation.values);
+  };
+
+  const handleConfirmedRotateSave = async () => {
+    const validation = validateEditableSettingsDraft(
+      numericDrafts,
+      enableIdempotency
+    );
+    if (!validation.valid || !validation.values) {
+      setConfirmRotateOpen(false);
+      setFieldErrors(validation.errors);
+      if (validation.firstInvalidKey) {
+        setActiveTab(FIELD_TO_TAB[validation.firstInvalidKey]);
+      }
+      return;
+    }
+    await executeSave(validation.values);
   };
 
   const discardChanges = () => {
-    setSettings(savedSettings);
+    setNumericDrafts(settingsToNumericDrafts(savedSettings));
+    setEnableIdempotency(savedSettings.enableIdempotency);
+    setFieldErrors({});
     setJwtSecret('');
     setJwtError('');
   };
+
+  const rateLimitStat = numericDrafts.maxEventsPerSec.trim() || '—';
+  const flushThresholdStat = numericDrafts.batchFlushThreshold.trim() || '—';
+  const flushIntervalStat = numericDrafts.batchFlushIntervalMs.trim() || '—';
+  const rotationStat = numericDrafts.fileRotationMb.trim() || '—';
+  const pruneStat =
+    numericDrafts.autoPruneDays.trim() === '0'
+      ? 'Keep all'
+      : numericDrafts.autoPruneDays.trim()
+        ? `${numericDrafts.autoPruneDays.trim()}d`
+        : '—';
 
   return (
     <PageShell title="Settings">
       <StatStrip
         items={[
           { label: 'Instance', value: 'DataStack', dot: 'ok' },
-          { label: 'Rate limit', value: `${settings.maxEventsPerSec} / sec` },
+          { label: 'Rate limit', value: `${rateLimitStat} / sec` },
           {
             label: 'Batch flush',
-            value: `${settings.batchFlushThreshold} / ${settings.batchFlushIntervalMs}ms`,
+            value: `${flushThresholdStat} / ${flushIntervalStat}ms`,
           },
           {
             label: 'CSV rotation',
-            value: `${settings.fileRotationMb}MB · ${
-              settings.autoPruneDays === 0 ? 'Keep all' : `${settings.autoPruneDays}d`
-            }`,
+            value: `${rotationStat}MB · ${pruneStat}`,
           },
         ]}
       />
@@ -343,7 +413,7 @@ export function SettingsWorkspace() {
           onChange={(tab) => setActiveTab(tab as TabId)}
         />
 
-        <form onSubmit={handleFormSubmit} className="w-full">
+        <form onSubmit={handleFormSubmit} noValidate className="w-full">
           <SettingsPanel
             id={`settings-panel-${activeTab}`}
             role="tabpanel"
@@ -374,24 +444,20 @@ export function SettingsWorkspace() {
                     <Input
                       compact
                       type="number"
-                      min="1"
-                      max="10000"
-                      value={settings.maxEventsPerSec}
+                      min={SETTINGS_LIMITS.maxEventsPerSec.min}
+                      max={SETTINGS_LIMITS.maxEventsPerSec.max}
+                      value={numericDrafts.maxEventsPerSec}
+                      error={fieldErrors.maxEventsPerSec}
                       onChange={(event) =>
-                        updateNumber('maxEventsPerSec', event.target.value)
+                        updateNumberDraft('maxEventsPerSec', event.target.value)
                       }
                     />
                   </SettingsField>
                   <SettingsField label="Idempotency">
                     <FormSwitch
                       label="Deduplicate events"
-                      checked={settings.enableIdempotency}
-                      onChange={(enableIdempotency) =>
-                        setSettings((current) => ({
-                          ...current,
-                          enableIdempotency,
-                        }))
-                      }
+                      checked={enableIdempotency}
+                      onChange={setEnableIdempotency}
                     />
                   </SettingsField>
                 </SettingsGroup>
@@ -403,7 +469,10 @@ export function SettingsWorkspace() {
                 <SettingsGroup title="WebSocket server">
                   <SettingsField label="Live health">
                     <div className="flex items-center justify-between gap-2 border border-[var(--border)] bg-[var(--surface-2)] px-2.5 py-1.5">
-                      <span className="inline-flex items-center gap-1.5 font-mono text-[11.5px] text-[var(--text)]">
+                      <span
+                        className="inline-flex items-center gap-1.5 font-mono text-[11.5px] text-[var(--text)]"
+                        title={bridgeError || undefined}
+                      >
                         <span
                           aria-hidden="true"
                           className={`h-1.5 w-1.5 ${
@@ -411,7 +480,7 @@ export function SettingsWorkspace() {
                               ? 'bg-[var(--accent)]'
                               : socketStatus === 'checking'
                                 ? 'bg-[var(--warning)]'
-                                : socketStatus === 'offline'
+                                : socketStatus === 'auth_error' || socketStatus === 'offline'
                                   ? 'bg-[var(--danger)]'
                                   : 'bg-[var(--text-faint)]'
                           }`}
@@ -419,17 +488,19 @@ export function SettingsWorkspace() {
                         {socketStatus === 'online'
                           ? `Online (Port ${serverPort} · ${activeSockets} active)`
                           : socketStatus === 'checking'
-                            ? 'Probing ingestion server...'
-                            : socketStatus === 'offline'
-                              ? `Offline (Port ${serverPort} unreachable)`
-                              : `Port ${serverPort} · ${activeSockets} active socket(s)`}
+                            ? 'Probing ingestion bridge...'
+                            : socketStatus === 'auth_error'
+                              ? `Bridge Auth Error (Port ${serverPort})`
+                              : socketStatus === 'offline'
+                                ? `Offline (Port ${serverPort} unreachable)`
+                                : `Port ${serverPort} · ${activeSockets} active socket(s)`}
                       </span>
                       <Button
                         type="button"
                         size="xs"
                         variant="ghost"
                         icon="RefreshCw"
-                        onClick={() => void probeSocketServer(serverPort)}
+                        onClick={() => void probeSocketServer()}
                       >
                         Probe
                       </Button>
@@ -443,14 +514,18 @@ export function SettingsWorkspace() {
                       className="border-[var(--border)] bg-[var(--surface-2)] font-mono text-[11px] text-[var(--text-muted)]"
                     />
                   </SettingsField>
-                  <SettingsField label="Socket port">
-                    <Input
-                      compact
-                      type="number"
-                      value={serverPort}
-                      readOnly
-                      className="border-[var(--border)] bg-[var(--surface-2)] font-mono text-[var(--text-muted)]"
-                    />
+                  <SettingsField label="Socket port (PORT_SOCKET)">
+                    <div className="flex flex-col gap-1">
+                      <Input
+                        compact
+                        value={String(serverPort)}
+                        readOnly
+                        className="border-[var(--border)] bg-[var(--surface-2)] font-mono text-[11px] text-[var(--text-muted)]"
+                      />
+                      <span className="text-[10.5px] text-[var(--text-faint)]">
+                        Read-only runtime port managed via PORT_SOCKET environment variable.
+                      </span>
+                    </div>
                   </SettingsField>
                 </SettingsGroup>
                 <SettingsGroup title="Event buffer">
@@ -458,10 +533,12 @@ export function SettingsWorkspace() {
                     <Input
                       compact
                       type="number"
-                      min="1"
-                      value={settings.batchFlushThreshold}
+                      min={SETTINGS_LIMITS.batchFlushThreshold.min}
+                      max={SETTINGS_LIMITS.batchFlushThreshold.max}
+                      value={numericDrafts.batchFlushThreshold}
+                      error={fieldErrors.batchFlushThreshold}
                       onChange={(event) =>
-                        updateNumber('batchFlushThreshold', event.target.value)
+                        updateNumberDraft('batchFlushThreshold', event.target.value)
                       }
                     />
                   </SettingsField>
@@ -469,11 +546,13 @@ export function SettingsWorkspace() {
                     <Input
                       compact
                       type="number"
-                      min="100"
+                      min={SETTINGS_LIMITS.batchFlushIntervalMs.min}
+                      max={SETTINGS_LIMITS.batchFlushIntervalMs.max}
                       suffix="ms"
-                      value={settings.batchFlushIntervalMs}
+                      value={numericDrafts.batchFlushIntervalMs}
+                      error={fieldErrors.batchFlushIntervalMs}
                       onChange={(event) =>
-                        updateNumber('batchFlushIntervalMs', event.target.value)
+                        updateNumberDraft('batchFlushIntervalMs', event.target.value)
                       }
                       className="font-mono"
                     />
@@ -497,11 +576,13 @@ export function SettingsWorkspace() {
                     <Input
                       compact
                       type="number"
-                      min="1"
+                      min={SETTINGS_LIMITS.fileRotationMb.min}
+                      max={SETTINGS_LIMITS.fileRotationMb.max}
                       suffix="MB"
-                      value={settings.fileRotationMb}
+                      value={numericDrafts.fileRotationMb}
+                      error={fieldErrors.fileRotationMb}
                       onChange={(event) =>
-                        updateNumber('fileRotationMb', event.target.value)
+                        updateNumberDraft('fileRotationMb', event.target.value)
                       }
                       className="font-mono"
                     />
@@ -510,12 +591,13 @@ export function SettingsWorkspace() {
                     <Input
                       compact
                       type="number"
-                      min="0"
-                      max="365"
+                      min={SETTINGS_LIMITS.autoPruneDays.min}
+                      max={SETTINGS_LIMITS.autoPruneDays.max}
                       suffix="days"
-                      value={settings.autoPruneDays}
+                      value={numericDrafts.autoPruneDays}
+                      error={fieldErrors.autoPruneDays}
                       onChange={(event) =>
-                        updateNumber('autoPruneDays', event.target.value)
+                        updateNumberDraft('autoPruneDays', event.target.value)
                       }
                       className="font-mono"
                     />
@@ -557,12 +639,13 @@ export function SettingsWorkspace() {
                   <Input
                     compact
                     type="number"
-                    min="1"
-                    max="5120"
+                    min={SETTINGS_LIMITS.maxPayloadSizeKb.min}
+                    max={SETTINGS_LIMITS.maxPayloadSizeKb.max}
                     suffix="KB"
-                    value={settings.maxPayloadSizeKb}
+                    value={numericDrafts.maxPayloadSizeKb}
+                    error={fieldErrors.maxPayloadSizeKb}
                     onChange={(event) =>
-                      updateNumber('maxPayloadSizeKb', event.target.value)
+                      updateNumberDraft('maxPayloadSizeKb', event.target.value)
                     }
                     className="font-mono"
                   />
@@ -628,7 +711,7 @@ export function SettingsWorkspace() {
               variant="danger"
               size="xs"
               loading={saving}
-              onClick={() => void executeSave()}
+              onClick={() => void handleConfirmedRotateSave()}
             >
               Rotate & Save
             </Button>

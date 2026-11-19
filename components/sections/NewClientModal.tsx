@@ -30,14 +30,22 @@ export function NewClientModal({ open, onClose, onCreated }: NewClientModalProps
       error('Validation error', 'Client ID and Name are required.');
       return;
     }
-    const clampedRateLimit = Math.max(1, Math.min(5000, Number(rateLimit) || 100));
+    const numericRate = Number(rateLimit);
+    if (!Number.isInteger(numericRate) || numericRate < 1 || numericRate > 100000) {
+      error('Validation error', 'Rate limit must be an integer between 1 and 100,000 events/s.');
+      return;
+    }
     setSubmitting(true);
     try {
       const response = await fetch('/api/clients', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clientId: trimmedId, name: trimmedName, rateLimit: clampedRateLimit }),
+        body: JSON.stringify({ clientId: trimmedId, name: trimmedName, rateLimit: numericRate }),
       });
+      if (response.status === 401) {
+        window.location.assign('/vcon/login');
+        return;
+      }
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Client registration failed');
 
@@ -91,7 +99,7 @@ export function NewClientModal({ open, onClose, onCreated }: NewClientModalProps
             label="Rate limit (req/s)"
             type="number"
             min="1"
-            max="5000"
+            max="100000"
             value={rateLimit}
             onChange={(event) => setRateLimit(event.target.value)}
           />

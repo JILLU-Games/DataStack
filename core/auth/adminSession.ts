@@ -113,11 +113,8 @@ export function getSessionCookieOptions(request: Request, maxAge: number) {
     ?.split(",")[0]
     ?.trim()
     .toLowerCase();
-  const originHeader = request.headers.get("origin")?.toLowerCase() ?? "";
   const isHttps =
-    forwardedProto === "https" ||
-    originHeader.startsWith("https://") ||
-    request.url.startsWith("https://");
+    forwardedProto === "https" || request.url.startsWith("https://");
 
   if (isHttps) {
     return {

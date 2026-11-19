@@ -1,8 +1,30 @@
+const crypto = require("node:crypto");
 const jwt = require("jsonwebtoken");
 
 const IDEMPOTENCY_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const IDEMPOTENCY_MAX_ENTRIES = 20000;
 const CLEANUP_INTERVAL_MS = 60 * 1000;
+const REDIS_IDEMPOTENCY_PREFIX = "datastack:idem:";
+const REDIS_RATE_LIMIT_PREFIX = "datastack:rl:";
+const REDIS_RATE_LIMIT_LUA_SCRIPT = [
+  "-- DATASTACK_RATE_LIMIT_INCR",
+  'local c = redis.call("INCR", KEYS[1])',
+  'if c == 1 or redis.call("PTTL", KEYS[1]) < 0 then',
+  '  redis.call("PEXPIRE", KEYS[1], tonumber(ARGV[1]))',
+  "end",
+  "return c",
+].join("\n");
+
+function generateFallbackEventId() {
+  return `evt_${Date.now()}_${crypto.randomBytes(6).toString("hex")}`;
+}
+
+function normalizeClientId(clientId) {
+  return String(clientId || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "_");
+}
 
 function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
   const getRuntimeConfig =
@@ -36,6 +58,11 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
       ? options.onBufferPush
       : () => undefined;
 
+  const getRedisClient =
+    typeof options.getRedisClient === "function"
+      ? options.getRedisClient
+      : () => null;
+
   const idempotencyMap = new Map();
   const rateLimitMap = new Map();
   let lastCleanupAt = Date.now();
@@ -63,6 +90,25 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
     }
   }
 
+  function trackLocalRateWindow(clientId, now) {
+    const rl = rateLimitMap.get(clientId);
+    if (!rl || now - rl.start >= 1000) {
+      rateLimitMap.set(clientId, { count: 1, start: now });
+    } else {
+      rl.count += 1;
+    }
+  }
+
+  function supportsSharedSecurityRedis(redis) {
+    return Boolean(
+      redis &&
+        typeof redis.get === "function" &&
+        typeof redis.incr === "function" &&
+        typeof redis.pexpire === "function" &&
+        typeof redis.set === "function",
+    );
+  }
+
   function getSecurityStats() {
     cleanupMaps(Date.now(), true);
     const config = getRuntimeConfig();
@@ -73,7 +119,13 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
     };
   }
 
-  function validateSingleEvent(clientId, eventId, rawData, clientRateLimit) {
+  function validateSingleEventLocal(
+    clientId,
+    eventId,
+    rawData,
+    clientRateLimit,
+    explicitByteLength,
+  ) {
     const config = getRuntimeConfig();
     const now = Date.now();
     cleanupMaps(now);
@@ -93,9 +145,19 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
     }
 
     // 2. Payload byte size check (before consuming rate-limit quota)
-    const payloadStr =
-      typeof rawData === "string" ? rawData : JSON.stringify(rawData ?? {});
-    const byteLength = Buffer.byteLength(payloadStr, "utf8");
+    let payloadStr = "";
+    let byteLength = 0;
+    if (
+      typeof explicitByteLength === "number" &&
+      Number.isFinite(explicitByteLength) &&
+      explicitByteLength >= 0
+    ) {
+      byteLength = explicitByteLength;
+    } else {
+      payloadStr =
+        typeof rawData === "string" ? rawData : JSON.stringify(rawData ?? {});
+      byteLength = Buffer.byteLength(payloadStr, "utf8");
+    }
     const maxBytes = Number(config.maxPayloadSizeBytes) || 100 * 1024;
     if (byteLength > maxBytes) {
       return {
@@ -133,6 +195,126 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
     return { allowed: true, payloadStr };
   }
 
+  async function validateSingleEventAsync(
+    clientId,
+    eventId,
+    rawData,
+    clientRateLimit,
+  ) {
+    const redis = getRedisClient();
+    if (!supportsSharedSecurityRedis(redis)) {
+      return validateSingleEventLocal(
+        clientId,
+        eventId,
+        rawData,
+        clientRateLimit,
+      );
+    }
+
+    const config = getRuntimeConfig();
+    const now = Date.now();
+    cleanupMaps(now);
+    const idempotencyKey = `${clientId}:${eventId}`;
+    const redisIdemKey = `${REDIS_IDEMPOTENCY_PREFIX}${clientId}:${eventId}`;
+
+    try {
+      // 1. Read-only idempotency check
+      if (config.enableIdempotency && eventId) {
+        const localTime = idempotencyMap.get(idempotencyKey);
+        if (localTime && now - localTime < IDEMPOTENCY_TTL_MS) {
+          return {
+            allowed: false,
+            duplicate: true,
+            code: "DUPLICATE_EVENT",
+            reason: "Duplicate event dropped",
+          };
+        }
+        const existing = await redis.get(redisIdemKey);
+        if (existing !== null) {
+          idempotencyMap.set(idempotencyKey, now);
+          return {
+            allowed: false,
+            duplicate: true,
+            code: "DUPLICATE_EVENT",
+            reason: "Duplicate event dropped",
+          };
+        }
+      }
+
+      // 2. Payload byte size check
+      const payloadStr =
+        typeof rawData === "string" ? rawData : JSON.stringify(rawData ?? {});
+      const byteLength = Buffer.byteLength(payloadStr, "utf8");
+      const maxBytes = Number(config.maxPayloadSizeBytes) || 100 * 1024;
+      if (byteLength > maxBytes) {
+        return {
+          allowed: false,
+          duplicate: false,
+          code: "PAYLOAD_TOO_LARGE",
+          reason: `PAYLOAD_TOO_LARGE: Payload (${(byteLength / 1024).toFixed(1)} KB) exceeds limit of ${(maxBytes / 1024).toFixed(0)} KB`,
+        };
+      }
+
+      // 3. Shared atomic Redis rate limit check (single Lua round-trip)
+      const effectiveLimit = Math.min(
+        Number(clientRateLimit) || 100,
+        Number(config.maxEventsPerSec) || 100,
+      );
+      const windowBucket = Math.floor(now / 1000);
+      const rlKey = `${REDIS_RATE_LIMIT_PREFIX}${clientId}:${windowBucket}`;
+      let count;
+      if (typeof redis.eval === "function") {
+        count = Number(
+          await redis.eval(REDIS_RATE_LIMIT_LUA_SCRIPT, 1, rlKey, "2000"),
+        );
+      } else {
+        count = Number(await redis.incr(rlKey));
+        if (count === 1) {
+          await redis.pexpire(rlKey, 2000);
+        }
+      }
+      trackLocalRateWindow(clientId, now);
+
+      if (count > effectiveLimit) {
+        return {
+          allowed: false,
+          duplicate: false,
+          code: "RATE_LIMIT_EXCEEDED",
+          reason: `RATE_LIMIT_EXCEEDED: Limit of ${effectiveLimit} events/sec exceeded`,
+        };
+      }
+
+      // 4. Atomic claim of idempotency key after all checks succeed
+      if (config.enableIdempotency && eventId) {
+        const claimed = await redis.set(
+          redisIdemKey,
+          "1",
+          "PX",
+          IDEMPOTENCY_TTL_MS,
+          "NX",
+        );
+        idempotencyMap.set(idempotencyKey, now);
+        if (claimed !== "OK") {
+          return {
+            allowed: false,
+            duplicate: true,
+            code: "DUPLICATE_EVENT",
+            reason: "Duplicate event dropped",
+          };
+        }
+      }
+
+      return { allowed: true, payloadStr };
+    } catch {
+      return validateSingleEventLocal(
+        clientId,
+        eventId,
+        rawData,
+        clientRateLimit,
+      );
+    }
+  }
+
   // Middleware: Handshake Auth
   io.use(async (socket, next) => {
     const authHeader =
@@ -157,9 +339,7 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
       }
       const decoded = jwt.verify(cleanToken, config.jwtSecret);
 
-      const normalizedClientId = String(decoded.clientId || "")
-        .trim()
-        .toLowerCase();
+      const normalizedClientId = normalizeClientId(decoded.clientId);
       const dbCheck = await verifyClientInDb(
         normalizedClientId,
         cleanToken,
@@ -181,18 +361,37 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
 
   const ENVELOPE_KEYS = new Set(["eventId", "timestamp", "data", "clientId"]);
   function extractBatchItemData(safeItem) {
+    return extractSingleEventData(safeItem);
+  }
+
+  function extractSingleEventData(rawPayload) {
     if (
-      safeItem &&
-      typeof safeItem === "object" &&
-      !Array.isArray(safeItem) &&
-      safeItem.data !== undefined
+      rawPayload === null ||
+      rawPayload === undefined ||
+      typeof rawPayload !== "object" ||
+      Array.isArray(rawPayload)
     ) {
-      const keys = Object.keys(safeItem);
-      if (keys.every((k) => ENVELOPE_KEYS.has(k))) {
-        return safeItem.data;
-      }
+      return rawPayload === undefined ? {} : rawPayload;
     }
-    return safeItem;
+
+    if (rawPayload.data !== undefined) {
+      const keys = Object.keys(rawPayload);
+      if (keys.every((k) => ENVELOPE_KEYS.has(k))) {
+        return rawPayload.data;
+      }
+      return rawPayload;
+    }
+
+    const stripped = {};
+    let hasNonEnvelopeKey = false;
+    for (const [k, v] of Object.entries(rawPayload)) {
+      if (k === "eventId" || k === "timestamp" || k === "clientId") {
+        continue;
+      }
+      hasNonEnvelopeKey = true;
+      stripped[k] = v;
+    }
+    return hasNonEnvelopeKey ? stripped : {};
   }
 
   io.on("connection", (socket) => {
@@ -221,16 +420,25 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
 
         const effectiveClientRate =
           dbCheck.rateLimit || socket.data.rateLimit || 100;
-        const safePayload = payload && typeof payload === "object" ? payload : {};
+        const safePayload =
+          payload && typeof payload === "object" && !Array.isArray(payload)
+            ? payload
+            : {};
         const eventId =
-          safePayload.eventId ||
-          `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-        const timestamp = safePayload.timestamp || new Date().toISOString();
+          typeof safePayload.eventId === "string" && safePayload.eventId.trim()
+            ? safePayload.eventId.trim()
+            : generateFallbackEventId();
+        const timestamp =
+          typeof safePayload.timestamp === "string" &&
+          safePayload.timestamp.trim()
+            ? safePayload.timestamp.trim()
+            : new Date().toISOString();
+        const eventData = extractSingleEventData(payload);
 
-        const check = validateSingleEvent(
+        const check = await validateSingleEventAsync(
           clientId,
           eventId,
-          safePayload.data,
+          eventData,
           effectiveClientRate,
         );
         if (!check.allowed) {
@@ -260,7 +468,22 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
 
         bufferQueue.push(event);
         recordClientActivity(clientId, 1);
-        onBufferPush();
+        try {
+          await onBufferPush();
+        } catch (persistErr) {
+          if (callback) {
+            callback({
+              success: false,
+              eventId,
+              code: "BUFFER_PERSIST_FAILED",
+              error:
+                persistErr instanceof Error
+                  ? persistErr.message
+                  : "Failed to persist event to buffer",
+            });
+          }
+          return;
+        }
 
         if (callback) callback({ success: true, eventId });
       } catch (err) {
@@ -309,12 +532,16 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
         for (const item of batch) {
           const safeItem = item && typeof item === "object" ? item : {};
           const eventId =
-            safeItem.eventId ||
-            `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-          const timestamp = safeItem.timestamp || new Date().toISOString();
+            typeof safeItem.eventId === "string" && safeItem.eventId.trim()
+              ? safeItem.eventId.trim()
+              : generateFallbackEventId();
+          const timestamp =
+            typeof safeItem.timestamp === "string" && safeItem.timestamp.trim()
+              ? safeItem.timestamp.trim()
+              : new Date().toISOString();
           const rawData = extractBatchItemData(safeItem);
 
-          const check = validateSingleEvent(
+          const check = await validateSingleEventAsync(
             clientId,
             eventId,
             rawData,
@@ -351,7 +578,24 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
 
         if (processed > 0) {
           recordClientActivity(clientId, processed);
-          onBufferPush();
+          try {
+            await onBufferPush();
+          } catch (persistErr) {
+            if (callback) {
+              callback({
+                success: false,
+                processed: 0,
+                rejected: batch.length,
+                duplicates,
+                code: "BUFFER_PERSIST_FAILED",
+                error:
+                  persistErr instanceof Error
+                    ? persistErr.message
+                    : "Failed to persist batch to buffer",
+              });
+            }
+            return;
+          }
         }
 
         if (processed === 0 && duplicates === 0 && rejected > 0) {
@@ -443,7 +687,8 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
 
   return {
     getSecurityStats,
+    validateSingleEventLocal,
   };
 }
 
-module.exports = { setupSocketHandlers };
+module.exports = { setupSocketHandlers, normalizeClientId };

@@ -26,9 +26,10 @@ setup(
     license="MIT",
     packages=find_packages(),
     install_requires=[
-        "python-socketio[client]>=5.11.0",
-        "requests>=2.31.0",
-        "websocket-client>=1.7.0",
+        "datastack>=2.2.0",
+        "python-socketio[client]>=5.8.0",
+        "requests>=2.28.0",
+        "websocket-client>=1.5.0",
     ],
     classifiers=[
         "Development Status :: 5 - Production/Stable",
@@ -44,6 +45,7 @@ setup(
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
     ],

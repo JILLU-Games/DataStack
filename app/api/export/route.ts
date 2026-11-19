@@ -1,10 +1,12 @@
 import { SettingsManager } from "@/core/adminSettings/settingsManager";
 import { DataBufferEngine } from "@/core/data/buffer";
+import { SDKManager } from "@/core/sdk/sdkManager";
 import { getInternalIngestionHeaders } from "@/core/Security/security";
 import {
   CSVStorageManager,
   type StorageFileMeta,
 } from "@/core/Storage/csvStorage";
+import { requireAdminApiSession } from "@/lib/adminAuth";
 import { parse } from "csv-parse";
 import { NextRequest, NextResponse } from "next/server";
 import { createReadStream } from "node:fs";
@@ -44,7 +46,8 @@ function toByteStream(chunks: AsyncIterable<StreamChunk>) {
 async function* readFileRecords(
   file: StorageFileMeta,
 ): AsyncGenerator<CsvRecord> {
-  const parser = createReadStream(file.filePath).pipe(
+  const fileStream = createReadStream(file.filePath);
+  const parser = fileStream.pipe(
     parse({ columns: true, skip_empty_lines: true, bom: true }),
   );
 
@@ -52,8 +55,9 @@ async function* readFileRecords(
     for await (const record of parser as AsyncIterable<CsvRecord>) {
       yield record;
     }
-  } catch {
-    parser.destroy();
+  } finally {
+    if (!parser.destroyed) parser.destroy();
+    if (!fileStream.destroyed) fileStream.destroy();
   }
 }
 
@@ -85,7 +89,7 @@ function makeExportStream(
           yield `${isFirst ? "" : ","}${JSON.stringify({ ...record, payload: parsedPayload })}`;
         } else {
           const line = fields
-            .map((field) => `"${(record[field] ?? "").replaceAll('"', '""')}"`)
+            .map((field) => `"${String(record[field] ?? "").replaceAll('"', '""')}"`)
             .join(",");
           yield `${line}\n`;
         }
@@ -101,8 +105,13 @@ function makeExportStream(
 
 function streamFile(file: StorageFileMeta) {
   async function* chunks() {
-    for await (const chunk of createReadStream(file.filePath)) {
-      yield new Uint8Array(chunk);
+    const fileStream = createReadStream(file.filePath);
+    try {
+      for await (const chunk of fileStream) {
+        yield new Uint8Array(chunk as Buffer);
+      }
+    } finally {
+      if (!fileStream.destroyed) fileStream.destroy();
     }
   }
 
@@ -110,38 +119,122 @@ function streamFile(file: StorageFileMeta) {
 }
 
 export async function GET(request: NextRequest) {
+  const auth = await requireAdminApiSession(request);
+  if (!auth.valid) {
+    return auth.response;
+  }
+
   try {
     const { searchParams } = new URL(request.url);
+    const from = (searchParams.get("from") || "").trim();
+    const to = (searchParams.get("to") || "").trim();
+    if (from && to && from > to) {
+      return NextResponse.json(
+        {
+          error: 'Start date ("from") must be on or before end date ("to").',
+          code: "INVALID_DATE_RANGE",
+        },
+        { status: 400 },
+      );
+    }
     const shouldFlush = searchParams.get("flush") !== "false";
 
     await SettingsManager.getSettingsAsync();
     if (shouldFlush) {
-      await DataBufferEngine.flush();
+      try {
+        await DataBufferEngine.flush({ waitMs: 2500, throwOnLockTimeout: true });
+      } catch (err: unknown) {
+        const message =
+          err instanceof Error ? err.message : "Pre-export flush failed";
+        if (message.includes("FLUSH_LOCK_TIMEOUT")) {
+          return NextResponse.json(
+            {
+              error: message,
+              code: "FLUSH_LOCK_TIMEOUT",
+            },
+            { status: 503 },
+          );
+        }
+        throw err;
+      }
+
+      const explicitIngestionUrl = Boolean(process.env.INGESTION_INTERNAL_URL?.trim());
       const ingestionBaseUrl = (
         process.env.INGESTION_INTERNAL_URL || "http://127.0.0.1:4000"
       ).replace(/\/$/, "");
       try {
-        await fetch(`${ingestionBaseUrl}/internal/flush`, {
+        const flushRes = await fetch(`${ingestionBaseUrl}/internal/flush`, {
           method: "POST",
-          headers: getInternalIngestionHeaders(),
-          signal: AbortSignal.timeout(1500),
+          headers: {
+            "Content-Type": "application/json",
+            ...getInternalIngestionHeaders(),
+          },
+          body: JSON.stringify({ waitMs: 2500, throwOnLockTimeout: true }),
+          cache: "no-store",
+          signal: AbortSignal.timeout(4000),
         });
-      } catch {
+        if (!flushRes.ok) {
+          const errPayload = await flushRes.json().catch(() => ({}));
+          const remoteErr =
+            typeof errPayload?.error === "string"
+              ? errPayload.error
+              : `Ingestion flush returned HTTP ${flushRes.status}`;
+          if (
+            flushRes.status === 503 &&
+            errPayload?.code === "FLUSH_LOCK_TIMEOUT"
+          ) {
+            return NextResponse.json(
+              {
+                error: remoteErr,
+                code: "FLUSH_LOCK_TIMEOUT",
+                ingestionStatus: flushRes.status,
+              },
+              { status: 503 },
+            );
+          }
+          return NextResponse.json(
+            {
+              error: remoteErr,
+              code: "INGESTION_FLUSH_FAILED",
+              ingestionStatus: flushRes.status,
+            },
+            { status: 502 },
+          );
+        }
+      } catch (err: unknown) {
+        if (explicitIngestionUrl) {
+          const errMsg =
+            err instanceof Error ? err.message : "Ingestion server unreachable";
+          return NextResponse.json(
+            {
+              error: `Ingestion server flush failed before export: ${errMsg}`,
+              code: "INGESTION_UNREACHABLE",
+            },
+            { status: 502 },
+          );
+        }
         // Port 4000 may not be running in isolated single-process dev mode
       }
     }
 
-    const clientId = searchParams.get("clientId") || "all";
+    const rawClientId = searchParams.get("clientId") || "all";
+    const clientId =
+      rawClientId === "all"
+        ? "all"
+        : SDKManager.normalizeClientId(rawClientId) || "all";
+    const sanitizedClientId =
+      clientId === "all" ? "all" : CSVStorageManager.sanitizeClientId(clientId);
     const filename = searchParams.get("filename");
-    const from = searchParams.get("from") || "";
-    const to = searchParams.get("to") || "";
-    const format: ExportFormat =
-      searchParams.get("format") === "json" ? "json" : "csv";
+    const rawFormat = searchParams.get("format");
+    const format: ExportFormat = rawFormat === "json" ? "json" : "csv";
     const includeHeader = searchParams.get("includeHeader") !== "false";
 
     let files = await CSVStorageManager.listAllFilesAsync();
-    if (clientId !== "all")
-      files = files.filter((file) => file.clientId === clientId);
+    if (clientId !== "all") {
+      files = files.filter(
+        (file) => file.clientId === clientId || file.clientId === sanitizedClientId,
+      );
+    }
 
     if (filename) {
       const safeFilename = path.basename(filename);
@@ -166,11 +259,23 @@ export async function GET(request: NextRequest) {
         );
       }
       const file = matches[0];
-      return new NextResponse(streamFile(file), {
+      const downloadName =
+        format === "json"
+          ? `${file.filename.replace(/\.csv$/i, "")}.json`
+          : file.filename;
+      const bodyStream =
+        format === "json" || !includeHeader
+          ? makeExportStream([file], format, includeHeader)
+          : streamFile(file);
+      return new NextResponse(bodyStream, {
         status: 200,
         headers: {
-          "Content-Type": "text/csv; charset=utf-8",
-          "Content-Disposition": `attachment; filename="${file.filename}"`,
+          "Content-Type":
+            format === "json"
+              ? "application/json; charset=utf-8"
+              : "text/csv; charset=utf-8",
+          "Content-Disposition": `attachment; filename="${downloadName.replace(/"/g, "")}"`,
+          "Cache-Control": "no-store",
         },
       });
     }
@@ -179,7 +284,7 @@ export async function GET(request: NextRequest) {
       (file) => (!from || file.date >= from) && (!to || file.date <= to),
     );
     const datePart = new Date().toISOString().slice(0, 10);
-    const safeClientId = clientId.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const safeClientId = sanitizedClientId === "all" ? "all" : sanitizedClientId;
     const baseName =
       clientId === "all" ? "datastack_export" : `${safeClientId}_export`;
 

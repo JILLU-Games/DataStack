@@ -5,21 +5,68 @@ const cors = require('cors');
 const { Server } = require('socket.io');
 const { Pool } = require('pg');
 const Redis = require('ioredis');
-const { setupSocketHandlers } = require('./socket/handlers');
+const { setupSocketHandlers, normalizeClientId } = require('./socket/handlers');
 const { CsvWriterWorker } = require('./workers/csvWriter');
+
+function parseAllowedCorsOrigins(raw = process.env.DATASTACK_CORS_ORIGINS) {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed === '*') return null;
+  const origins = trimmed
+    .split(',')
+    .map((entry) => entry.trim().replace(/\/+$/, ''))
+    .filter(Boolean);
+  if (origins.length === 0 || origins.includes('*')) return null;
+  return new Set(origins);
+}
+
+function isOriginAllowedByCors(origin, raw = process.env.DATASTACK_CORS_ORIGINS) {
+  if (!origin) return true;
+  const allowlist = parseAllowedCorsOrigins(raw);
+  if (!allowlist) return true;
+  const normalized = String(origin).trim().replace(/\/+$/, '');
+  return allowlist.has(normalized);
+}
+
+function corsOriginDelegate(origin, callback) {
+  return callback(null, isOriginAllowedByCors(origin));
+}
 
 const PORT = Number(process.env.PORT_SOCKET) || 4000;
 const app = express();
-app.use(cors({ origin: '*' }));
+app.use(cors({ origin: corsOriginDelegate }));
 app.use(express.json({ limit: '10mb' }));
 
 const REDIS_BUFFER_KEY = 'datastack:buffer:events';
 const REDIS_RECENT_KEY = 'datastack:recent:events';
 const REDIS_FLUSH_LOCK_KEY = 'datastack:flush:lock';
-const REDIS_RECENT_LIMIT = 500;
-const FLUSH_LOCK_TTL_MS = 15000;
+const REDIS_CLIENTS_REGISTRY_KEY = 'datastack:clients:registry';
+const REDIS_CLIENTS_DELETED_KEY = 'datastack:clients:deleted';
+const DEFAULT_REDIS_RECENT_LIMIT = 500;
+const MAX_REDIS_RECENT_LIMIT = 5000;
+const FLUSH_LOCK_TTL_MS = 30000;
+const FLUSH_LOCK_WAIT_MS = 400;
+const FLUSH_LOCK_RETRY_MS = 25;
 const UNLOCK_LUA_SCRIPT =
   'if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end';
+const RENEW_LOCK_LUA_SCRIPT =
+  'if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("pexpire", KEYS[1], ARGV[2]) else return 0 end';
+
+function getRedisRecentLimit() {
+  const envRaw = Number(process.env.DATASTACK_RECENT_LIMIT);
+  if (Number.isFinite(envRaw) && envRaw >= 100) {
+    return Math.min(MAX_REDIS_RECENT_LIMIT, Math.floor(envRaw));
+  }
+  const threshold = Number(runtimeConfig && runtimeConfig.batchFlushThreshold) || DEFAULT_REDIS_RECENT_LIMIT;
+  return Math.min(
+    MAX_REDIS_RECENT_LIMIT,
+    Math.max(DEFAULT_REDIS_RECENT_LIMIT, Math.floor(threshold)),
+  );
+}
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 const bufferQueue = [];
 const writer = new CsvWriterWorker();
@@ -104,14 +151,24 @@ async function pushEventsToRedisOrFallback(events) {
   const redis = getRedisClient();
   if (redis) {
     const serialized = events.map((e) => JSON.stringify(e));
+    let bufferLen = null;
     try {
-      const len = await redis.rpush(REDIS_BUFFER_KEY, ...serialized);
-      await redis.lpush(REDIS_RECENT_KEY, ...serialized);
-      await redis.ltrim(REDIS_RECENT_KEY, 0, REDIS_RECENT_LIMIT - 1);
+      bufferLen = await redis.rpush(REDIS_BUFFER_KEY, ...serialized);
       redisConnected = true;
-      return Number(len) + bufferQueue.length;
     } catch {
       redisConnected = false;
+    }
+
+    if (bufferLen !== null) {
+      // Best-effort recent list mirror: never duplicate into RAM buffer once rpush succeeded
+      try {
+        const recentLimit = getRedisRecentLimit();
+        await redis.lpush(REDIS_RECENT_KEY, ...serialized);
+        await redis.ltrim(REDIS_RECENT_KEY, 0, recentLimit - 1);
+      } catch {
+        // Non-fatal: events are already durable in REDIS_BUFFER_KEY
+      }
+      return Number(bufferLen) + bufferQueue.length;
     }
   }
 
@@ -143,6 +200,10 @@ const runtimeConfig = {
   enableIdempotency: true,
   autoPruneDays: 30,
 };
+
+let previousJwtSecret = '';
+let previousJwtSecretGraceUntil = 0;
+const JWT_ROTATION_BRIDGE_GRACE_MS = 60 * 1000;
 
 function resolveInternalSecret(jwtSecretOverride) {
   const explicit = (process.env.DATASTACK_INTERNAL_SECRET || '').trim();
@@ -182,7 +243,13 @@ function requireInternalAuth(req, res, next) {
     });
   }
   const presented = req.get('x-datastack-internal-secret');
-  if (!presented || !timingSafeSecretEqual(presented, expected)) {
+  const matchesCurrent = Boolean(presented && timingSafeSecretEqual(presented, expected));
+  let matchesGrace = false;
+  if (!matchesCurrent && presented && previousJwtSecret && Date.now() <= previousJwtSecretGraceUntil) {
+    const graceExpected = resolveInternalSecret(previousJwtSecret);
+    matchesGrace = Boolean(graceExpected && timingSafeSecretEqual(presented, graceExpected));
+  }
+  if (!matchesCurrent && !matchesGrace) {
     return res.status(401).json({
       success: false,
       error: 'UNAUTHORIZED: Missing or invalid internal authentication header',
@@ -201,6 +268,12 @@ if (process.env.DATABASE_URL) {
       idleTimeoutMillis: 30000,
       max: 5,
     });
+    dbPool.on('error', (err) => {
+      console.error(
+        '[DataStack Ingestion DB] Unexpected idle PostgreSQL pool error:',
+        err instanceof Error ? err.message : err,
+      );
+    });
   } catch {
     dbPool = null;
   }
@@ -215,11 +288,13 @@ let hasSyncedInMemoryClients = false;
 const CLIENT_CACHE_TTL_MS = 2000;
 
 async function verifyClientInDb(clientId, presentedToken, bypassCache = false) {
-  if (!clientId) {
-    return { allowed: true };
+  const normalizedId = normalizeClientId(clientId);
+  if (!normalizedId) {
+    return {
+      allowed: false,
+      reason: 'CLIENT_REVOKED: Missing client identifier',
+    };
   }
-
-  const normalizedId = String(clientId).trim().toLowerCase();
   if (deletedClientsSet.has(normalizedId)) {
     return {
       allowed: false,
@@ -228,7 +303,40 @@ async function verifyClientInDb(clientId, presentedToken, bypassCache = false) {
   }
 
   if (!dbPool) {
-    const memClient = inMemoryClientRegistry.get(normalizedId);
+    let memClient = inMemoryClientRegistry.get(normalizedId);
+    if (!memClient) {
+      const redis = getRedisClient();
+      if (redis && typeof redis.sismember === 'function' && typeof redis.hget === 'function') {
+        try {
+          const isDeleted = await redis.sismember(REDIS_CLIENTS_DELETED_KEY, normalizedId);
+          if (isDeleted) {
+            deletedClientsSet.add(normalizedId);
+            return {
+              allowed: false,
+              reason: 'CLIENT_REVOKED: Client access has been deleted by admin',
+            };
+          }
+          const rawClient = await redis.hget(REDIS_CLIENTS_REGISTRY_KEY, normalizedId);
+          if (rawClient) {
+            const parsed = JSON.parse(rawClient);
+            if (parsed && parsed.clientId) {
+              memClient = {
+                clientId: normalizedId,
+                name: String(parsed.name || normalizedId),
+                status: parsed.status === 'revoked' ? 'revoked' : 'active',
+                token: String(parsed.token || ''),
+                rateLimit: Math.max(1, Number(parsed.rateLimit) || 100),
+              };
+              inMemoryClientRegistry.set(normalizedId, memClient);
+              hasSyncedInMemoryClients = true;
+            }
+          }
+        } catch {
+          // Ignore Redis registry lookup error and check local state
+        }
+      }
+    }
+
     if (memClient) {
       if (memClient.status === 'revoked') {
         return {
@@ -244,13 +352,11 @@ async function verifyClientInDb(clientId, presentedToken, bypassCache = false) {
       }
       return { allowed: true, rateLimit: memClient.rateLimit || 100 };
     }
-    if (hasSyncedInMemoryClients) {
-      return {
-        allowed: false,
-        reason: 'CLIENT_REVOKED: Client registration not found or has been deleted',
-      };
-    }
-    return { allowed: true };
+
+    return {
+      allowed: false,
+      reason: 'CLIENT_REVOKED: Client registration not found or has been deleted',
+    };
   }
 
   const now = Date.now();
@@ -326,9 +432,95 @@ async function verifyClientInDb(clientId, presentedToken, bypassCache = false) {
   }
 }
 
+const pendingDbClientActivity = new Map();
+const CLIENT_ACTIVITY_FLUSH_INTERVAL_MS = 1000;
+let activityFlushTimer = null;
+let activeActivityFlushPromise = null;
+
+let schemaEnsurePromise = null;
+let schemaEnsurePool = null;
+
+function setDbPoolForTests(pool) {
+  dbPool = pool;
+  schemaEnsurePromise = null;
+  schemaEnsurePool = null;
+}
+
+async function flushPendingClientActivity() {
+  if (activeActivityFlushPromise) {
+    await activeActivityFlushPromise;
+    if (pendingDbClientActivity.size === 0) return 0;
+  }
+  if (!dbPool || pendingDbClientActivity.size === 0) return 0;
+
+  const snapshot = Array.from(pendingDbClientActivity.entries());
+  pendingDbClientActivity.clear();
+
+  const clientIds = [];
+  const deltas = [];
+  const lastActives = [];
+  for (const [cid, entry] of snapshot) {
+    clientIds.push(cid);
+    deltas.push(entry.count);
+    lastActives.push(entry.lastActive);
+  }
+
+  const run = (async () => {
+    try {
+      await dbPool.query(
+        `UPDATE client_sdks AS c
+         SET total_events = c.total_events + v.delta,
+             last_active = GREATEST(COALESCE(c.last_active, v.last_active), v.last_active),
+             updated_at = NOW()
+         FROM (
+           SELECT UNNEST($1::text[]) AS client_id,
+                  UNNEST($2::bigint[]) AS delta,
+                  UNNEST($3::timestamptz[]) AS last_active
+         ) AS v
+         WHERE c.client_id = v.client_id`,
+        [clientIds, deltas, lastActives],
+      );
+      return clientIds.length;
+    } catch {
+      // Re-merge deltas so transient DB failures do not lose event counts
+      for (const [cid, entry] of snapshot) {
+        const current = pendingDbClientActivity.get(cid);
+        if (current) {
+          pendingDbClientActivity.set(cid, {
+            count: current.count + entry.count,
+            lastActive:
+              current.lastActive > entry.lastActive
+                ? current.lastActive
+                : entry.lastActive,
+          });
+        } else {
+          pendingDbClientActivity.set(cid, { ...entry });
+        }
+      }
+      return 0;
+    } finally {
+      activeActivityFlushPromise = null;
+    }
+  })();
+
+  activeActivityFlushPromise = run;
+  return run;
+}
+
+function ensureActivityFlushTimer() {
+  if (activityFlushTimer) return;
+  activityFlushTimer = setInterval(() => {
+    void flushPendingClientActivity().catch(() => undefined);
+  }, CLIENT_ACTIVITY_FLUSH_INTERVAL_MS);
+  if (typeof activityFlushTimer.unref === 'function') {
+    activityFlushTimer.unref();
+  }
+}
+
 function recordClientActivity(clientId, count = 1) {
   if (!clientId || count <= 0) return;
-  const normalizedId = String(clientId).trim().toLowerCase();
+  const normalizedId = normalizeClientId(clientId);
+  if (!normalizedId) return;
   const nowIso = new Date().toISOString();
 
   if (!dbPool) {
@@ -343,122 +535,297 @@ function recordClientActivity(clientId, count = 1) {
     return;
   }
 
-  dbPool
-    .query(
-      `UPDATE client_sdks
-       SET total_events = total_events + $2,
-           last_active = $3,
-           updated_at = NOW()
-       WHERE client_id = $1`,
-      [normalizedId, count, nowIso],
-    )
-    .catch(() => undefined);
+  const prevPending = pendingDbClientActivity.get(normalizedId);
+  if (prevPending) {
+    pendingDbClientActivity.set(normalizedId, {
+      count: prevPending.count + count,
+      lastActive: nowIso > prevPending.lastActive ? nowIso : prevPending.lastActive,
+    });
+  } else {
+    pendingDbClientActivity.set(normalizedId, {
+      count,
+      lastActive: nowIso,
+    });
+  }
+  ensureActivityFlushTimer();
 }
 
 let isFlushing = false;
+let activeFlushPromise = null;
 let flushTimer = null;
 
-async function flushBuffer() {
+function purgeClientFromLocalBuffer(normalizedId) {
+  if (!normalizedId || bufferQueue.length === 0) return 0;
+  let removed = 0;
+  let writeIdx = 0;
+  for (let i = 0; i < bufferQueue.length; i += 1) {
+    const evt = bufferQueue[i];
+    if (evt && normalizeClientId(evt.clientId) === normalizedId) {
+      removed += 1;
+    } else {
+      bufferQueue[writeIdx] = evt;
+      writeIdx += 1;
+    }
+  }
+  bufferQueue.length = writeIdx;
+  return removed;
+}
+
+async function isClientDeletedForFlush(clientId, redis, cache) {
+  const normalized = normalizeClientId(clientId);
+  if (!normalized) return false;
+  if (deletedClientsSet.has(normalized)) return true;
+  if (cache && cache.has(normalized)) return Boolean(cache.get(normalized));
+  if (redis && typeof redis.sismember === 'function') {
+    try {
+      const isDeleted =
+        Number(await redis.sismember(REDIS_CLIENTS_DELETED_KEY, normalized)) === 1;
+      if (cache) cache.set(normalized, isDeleted);
+      if (isDeleted) deletedClientsSet.add(normalized);
+      return isDeleted;
+    } catch {
+      // Ignore transient Redis tombstone lookup error
+    }
+  }
+  if (cache) cache.set(normalized, false);
+  return false;
+}
+
+async function flushBuffer(options = {}) {
   if (pendingRedisWrites.size > 0) {
     await Promise.allSettled([...pendingRedisWrites]);
   }
-  if (isFlushing) {
-    return { written: 0, files: [] };
+  if (activeFlushPromise) {
+    return activeFlushPromise;
   }
-  isFlushing = true;
-  let totalWritten = 0;
-  const filesSet = new Set();
 
-  try {
-    const redis = getRedisClient();
-    if (redis) {
-      const lockToken = crypto.randomUUID();
-      let lockAcquired = false;
+  const executeFlush = async () => {
+    isFlushing = true;
+    let totalWritten = 0;
+    let lockTimedOut = false;
+    const filesSet = new Set();
+    const deletedCheckCache = new Map();
 
-      try {
-        const lockResult = await redis.set(
-          REDIS_FLUSH_LOCK_KEY,
-          lockToken,
-          'PX',
-          FLUSH_LOCK_TTL_MS,
-          'NX',
-        );
-        lockAcquired = lockResult === 'OK';
-        redisConnected = true;
-      } catch {
-        redisConnected = false;
-        lockAcquired = false;
+    try {
+      if (pendingRedisWrites.size > 0) {
+        await Promise.allSettled([...pendingRedisWrites]);
       }
 
-      if (lockAcquired) {
-        try {
-          const chunkSize = Math.max(500, runtimeConfig.batchFlushThreshold);
-          while (true) {
-            const rawItems = await redis.lrange(REDIS_BUFFER_KEY, 0, chunkSize - 1);
-            if (!rawItems || rawItems.length === 0) {
+      const redis = getRedisClient();
+      if (redis) {
+        const lockToken = crypto.randomUUID();
+        const lockTtlMs = Math.max(50, Number(options && options.lockTtlMs) || FLUSH_LOCK_TTL_MS);
+        const waitMs = Math.max(
+          0,
+          options && options.waitMs !== undefined ? Number(options.waitMs) : FLUSH_LOCK_WAIT_MS,
+        );
+        const deadline = Date.now() + waitMs;
+        let lockAcquired = false;
+        let redisError = false;
+
+        while (true) {
+          try {
+            const lockResult = await redis.set(
+              REDIS_FLUSH_LOCK_KEY,
+              lockToken,
+              'PX',
+              lockTtlMs,
+              'NX',
+            );
+            redisConnected = true;
+            if (lockResult === 'OK') {
+              lockAcquired = true;
               break;
             }
+          } catch {
+            redisConnected = false;
+            redisError = true;
+            break;
+          }
 
-            const parsedBatch = [];
-            for (const raw of rawItems) {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) {
+            break;
+          }
+          await sleepMs(Math.min(FLUSH_LOCK_RETRY_MS, remaining));
+        }
+
+        if (!lockAcquired && !redisError) {
+          lockTimedOut = true;
+          if (options && options.throwOnLockTimeout === true) {
+            throw new Error(
+              'FLUSH_LOCK_TIMEOUT: Timed out waiting for distributed Redis flush lock',
+            );
+          }
+        }
+
+        if (lockAcquired) {
+          const renewIntervalMs = Math.max(20, Math.floor(lockTtlMs / 3));
+          let lastRenewAt = Date.now();
+          let lockLost = false;
+          let renewInFlight = null;
+
+          const renewLockOnce = () => {
+            if (renewInFlight) return renewInFlight;
+            renewInFlight = (async () => {
               try {
-                const evt = JSON.parse(raw);
-                if (evt && evt.eventId) {
-                  parsedBatch.push(evt);
+                const renewed = await redis.eval(
+                  RENEW_LOCK_LUA_SCRIPT,
+                  1,
+                  REDIS_FLUSH_LOCK_KEY,
+                  lockToken,
+                  String(lockTtlMs),
+                );
+                if (Number(renewed) === 1) {
+                  lastRenewAt = Date.now();
+                  return true;
                 }
+                lockLost = true;
+                return false;
               } catch {
-                // Skip malformed entry while still trimming consumed range
+                return false;
+              } finally {
+                renewInFlight = null;
+              }
+            })();
+            return renewInFlight;
+          };
+
+          const renewTimer = setInterval(() => {
+            void renewLockOnce();
+          }, renewIntervalMs);
+          if (typeof renewTimer.unref === 'function') {
+            renewTimer.unref();
+          }
+
+          try {
+            const chunkSize = Math.max(500, runtimeConfig.batchFlushThreshold);
+            while (true) {
+              if (lockLost) break;
+
+              const rawItems = await redis.lrange(REDIS_BUFFER_KEY, 0, chunkSize - 1);
+              if (!rawItems || rawItems.length === 0) {
+                break;
+              }
+
+              const parsedBatch = [];
+              let malformedCount = 0;
+              for (const raw of rawItems) {
+                try {
+                  const evt = JSON.parse(raw);
+                  if (evt && evt.eventId) {
+                    if (await isClientDeletedForFlush(evt.clientId, redis, deletedCheckCache)) {
+                      continue;
+                    }
+                    parsedBatch.push(evt);
+                  } else {
+                    malformedCount += 1;
+                  }
+                } catch {
+                  malformedCount += 1;
+                }
+              }
+              if (malformedCount > 0) {
+                console.warn(
+                  `[CSV Worker] Skipped ${malformedCount} malformed buffered Redis event(s) during flush`,
+                );
+              }
+
+              if (Date.now() - lastRenewAt >= renewIntervalMs) {
+                await renewLockOnce();
+              }
+              if (lockLost) break;
+
+              if (parsedBatch.length > 0) {
+                const res = await writer.writeBatch(parsedBatch);
+                totalWritten += res.written;
+                for (const f of res.files) filesSet.add(f);
+              }
+
+              if (Date.now() - lastRenewAt >= renewIntervalMs) {
+                await renewLockOnce();
+              }
+              if (lockLost) break;
+
+              // Trim ONLY after CSV batch write succeeds and lock ownership holds
+              await redis.ltrim(REDIS_BUFFER_KEY, rawItems.length, -1);
+
+              if (rawItems.length < chunkSize) {
+                break;
               }
             }
-
-            if (parsedBatch.length > 0) {
-              const res = await writer.writeBatch(parsedBatch);
-              totalWritten += res.written;
-              for (const f of res.files) filesSet.add(f);
+          } finally {
+            clearInterval(renewTimer);
+            if (renewInFlight) {
+              await renewInFlight.catch(() => false);
             }
-
-            // Trim ONLY after CSV batch write succeeds
-            await redis.ltrim(REDIS_BUFFER_KEY, rawItems.length, -1);
-
-            if (rawItems.length < chunkSize) {
-              break;
+            try {
+              await redis.eval(UNLOCK_LUA_SCRIPT, 1, REDIS_FLUSH_LOCK_KEY, lockToken);
+            } catch {
+              // Lock expires automatically via PX TTL
             }
-          }
-        } finally {
-          try {
-            await redis.eval(UNLOCK_LUA_SCRIPT, 1, REDIS_FLUSH_LOCK_KEY, lockToken);
-          } catch {
-            // Lock expires automatically via PX TTL
           }
         }
       }
-    }
 
-    if (bufferQueue.length > 0) {
-      const batch = bufferQueue.splice(0, bufferQueue.length);
-      try {
-        const res = await writer.writeBatch(batch);
-        totalWritten += res.written;
-        for (const f of res.files) filesSet.add(f);
-      } catch (err) {
-        bufferQueue.unshift(...batch);
-        throw err;
+      if (bufferQueue.length > 0) {
+        const batch = bufferQueue.splice(0, bufferQueue.length);
+        const validBatch = [];
+        for (const evt of batch) {
+          if (await isClientDeletedForFlush(evt.clientId, redis, deletedCheckCache)) {
+            continue;
+          }
+          validBatch.push(evt);
+        }
+
+        if (validBatch.length > 0) {
+          try {
+            const res = await writer.writeBatch(validBatch);
+            totalWritten += res.written;
+            for (const f of res.files) filesSet.add(f);
+          } catch (err) {
+            bufferQueue.unshift(...validBatch);
+            throw err;
+          }
+        }
+      }
+
+      const files = Array.from(filesSet);
+      if (totalWritten > 0) {
+        console.log(
+          `[CSV Worker] Flushed ${totalWritten} events to ${files.length} file(s)`,
+        );
+      }
+      return {
+        written: totalWritten,
+        files,
+        ...(lockTimedOut ? { lockTimedOut: true } : {}),
+      };
+    } catch (err) {
+      console.error('[CSV Worker] Flush error:', err);
+      throw err;
+    } finally {
+      isFlushing = false;
+      activeFlushPromise = null;
+    }
+  };
+
+  let flushDone = false;
+  const promise = (async () => {
+    try {
+      return await executeFlush();
+    } finally {
+      flushDone = true;
+      isFlushing = false;
+      if (activeFlushPromise === promise) {
+        activeFlushPromise = null;
       }
     }
-
-    const files = Array.from(filesSet);
-    if (totalWritten > 0) {
-      console.log(
-        `[CSV Worker] Flushed ${totalWritten} events to ${files.length} file(s)`,
-      );
-    }
-    return { written: totalWritten, files };
-  } catch (err) {
-    console.error('[CSV Worker] Flush error:', err);
-    return { written: totalWritten, files: Array.from(filesSet) };
-  } finally {
-    isFlushing = false;
+  })();
+  if (!flushDone) {
+    activeFlushPromise = promise;
   }
+  return promise;
 }
 
 function scheduleFlushTimer(intervalMs) {
@@ -468,7 +835,7 @@ function scheduleFlushTimer(intervalMs) {
     clearInterval(flushTimer);
   }
   flushTimer = setInterval(() => {
-    void flushBuffer();
+    void flushBuffer().catch(() => undefined);
   }, safeInterval);
 }
 
@@ -476,7 +843,7 @@ scheduleFlushTimer(runtimeConfig.batchFlushIntervalMs);
 
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: '*', methods: ['GET', 'POST'] },
+  cors: { origin: corsOriginDelegate, methods: ['GET', 'POST'] },
 });
 
 function applyRuntimeSettingsObject(settingsObj) {
@@ -528,7 +895,7 @@ function applyRuntimeSettingsObject(settingsObj) {
       const changed = nextPruneDays !== runtimeConfig.autoPruneDays;
       runtimeConfig.autoPruneDays = nextPruneDays;
       if (changed && nextPruneDays > 0) {
-        writer.pruneExpiredPartitions(nextPruneDays);
+        void writer.pruneExpiredPartitionsAsync(nextPruneDays).catch(() => undefined);
       }
     }
   }
@@ -550,6 +917,10 @@ function applyRuntimeSettingsObject(settingsObj) {
       candidateSecret.length >= 32 ||
       (!IS_PRODUCTION && candidateSecret.length > 0);
     if (validSecret && candidateSecret !== runtimeConfig.jwtSecret) {
+      if (runtimeConfig.jwtSecret) {
+        previousJwtSecret = runtimeConfig.jwtSecret;
+        previousJwtSecretGraceUntil = Date.now() + JWT_ROTATION_BRIDGE_GRACE_MS;
+      }
       runtimeConfig.jwtSecret = candidateSecret;
       clientAuthCache.clear();
       io.disconnectSockets(true);
@@ -561,75 +932,114 @@ function applyRuntimeSettingsObject(settingsObj) {
 }
 
 async function ensureDatabaseSchema() {
-  if (!dbPool) return;
-  try {
-    await dbPool.query(`
-      CREATE TABLE IF NOT EXISTS client_sdks (
-        client_id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        secret TEXT NOT NULL,
-        token TEXT NOT NULL,
-        rate_limit INTEGER NOT NULL DEFAULT 100,
-        status TEXT NOT NULL DEFAULT 'active',
-        total_events BIGINT NOT NULL DEFAULT 0,
-        last_active TIMESTAMPTZ,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-    await dbPool.query(`
-      CREATE TABLE IF NOT EXISTS admin_settings (
-        id TEXT PRIMARY KEY DEFAULT 'default',
-        server_port INTEGER NOT NULL DEFAULT 4000,
-        web_port INTEGER NOT NULL DEFAULT 3000,
-        max_events_per_sec INTEGER NOT NULL DEFAULT 100,
-        max_payload_size_kb INTEGER NOT NULL DEFAULT 100,
-        batch_flush_threshold INTEGER NOT NULL DEFAULT 500,
-        batch_flush_interval_ms INTEGER NOT NULL DEFAULT 2000,
-        file_rotation_mb INTEGER NOT NULL DEFAULT 100,
-        jwt_secret TEXT NOT NULL,
-        enable_idempotency BOOLEAN NOT NULL DEFAULT true,
-        auto_prune_days INTEGER NOT NULL DEFAULT 30,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-    await dbPool.query(`
-      CREATE TABLE IF NOT EXISTS deleted_clients (
-        client_id TEXT PRIMARY KEY,
-        deleted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-    await dbPool.query(`
-      ALTER TABLE client_sdks
-        ADD COLUMN IF NOT EXISTS rate_limit INTEGER NOT NULL DEFAULT 100,
-        ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active',
-        ADD COLUMN IF NOT EXISTS total_events BIGINT NOT NULL DEFAULT 0,
-        ADD COLUMN IF NOT EXISTS last_active TIMESTAMPTZ,
-        ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    `);
-    await dbPool.query(`
-      ALTER TABLE admin_settings
-        ADD COLUMN IF NOT EXISTS server_port INTEGER NOT NULL DEFAULT 4000,
-        ADD COLUMN IF NOT EXISTS web_port INTEGER NOT NULL DEFAULT 3000,
-        ADD COLUMN IF NOT EXISTS max_events_per_sec INTEGER NOT NULL DEFAULT 100,
-        ADD COLUMN IF NOT EXISTS max_payload_size_kb INTEGER NOT NULL DEFAULT 100,
-        ADD COLUMN IF NOT EXISTS batch_flush_threshold INTEGER NOT NULL DEFAULT 500,
-        ADD COLUMN IF NOT EXISTS batch_flush_interval_ms INTEGER NOT NULL DEFAULT 2000,
-        ADD COLUMN IF NOT EXISTS file_rotation_mb INTEGER NOT NULL DEFAULT 100,
-        ADD COLUMN IF NOT EXISTS enable_idempotency BOOLEAN NOT NULL DEFAULT true,
-        ADD COLUMN IF NOT EXISTS auto_prune_days INTEGER NOT NULL DEFAULT 30,
-        ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    `);
-  } catch {
-    // Ignore transient startup DB error; retried on next sync cycle
+  const pool = dbPool;
+  if (!pool) return false;
+  if (schemaEnsurePromise && schemaEnsurePool === pool) {
+    return schemaEnsurePromise;
   }
+
+  schemaEnsurePool = pool;
+  schemaEnsurePromise = (async () => {
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS client_sdks (
+          client_id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          secret TEXT NOT NULL,
+          token TEXT NOT NULL,
+          rate_limit INTEGER NOT NULL DEFAULT 100,
+          status TEXT NOT NULL DEFAULT 'active',
+          total_events BIGINT NOT NULL DEFAULT 0,
+          last_active TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS admin_settings (
+          id TEXT PRIMARY KEY DEFAULT 'default',
+          server_port INTEGER NOT NULL DEFAULT 4000,
+          web_port INTEGER NOT NULL DEFAULT 3000,
+          max_events_per_sec INTEGER NOT NULL DEFAULT 100,
+          max_payload_size_kb INTEGER NOT NULL DEFAULT 100,
+          batch_flush_threshold INTEGER NOT NULL DEFAULT 500,
+          batch_flush_interval_ms INTEGER NOT NULL DEFAULT 2000,
+          file_rotation_mb INTEGER NOT NULL DEFAULT 100,
+          jwt_secret TEXT NOT NULL,
+          enable_idempotency BOOLEAN NOT NULL DEFAULT true,
+          auto_prune_days INTEGER NOT NULL DEFAULT 30,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS deleted_clients (
+          client_id TEXT PRIMARY KEY,
+          deleted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS admin_users (
+          id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+          email TEXT NOT NULL UNIQUE,
+          password_salt BYTEA NOT NULL,
+          password_hash BYTEA NOT NULL,
+          token_version INTEGER NOT NULL DEFAULT 1,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS admin_login_attempts (
+          key_hash TEXT PRIMARY KEY,
+          window_started_at TIMESTAMPTZ NOT NULL,
+          failed_attempts INTEGER NOT NULL,
+          blocked_until TIMESTAMPTZ,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await pool.query(`
+        ALTER TABLE client_sdks
+          ADD COLUMN IF NOT EXISTS rate_limit INTEGER NOT NULL DEFAULT 100,
+          ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active',
+          ADD COLUMN IF NOT EXISTS total_events BIGINT NOT NULL DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS last_active TIMESTAMPTZ,
+          ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      `);
+      await pool.query(`
+        ALTER TABLE admin_settings
+          ADD COLUMN IF NOT EXISTS server_port INTEGER NOT NULL DEFAULT 4000,
+          ADD COLUMN IF NOT EXISTS web_port INTEGER NOT NULL DEFAULT 3000,
+          ADD COLUMN IF NOT EXISTS max_events_per_sec INTEGER NOT NULL DEFAULT 100,
+          ADD COLUMN IF NOT EXISTS max_payload_size_kb INTEGER NOT NULL DEFAULT 100,
+          ADD COLUMN IF NOT EXISTS batch_flush_threshold INTEGER NOT NULL DEFAULT 500,
+          ADD COLUMN IF NOT EXISTS batch_flush_interval_ms INTEGER NOT NULL DEFAULT 2000,
+          ADD COLUMN IF NOT EXISTS file_rotation_mb INTEGER NOT NULL DEFAULT 100,
+          ADD COLUMN IF NOT EXISTS enable_idempotency BOOLEAN NOT NULL DEFAULT true,
+          ADD COLUMN IF NOT EXISTS auto_prune_days INTEGER NOT NULL DEFAULT 30,
+          ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      `);
+      await pool.query(`
+        ALTER TABLE admin_users
+          ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 1
+      `);
+      return true;
+    } catch {
+      if (schemaEnsurePool === pool) {
+        schemaEnsurePromise = null;
+      }
+      return false;
+    }
+  })();
+
+  return schemaEnsurePromise;
 }
 
 async function syncSettingsFromDatabase() {
-  if (!dbPool) return;
+  if (!dbPool) return false;
   try {
-    await ensureDatabaseSchema();
+    const schemaReady = await ensureDatabaseSchema();
+    if (!schemaReady) return false;
+
     const res = await dbPool.query(
       `SELECT max_events_per_sec, max_payload_size_kb, batch_flush_threshold,
               batch_flush_interval_ms, file_rotation_mb, jwt_secret, enable_idempotency,
@@ -637,7 +1047,7 @@ async function syncSettingsFromDatabase() {
        FROM admin_settings
        WHERE id = 'default'`,
     );
-    if (!res.rowCount || res.rowCount === 0) return;
+    if (!res.rowCount || res.rowCount === 0) return true;
     const row = res.rows[0];
     const parsedPrune =
       row.auto_prune_days !== undefined && row.auto_prune_days !== null
@@ -657,50 +1067,46 @@ async function syncSettingsFromDatabase() {
       autoPruneDays: Number.isFinite(parsedPrune) ? parsedPrune : 30,
       jwtSecret: row.jwt_secret ? String(row.jwt_secret).trim() : undefined,
     });
+    return true;
   } catch {
-    // Keep existing runtimeConfig if table is not ready yet
+    return false;
   }
 }
 
 const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 let settingsSyncTimer = null;
 let pruneTimer = null;
-if (process.env.DATASTACK_DISABLE_LISTEN !== '1') {
-  if (dbPool) {
-    void syncSettingsFromDatabase();
-    settingsSyncTimer = setInterval(() => {
-      void syncSettingsFromDatabase();
-    }, 3000);
-  }
-  pruneTimer = setInterval(() => {
-    if (runtimeConfig.autoPruneDays > 0) {
-      writer.pruneExpiredPartitions(runtimeConfig.autoPruneDays);
-    }
-  }, PRUNE_INTERVAL_MS);
-}
 
 const socketHandlersApi = setupSocketHandlers(io, bufferQueue, writer, {
   getRuntimeConfig: () => runtimeConfig,
+  getRedisClient,
   verifyClientInDb,
   recordClientActivity,
-  onBufferPush: () => {
+  onBufferPush: async () => {
     const redis = getRedisClient();
-    if (redis && bufferQueue.length > 0) {
-      const pushed = bufferQueue.splice(0, bufferQueue.length);
-      const op = pushEventsToRedisOrFallback(pushed).then((totalQueued) => {
-        if (totalQueued >= runtimeConfig.batchFlushThreshold) {
-          void flushBuffer();
+    if (redis) {
+      if (bufferQueue.length > 0) {
+        const pushed = bufferQueue.splice(0, bufferQueue.length);
+        const op = pushEventsToRedisOrFallback(pushed);
+        pendingRedisWrites.add(op);
+        try {
+          const totalQueued = await op;
+          if (totalQueued >= runtimeConfig.batchFlushThreshold) {
+            void flushBuffer().catch(() => undefined);
+          }
+        } finally {
+          pendingRedisWrites.delete(op);
         }
-      });
-      pendingRedisWrites.add(op);
-      void op.finally(() => {
-        pendingRedisWrites.delete(op);
-      });
+        return;
+      }
+      if (pendingRedisWrites.size > 0) {
+        await Promise.all([...pendingRedisWrites]);
+      }
       return;
     }
 
     if (bufferQueue.length >= runtimeConfig.batchFlushThreshold) {
-      void flushBuffer();
+      void flushBuffer().catch(() => undefined);
     }
   },
 });
@@ -725,6 +1131,8 @@ app.get('/health', async (_req, res) => {
     status: 'online',
     service: 'DataStack Express Ingestion',
     port: PORT,
+    serverPort: PORT,
+    webPort: Number(process.env.PORT) || 3000,
     activeSockets: io.engine ? io.engine.clientsCount : 0,
     bufferSize: bufferQueue.length + redisBufferSize,
     localBufferSize: bufferQueue.length,
@@ -743,6 +1151,9 @@ app.use('/internal', requireInternalAuth);
 app.get('/internal/metrics', async (_req, res) => {
   const redisBufferSize = await getRedisBufferLen();
   res.json({
+    port: PORT,
+    serverPort: PORT,
+    webPort: Number(process.env.PORT) || 3000,
     activeSockets: io.engine ? io.engine.clientsCount : 0,
     bufferSize: bufferQueue.length + redisBufferSize,
     localBufferSize: bufferQueue.length,
@@ -750,8 +1161,45 @@ app.get('/internal/metrics', async (_req, res) => {
     redisConnected,
     registrySize: inMemoryClientRegistry.size,
     hasSyncedInMemoryClients,
+    inMemoryClients: Array.from(inMemoryClientRegistry.values()),
     securityStats: socketHandlersApi.getSecurityStats(),
     clientActivity: Object.fromEntries(inMemoryClientActivity.entries()),
+  });
+});
+
+// Internal shared security check for Port 3000 HTTP ingestion when Redis is unavailable (BUG-03)
+app.post('/internal/security-check', (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const clientId = normalizeClientId(body.clientId || '');
+  if (!clientId) {
+    return res.status(400).json({
+      allowed: false,
+      code: 'MALFORMED_PAYLOAD',
+      reason: 'Missing clientId',
+    });
+  }
+  const eventId = typeof body.eventId === 'string' ? body.eventId : '';
+  const clientRateLimit = Number(body.clientMaxRate) || 100;
+  const payloadBytes =
+    typeof body.payloadBytes === 'number' &&
+    Number.isFinite(body.payloadBytes) &&
+    body.payloadBytes >= 0
+      ? body.payloadBytes
+      : undefined;
+
+  const result = socketHandlersApi.validateSingleEventLocal(
+    clientId,
+    eventId,
+    body.payload ?? {},
+    clientRateLimit,
+    payloadBytes,
+  );
+
+  return res.json({
+    allowed: Boolean(result.allowed),
+    duplicate: Boolean(result.duplicate),
+    ...(result.code ? { code: result.code } : {}),
+    ...(result.reason ? { reason: result.reason } : {}),
   });
 });
 
@@ -765,39 +1213,58 @@ app.post('/internal/settings-sync', (req, res) => {
 });
 
 // Internal flush endpoint triggered by Next.js POST /api/storage & GET /api/export
-app.post('/internal/flush', async (_req, res) => {
+app.post('/internal/flush', async (req, res) => {
   try {
-    const result = await flushBuffer();
+    const throwOnLockTimeout = Boolean(req.body && req.body.throwOnLockTimeout === true);
+    const waitMs =
+      req.body && Number.isFinite(Number(req.body.waitMs))
+        ? Math.max(0, Number(req.body.waitMs))
+        : 2500;
+    const result = await flushBuffer({ waitMs, throwOnLockTimeout });
     res.json({
       success: true,
       flushedCount: result.written,
       filesUpdated: result.files,
+      ...(result.lockTimedOut ? { lockTimedOut: true } : {}),
     });
   } catch (err) {
+    const message = err instanceof Error ? err.message : 'Flush failed';
+    if (message.includes('FLUSH_LOCK_TIMEOUT')) {
+      return res.status(503).json({
+        success: false,
+        code: 'FLUSH_LOCK_TIMEOUT',
+        error: message,
+      });
+    }
     res.status(500).json({
       success: false,
-      error: err instanceof Error ? err.message : 'Flush failed',
+      error: message,
     });
   }
 });
 
 // Internal endpoint to expose Port 4000 buffered events before CSV flush
 app.get('/internal/recent', async (req, res) => {
-  const clientId = req.query.clientId ? String(req.query.clientId) : '';
-  const limit = Math.min(2000, Math.max(1, Number(req.query.limit) || 50));
+  const rawClientId = req.query.clientId ? String(req.query.clientId) : '';
+  const filterClientId =
+    rawClientId && rawClientId !== 'all' ? normalizeClientId(rawClientId) : '';
+  const recentLimit = getRedisRecentLimit();
+  const limit = Math.min(recentLimit, Math.max(1, Number(req.query.limit) || 50));
 
   const redis = getRedisClient();
   let redisEvents = [];
   if (redis) {
     try {
-      const readCap = Math.min(REDIS_RECENT_LIMIT, Math.max(limit * 2, limit));
+      const readCap = Math.min(recentLimit, Math.max(limit * 2, limit));
       const rawItems = await redis.lrange(REDIS_RECENT_KEY, 0, readCap - 1);
       redisConnected = true;
       for (const raw of rawItems) {
         try {
           const evt = JSON.parse(raw);
           if (!evt || !evt.eventId) continue;
-          if (clientId && clientId !== 'all' && evt.clientId !== clientId) continue;
+          const normEvtClientId = normalizeClientId(evt.clientId);
+          if (deletedClientsSet.has(normEvtClientId)) continue;
+          if (filterClientId && normEvtClientId !== filterClientId) continue;
           redisEvents.push(evt);
           if (redisEvents.length >= limit) break;
         } catch {
@@ -810,10 +1277,9 @@ app.get('/internal/recent', async (req, res) => {
     }
   }
 
-  const localFiltered =
-    clientId && clientId !== 'all'
-      ? bufferQueue.filter((evt) => evt.clientId === clientId)
-      : bufferQueue;
+  const localFiltered = filterClientId
+    ? bufferQueue.filter((evt) => normalizeClientId(evt.clientId) === filterClientId)
+    : bufferQueue;
   const localRecent = localFiltered.slice(-limit).reverse();
 
   const merged = [];
@@ -835,31 +1301,60 @@ app.post('/internal/client-sync', (req, res) => {
   const action = req.body && req.body.action ? String(req.body.action) : '';
 
   if (action === 'bulk_sync' && Array.isArray(req.body.clients)) {
+    const forceReplace = req.body.forceReplace === true;
+    // BUG-02 Guard: Never wipe a populated Port 4000 in-memory registry when a cold-restarted
+    // Port 3000 (without DB) sends an empty bulk_sync without explicit forceReplace.
+    if (
+      req.body.clients.length === 0 &&
+      !forceReplace &&
+      inMemoryClientRegistry.size > 0
+    ) {
+      hasSyncedInMemoryClients = true;
+      return res.json({
+        success: true,
+        count: inMemoryClientRegistry.size,
+        preserved: true,
+        clients: Array.from(inMemoryClientRegistry.values()),
+      });
+    }
+
     hasSyncedInMemoryClients = true;
+    const prevRegistry = new Map(inMemoryClientRegistry);
     inMemoryClientRegistry.clear();
     clientAuthCache.clear();
     const activeIds = new Set();
     for (const item of req.body.clients) {
       if (!item || !item.clientId) continue;
-      const cid = String(item.clientId).trim().toLowerCase();
+      const cid = normalizeClientId(item.clientId);
+      if (!cid) continue;
+      const nextStatus = item.status === 'revoked' ? 'revoked' : 'active';
+      const nextToken = String(item.token || '');
+      const prev = prevRegistry.get(cid);
       activeIds.add(cid);
       deletedClientsSet.delete(cid);
       inMemoryClientRegistry.set(cid, {
         clientId: cid,
         name: String(item.name || cid),
-        status: item.status === 'revoked' ? 'revoked' : 'active',
-        token: String(item.token || ''),
+        status: nextStatus,
+        token: nextToken,
         rateLimit: Math.max(1, Number(item.rateLimit) || 100),
       });
-      if (item.status === 'revoked') {
+      if (nextStatus === 'revoked' || (prev && nextToken && prev.token !== nextToken)) {
         io.to(`client:${cid}`).disconnectSockets(true);
       }
     }
-    return res.json({ success: true, count: activeIds.size });
+    if (forceReplace) {
+      for (const prevCid of prevRegistry.keys()) {
+        if (!activeIds.has(prevCid)) {
+          io.to(`client:${prevCid}`).disconnectSockets(true);
+        }
+      }
+    }
+    return res.json({ success: true, count: activeIds.size, preserved: false });
   }
 
   const rawClientId = req.body && req.body.clientId ? String(req.body.clientId) : '';
-  const normalizedId = rawClientId.trim().toLowerCase();
+  const normalizedId = normalizeClientId(rawClientId);
   const clientPayload =
     req.body && req.body.client && typeof req.body.client === 'object'
       ? req.body.client
@@ -873,6 +1368,8 @@ app.post('/internal/client-sync', (req, res) => {
       deletedClientsSet.add(normalizedId);
       inMemoryClientRegistry.delete(normalizedId);
       inMemoryClientActivity.delete(normalizedId);
+      pendingDbClientActivity.delete(normalizedId);
+      purgeClientFromLocalBuffer(normalizedId);
       io.to(`client:${normalizedId}`).disconnectSockets(true);
     } else if (action === 'revoked') {
       const existingMem = inMemoryClientRegistry.get(normalizedId);
@@ -937,36 +1434,131 @@ function stopTimers() {
     clearInterval(pruneTimer);
     pruneTimer = null;
   }
+  if (activityFlushTimer) {
+    clearInterval(activityFlushTimer);
+    activityFlushTimer = null;
+  }
 }
 
 let isShuttingDown = false;
-async function gracefulShutdown(signal) {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-  console.log(`[DataStack Ingestion Engine] Received ${signal}, flushing buffer before exit...`);
 
-  stopTimers();
-
+async function closeServerGracefully() {
   try {
-    await flushBuffer();
-  } catch {
-    // Best-effort flush on exit
-  }
-
-  try {
-    io.close();
-    server.close();
-    if (redisClient && typeof redisClient.quit === 'function') {
-      await redisClient.quit().catch(() => undefined);
-    }
-    if (dbPool) {
-      await dbPool.end();
+    await Promise.race([
+      new Promise((resolve) => {
+        if (io && typeof io.close === 'function') {
+          io.close(() => resolve());
+        } else if (server && server.listening) {
+          server.close(() => resolve());
+        } else {
+          resolve();
+        }
+      }),
+      sleepMs(2000),
+    ]);
+    if (server && typeof server.closeIdleConnections === 'function') {
+      server.closeIdleConnections();
     }
   } catch {
     // Ignore close errors
   }
+}
 
-  process.exit(0);
+async function gracefulShutdown(signal, options = {}) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  const shouldExit = options.exit !== false;
+  console.log(
+    `[DataStack Ingestion Engine] Received ${signal}, closing ingress and flushing buffer before exit...`,
+  );
+
+  try {
+    stopTimers();
+
+    // Close Socket.IO & HTTP listeners before final flush so late traffic cannot enter after drain starts
+    await closeServerGracefully();
+
+    try {
+      if (pendingRedisWrites.size > 0) {
+        await Promise.race([
+          Promise.allSettled([...pendingRedisWrites]),
+          sleepMs(2000),
+        ]);
+      }
+      await Promise.race([
+        Promise.allSettled([flushBuffer(), flushPendingClientActivity()]),
+        sleepMs(6000),
+      ]);
+    } catch {
+      // Best-effort flush on exit
+    }
+
+    try {
+      const activeRedis =
+        redisTestOverride !== undefined ? redisTestOverride : redisClient;
+      if (activeRedis && typeof activeRedis.quit === 'function') {
+        let quitFinished = false;
+        await Promise.race([
+          activeRedis
+            .quit()
+            .then(() => {
+              quitFinished = true;
+            })
+            .catch(() => {
+              quitFinished = true;
+            }),
+          sleepMs(2000),
+        ]);
+        if (!quitFinished && typeof activeRedis.disconnect === 'function') {
+          activeRedis.disconnect();
+        }
+      }
+      if (dbPool && typeof dbPool.end === 'function') {
+        await Promise.race([dbPool.end().catch(() => undefined), sleepMs(2000)]);
+      }
+    } catch {
+      // Ignore close errors
+    }
+
+    if (shouldExit) {
+      process.exit(0);
+    }
+  } finally {
+    if (!shouldExit) {
+      isShuttingDown = false;
+    }
+  }
+}
+
+async function startIngestionServer() {
+  if (dbPool) {
+    await Promise.race([
+      syncSettingsFromDatabase().catch(() => false),
+      sleepMs(5000),
+    ]);
+    settingsSyncTimer = setInterval(() => {
+      void syncSettingsFromDatabase();
+    }, 3000);
+  }
+
+  pruneTimer = setInterval(() => {
+    if (runtimeConfig.autoPruneDays > 0) {
+      void writer
+        .pruneExpiredPartitionsAsync(runtimeConfig.autoPruneDays)
+        .catch(() => undefined);
+    }
+  }, PRUNE_INTERVAL_MS);
+
+  if (isShuttingDown) return;
+
+  await new Promise((resolve) => {
+    server.listen(PORT, () => {
+      console.log(
+        `[DataStack Ingestion Engine] Express + Socket.IO listening on port ${PORT}`,
+      );
+      resolve();
+    });
+  });
 }
 
 if (process.env.DATASTACK_DISABLE_LISTEN !== '1') {
@@ -977,11 +1569,7 @@ if (process.env.DATASTACK_DISABLE_LISTEN !== '1') {
     void gracefulShutdown('SIGINT');
   });
 
-  server.listen(PORT, () => {
-    console.log(
-      `[DataStack Ingestion Engine] Express + Socket.IO listening on port ${PORT}`,
-    );
-  });
+  void startIngestionServer();
 }
 
 module.exports = {
@@ -994,7 +1582,16 @@ module.exports = {
   runtimeConfig,
   verifyClientInDb,
   recordClientActivity,
+  flushPendingClientActivity,
   applyRuntimeSettingsObject,
+  ensureDatabaseSchema,
+  syncSettingsFromDatabase,
+  gracefulShutdown,
+  startIngestionServer,
   setRedisClientForTests,
+  setDbPoolForTests,
   stopTimers,
+  parseAllowedCorsOrigins,
+  isOriginAllowedByCors,
+  corsOriginDelegate,
 };

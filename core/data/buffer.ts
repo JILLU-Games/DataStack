@@ -19,6 +19,15 @@ export interface RedisBufferClient {
     ttlMs: number,
     nxMode: 'NX',
   ): Promise<string | null>;
+  get?(key: string): Promise<string | null>;
+  incr?(key: string): Promise<number>;
+  pexpire?(key: string, ttlMs: number): Promise<number>;
+  hget?(key: string, field: string): Promise<string | null>;
+  hset?(key: string, field: string, value: string): Promise<number>;
+  hdel?(key: string, ...fields: string[]): Promise<number>;
+  sismember?(key: string, member: string): Promise<number>;
+  sadd?(key: string, ...members: string[]): Promise<number>;
+  srem?(key: string, ...members: string[]): Promise<number>;
   eval(script: string, numKeys: number, ...args: string[]): Promise<unknown>;
   quit?: () => Promise<unknown>;
   disconnect?: () => void;
@@ -27,10 +36,83 @@ export interface RedisBufferClient {
 export const REDIS_BUFFER_KEY = 'datastack:buffer:events';
 export const REDIS_RECENT_KEY = 'datastack:recent:events';
 export const REDIS_FLUSH_LOCK_KEY = 'datastack:flush:lock';
-const REDIS_RECENT_LIMIT = 500;
-const FLUSH_LOCK_TTL_MS = 15000;
+const REDIS_CLIENTS_DELETED_KEY = 'datastack:clients:deleted';
+export const DEFAULT_REDIS_RECENT_LIMIT = 500;
+export const MAX_REDIS_RECENT_LIMIT = 5000;
+const FLUSH_LOCK_TTL_MS = 30000;
+const FLUSH_LOCK_WAIT_MS = 400;
+const FLUSH_LOCK_RETRY_MS = 25;
 const UNLOCK_LUA_SCRIPT =
   'if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end';
+const RENEW_LOCK_LUA_SCRIPT =
+  'if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("pexpire", KEYS[1], ARGV[2]) else return 0 end';
+export const PURGE_CLIENT_LIST_LUA_SCRIPT = `
+-- DATASTACK_PURGE_CLIENT_LIST
+local key = KEYS[1]
+local target = ARGV[1]
+local items = redis.call("LRANGE", key, 0, -1)
+local removed = 0
+local kept = {}
+for i = 1, #items do
+  local raw = items[i]
+  local ok, obj = pcall(cjson.decode, raw)
+  local cid = ""
+  if ok and type(obj) == "table" and obj.clientId ~= nil then
+    cid = string.lower(tostring(obj.clientId))
+    cid = string.gsub(cid, "^%s*(.-)%s*$", "%1")
+    cid = string.gsub(cid, "[^a-z0-9_-]", "_")
+  end
+  if cid == target then
+    removed = removed + 1
+  else
+    kept[#kept + 1] = raw
+  end
+end
+if removed > 0 then
+  redis.call("DEL", key)
+  local chunk = 500
+  for i = 1, #kept, chunk do
+    local stop = math.min(i + chunk - 1, #kept)
+    redis.call("RPUSH", key, unpack(kept, i, stop))
+  end
+end
+return removed
+`.trim();
+
+export function resolveRedisRecentLimit(batchFlushThreshold?: number): number {
+  const envRaw = Number(process.env.DATASTACK_RECENT_LIMIT);
+  if (Number.isFinite(envRaw) && envRaw >= 100) {
+    return Math.min(MAX_REDIS_RECENT_LIMIT, Math.floor(envRaw));
+  }
+  const threshold = Number(batchFlushThreshold) || DEFAULT_REDIS_RECENT_LIMIT;
+  return Math.min(
+    MAX_REDIS_RECENT_LIMIT,
+    Math.max(DEFAULT_REDIS_RECENT_LIMIT, Math.floor(threshold)),
+  );
+}
+
+export interface FlushOptions {
+  waitMs?: number;
+  lockTtlMs?: number;
+  throwOnLockTimeout?: boolean;
+}
+
+export interface FlushResult {
+  count: number;
+  files: string[];
+  lockTimedOut?: boolean;
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeBufferClientId(clientId: string): string {
+  return String(clientId || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '_');
+}
 
 interface BufferGlobalState {
   buffer: DataEvent[];
@@ -43,11 +125,14 @@ interface BufferGlobalState {
   totalIngested: number;
   totalFlushed: number;
   isFlushing: boolean;
+  activeFlushPromise: Promise<FlushResult> | null;
   redisClient: RedisBufferClient | null | undefined;
   redisUrlConfigured: string;
   redisConnected: boolean;
   redisTestOverride: RedisBufferClient | null | undefined;
   pendingRedisWrites: Set<Promise<void>>;
+  deletedClientIds: Set<string>;
+  shutdownHooks: Set<() => Promise<unknown>>;
 }
 
 type BufferGlobals = typeof globalThis & {
@@ -71,12 +156,21 @@ function getState(): BufferGlobalState {
       totalIngested: 0,
       totalFlushed: 0,
       isFlushing: false,
+      activeFlushPromise: null,
       redisClient: undefined,
       redisUrlConfigured: '',
       redisConnected: false,
       redisTestOverride: undefined,
       pendingRedisWrites: new Set(),
+      deletedClientIds: new Set(),
+      shutdownHooks: new Set(),
     };
+  }
+  if (!globals.__dataStackBufferState.deletedClientIds) {
+    globals.__dataStackBufferState.deletedClientIds = new Set();
+  }
+  if (!globals.__dataStackBufferState.shutdownHooks) {
+    globals.__dataStackBufferState.shutdownHooks = new Set();
   }
   return globals.__dataStackBufferState;
 }
@@ -150,7 +244,9 @@ function getRedisClient(): RedisBufferClient | null {
 }
 
 export class DataBufferEngine {
-  private static maxRecentEvents = REDIS_RECENT_LIMIT;
+  public static getRecentLimit(): number {
+    return resolveRedisRecentLimit(getState().batchFlushThreshold);
+  }
 
   public static get batchFlushThreshold(): number {
     return getState().batchFlushThreshold;
@@ -174,6 +270,10 @@ export class DataBufferEngine {
     state.redisConnected = Boolean(client);
   }
 
+  public static getRedisClient(): RedisBufferClient | null {
+    return getRedisClient();
+  }
+
   public static async shutdown(): Promise<void> {
     const state = getState();
     if (state.flushTimer) {
@@ -188,6 +288,7 @@ export class DataBufferEngine {
     state.redisUrlConfigured = '';
     state.redisConnected = false;
     state.redisTestOverride = undefined;
+    state.deletedClientIds.clear();
     if (client) {
       try {
         if (typeof client.quit === 'function') {
@@ -203,6 +304,14 @@ export class DataBufferEngine {
     }
   }
 
+  public static registerShutdownHook(hook: () => Promise<unknown>): () => void {
+    const state = getState();
+    state.shutdownHooks.add(hook);
+    return () => {
+      state.shutdownHooks.delete(hook);
+    };
+  }
+
   public static async flushAndShutdownOnSignal(): Promise<void> {
     if (globals.__dataStackBufferShuttingDown) {
       return globals.__dataStackBufferShuttingDown;
@@ -210,8 +319,16 @@ export class DataBufferEngine {
 
     const run = (async () => {
       try {
+        const hooks = [...getState().shutdownHooks];
         await Promise.race([
-          this.flush().catch(() => undefined),
+          Promise.allSettled([
+            this.flush().catch(() => undefined),
+            ...hooks.map((hook) =>
+              Promise.resolve()
+                .then(() => hook())
+                .catch(() => undefined),
+            ),
+          ]),
           new Promise<void>((resolve) => setTimeout(resolve, 4000)),
         ]);
       } finally {
@@ -278,7 +395,8 @@ export class DataBufferEngine {
     const state = getState();
     state.totalIngested += 1;
     state.recentEvents.unshift(event);
-    if (state.recentEvents.length > this.maxRecentEvents) {
+    const recentLimit = this.getRecentLimit();
+    while (state.recentEvents.length > recentLimit) {
       state.recentEvents.pop();
     }
 
@@ -298,14 +416,24 @@ export class DataBufferEngine {
 
     if (redis) {
       const serialized = events.map((e) => JSON.stringify(e));
+      let bufferLen: number | null = null;
       try {
-        const bufferLen = await redis.rpush(REDIS_BUFFER_KEY, ...serialized);
-        await redis.lpush(REDIS_RECENT_KEY, ...serialized);
-        await redis.ltrim(REDIS_RECENT_KEY, 0, REDIS_RECENT_LIMIT - 1);
+        bufferLen = await redis.rpush(REDIS_BUFFER_KEY, ...serialized);
         state.redisConnected = true;
-        return Number(bufferLen) + state.buffer.length;
       } catch {
         state.redisConnected = false;
+      }
+
+      if (bufferLen !== null) {
+        // Best-effort recent list mirror: never duplicate into RAM buffer once rpush succeeded
+        try {
+          const recentLimit = this.getRecentLimit();
+          await redis.lpush(REDIS_RECENT_KEY, ...serialized);
+          await redis.ltrim(REDIS_RECENT_KEY, 0, recentLimit - 1);
+        } catch {
+          // Non-fatal: events are already committed in REDIS_BUFFER_KEY and state.recentEvents
+        }
+        return Number(bufferLen) + state.buffer.length;
       }
     }
 
@@ -363,117 +491,410 @@ export class DataBufferEngine {
     }
   }
 
-  /**
-   * Flushes queued events (shared Redis list under distributed lock + local RAM fallback) to partitioned CSV files.
-   * Redis LTRIM runs ONLY after CSVStorageManager.appendBatch succeeds so crashes never lose data.
-   */
-  public static async flush(): Promise<{ count: number; files: string[] }> {
+  private static async isClientDeletedForBuffer(
+    clientId: string,
+    redis: RedisBufferClient | null,
+    cache?: Map<string, boolean>,
+  ): Promise<boolean> {
+    const normalized = normalizeBufferClientId(clientId);
+    if (!normalized) return false;
     const state = getState();
+    if (state.deletedClientIds.has(normalized)) return true;
+    if (cache && cache.has(normalized)) return Boolean(cache.get(normalized));
+    if (redis && typeof redis.sismember === 'function') {
+      try {
+        const isDeleted =
+          Number(await redis.sismember(REDIS_CLIENTS_DELETED_KEY, normalized)) === 1;
+        if (cache) cache.set(normalized, isDeleted);
+        if (isDeleted) state.deletedClientIds.add(normalized);
+        return isDeleted;
+      } catch {
+        // Ignore transient Redis tombstone lookup error
+      }
+    }
+    if (cache) cache.set(normalized, false);
+    return false;
+  }
+
+  /**
+   * Marks a client deleted in the buffer layer and immediately strips queued local events.
+   */
+  public static markClientDeleted(clientId: string): void {
+    const normalized = normalizeBufferClientId(clientId);
+    if (!normalized) return;
+    const state = getState();
+    state.deletedClientIds.add(normalized);
+    state.buffer = state.buffer.filter(
+      (evt) => normalizeBufferClientId(evt.clientId) !== normalized,
+    );
+    state.recentEvents = state.recentEvents.filter(
+      (evt) => normalizeBufferClientId(evt.clientId) !== normalized,
+    );
+  }
+
+  /**
+   * Clears deleted tombstone when a client ID is explicitly re-registered.
+   */
+  public static unmarkClientDeleted(clientId: string): void {
+    const normalized = normalizeBufferClientId(clientId);
+    if (!normalized) return;
+    getState().deletedClientIds.delete(normalized);
+  }
+
+  private static async filterRedisListExcludingClient(
+    redis: RedisBufferClient,
+    listKey: string,
+    normalizedClientId: string,
+  ): Promise<number> {
+    const removed = await redis.eval(
+      PURGE_CLIENT_LIST_LUA_SCRIPT,
+      1,
+      listKey,
+      normalizedClientId,
+    );
+    return Number(removed) || 0;
+  }
+
+  /**
+   * Purges all queued events for a deleted client from both local RAM and shared Redis queues (BUG-19).
+   */
+  public static async purgeClientEventsAsync(
+    clientId: string,
+  ): Promise<{ removedLocal: number; removedRedis: number }> {
+    const normalized = normalizeBufferClientId(clientId);
+    if (!normalized) return { removedLocal: 0, removedRedis: 0 };
+
+    const state = getState();
+    state.deletedClientIds.add(normalized);
+
     if (state.pendingRedisWrites.size > 0) {
       await Promise.allSettled([...state.pendingRedisWrites]);
     }
-    if (state.isFlushing) {
-      return { count: 0, files: [] };
-    }
 
-    state.isFlushing = true;
-    let totalWritten = 0;
-    const filesSet = new Set<string>();
+    const beforeLocal = state.buffer.length;
+    state.buffer = state.buffer.filter(
+      (evt) => normalizeBufferClientId(evt.clientId) !== normalized,
+    );
+    const removedLocal = beforeLocal - state.buffer.length;
+    state.recentEvents = state.recentEvents.filter(
+      (evt) => normalizeBufferClientId(evt.clientId) !== normalized,
+    );
 
-    try {
-      const redis = getRedisClient();
-      if (redis) {
-        const lockToken = crypto.randomUUID();
-        let lockAcquired = false;
-
+    let removedRedis = 0;
+    const redis = getRedisClient();
+    if (redis) {
+      const lockToken = crypto.randomUUID();
+      let lockAcquired = false;
+      const deadline = Date.now() + 1500;
+      while (true) {
         try {
-          const lockResult = await redis.set(
+          const lockRes = await redis.set(
             REDIS_FLUSH_LOCK_KEY,
             lockToken,
             'PX',
             FLUSH_LOCK_TTL_MS,
             'NX',
           );
-          lockAcquired = lockResult === 'OK';
           state.redisConnected = true;
+          if (lockRes === 'OK') {
+            lockAcquired = true;
+            break;
+          }
         } catch {
           state.redisConnected = false;
-          lockAcquired = false;
+          break;
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        await sleepMs(Math.min(FLUSH_LOCK_RETRY_MS, remaining));
+      }
+
+      if (lockAcquired) {
+        try {
+          removedRedis += await this.filterRedisListExcludingClient(
+            redis,
+            REDIS_BUFFER_KEY,
+            normalized,
+          );
+          await this.filterRedisListExcludingClient(
+            redis,
+            REDIS_RECENT_KEY,
+            normalized,
+          ).catch(() => 0);
+        } catch {
+          // Flush-time deletedClientIds/tombstone filter remains active as secondary guard
+        } finally {
+          try {
+            await redis.eval(UNLOCK_LUA_SCRIPT, 1, REDIS_FLUSH_LOCK_KEY, lockToken);
+          } catch {
+            // Lock expires via PX TTL
+          }
+        }
+      }
+    }
+
+    return { removedLocal, removedRedis };
+  }
+
+  /**
+   * Flushes queued events (shared Redis list under distributed lock + local RAM fallback) to partitioned CSV files.
+   * Redis LTRIM runs ONLY after CSVStorageManager.appendBatch succeeds and lock ownership is verified.
+   */
+  public static async flush(options?: FlushOptions): Promise<FlushResult> {
+    const state = getState();
+    if (state.pendingRedisWrites.size > 0) {
+      await Promise.allSettled([...state.pendingRedisWrites]);
+    }
+    if (state.activeFlushPromise) {
+      return state.activeFlushPromise;
+    }
+
+    const executeFlush = async (): Promise<FlushResult> => {
+      state.isFlushing = true;
+      let totalWritten = 0;
+      let lockTimedOut = false;
+      const filesSet = new Set<string>();
+      const deletedCheckCache = new Map<string, boolean>();
+
+      try {
+        if (state.pendingRedisWrites.size > 0) {
+          await Promise.allSettled([...state.pendingRedisWrites]);
         }
 
-        if (lockAcquired) {
-          try {
-            const chunkSize = Math.max(500, state.batchFlushThreshold);
-            while (true) {
-              const rawItems = await redis.lrange(REDIS_BUFFER_KEY, 0, chunkSize - 1);
-              if (!rawItems || rawItems.length === 0) {
+        const redis = getRedisClient();
+        if (redis) {
+          const lockToken = crypto.randomUUID();
+          const lockTtlMs = Math.max(50, Number(options?.lockTtlMs) || FLUSH_LOCK_TTL_MS);
+          const waitMs = Math.max(
+            0,
+            options?.waitMs !== undefined ? Number(options.waitMs) : FLUSH_LOCK_WAIT_MS,
+          );
+          const deadline = Date.now() + waitMs;
+          let lockAcquired = false;
+          let redisError = false;
+
+          while (true) {
+            try {
+              const lockResult = await redis.set(
+                REDIS_FLUSH_LOCK_KEY,
+                lockToken,
+                'PX',
+                lockTtlMs,
+                'NX',
+              );
+              state.redisConnected = true;
+              if (lockResult === 'OK') {
+                lockAcquired = true;
                 break;
               }
+            } catch {
+              state.redisConnected = false;
+              redisError = true;
+              break;
+            }
 
-              const parsedBatch: DataEvent[] = [];
-              for (const raw of rawItems) {
+            const remaining = deadline - Date.now();
+            if (remaining <= 0) {
+              break;
+            }
+            await sleepMs(Math.min(FLUSH_LOCK_RETRY_MS, remaining));
+          }
+
+          if (!lockAcquired && !redisError) {
+            lockTimedOut = true;
+            if (options?.throwOnLockTimeout === true) {
+              throw new Error(
+                'FLUSH_LOCK_TIMEOUT: Timed out waiting for distributed Redis flush lock',
+              );
+            }
+          }
+
+          if (lockAcquired) {
+            const renewIntervalMs = Math.max(20, Math.floor(lockTtlMs / 3));
+            let lastRenewAt = Date.now();
+            let lockLost = false;
+            let renewInFlight: Promise<boolean> | null = null;
+
+            const renewLockOnce = (): Promise<boolean> => {
+              if (renewInFlight) return renewInFlight;
+              renewInFlight = (async () => {
                 try {
-                  const evt = JSON.parse(raw) as DataEvent;
-                  if (evt && evt.eventId) {
-                    parsedBatch.push(evt);
+                  const renewed = await redis.eval(
+                    RENEW_LOCK_LUA_SCRIPT,
+                    1,
+                    REDIS_FLUSH_LOCK_KEY,
+                    lockToken,
+                    String(lockTtlMs),
+                  );
+                  if (Number(renewed) === 1) {
+                    lastRenewAt = Date.now();
+                    return true;
                   }
+                  lockLost = true;
+                  return false;
                 } catch {
-                  // Ignore malformed legacy entry while still trimming it
+                  return false;
+                } finally {
+                  renewInFlight = null;
+                }
+              })();
+              return renewInFlight;
+            };
+
+            const renewTimer = setInterval(() => {
+              void renewLockOnce();
+            }, renewIntervalMs);
+            if (typeof renewTimer.unref === 'function') {
+              renewTimer.unref();
+            }
+
+            try {
+              const chunkSize = Math.max(500, state.batchFlushThreshold);
+              while (true) {
+                if (lockLost) break;
+
+                const rawItems = await redis.lrange(REDIS_BUFFER_KEY, 0, chunkSize - 1);
+                if (!rawItems || rawItems.length === 0) {
+                  break;
+                }
+
+                const parsedBatch: DataEvent[] = [];
+                let malformedCount = 0;
+                for (const raw of rawItems) {
+                  try {
+                    const evt = JSON.parse(raw) as DataEvent;
+                    if (evt && evt.eventId) {
+                      if (
+                        await this.isClientDeletedForBuffer(
+                          evt.clientId,
+                          redis,
+                          deletedCheckCache,
+                        )
+                      ) {
+                        continue;
+                      }
+                      parsedBatch.push(evt);
+                    } else {
+                      malformedCount += 1;
+                    }
+                  } catch {
+                    malformedCount += 1;
+                  }
+                }
+                if (malformedCount > 0) {
+                  console.warn(
+                    `[DataBufferEngine] Skipped ${malformedCount} malformed buffered Redis event(s) during flush`,
+                  );
+                }
+
+                if (Date.now() - lastRenewAt >= renewIntervalMs) {
+                  await renewLockOnce();
+                }
+                if (lockLost) break;
+
+                if (parsedBatch.length > 0) {
+                  const res = await CSVStorageManager.appendBatch(parsedBatch);
+                  totalWritten += res.written;
+                  for (const f of res.filesUpdated) filesSet.add(f);
+                }
+
+                if (Date.now() - lastRenewAt >= renewIntervalMs) {
+                  await renewLockOnce();
+                }
+                if (lockLost) {
+                  break;
+                }
+
+                // Trim strictly AFTER CSVStorageManager.appendBatch resolves and lock ownership holds
+                await redis.ltrim(REDIS_BUFFER_KEY, rawItems.length, -1);
+
+                if (rawItems.length < chunkSize) {
+                  break;
                 }
               }
-
-              if (parsedBatch.length > 0) {
-                const res = await CSVStorageManager.appendBatch(parsedBatch);
-                totalWritten += res.written;
-                for (const f of res.filesUpdated) filesSet.add(f);
+            } finally {
+              clearInterval(renewTimer);
+              if (renewInFlight) {
+                await renewInFlight.catch(() => false);
               }
-
-              // Trim strictly AFTER CSVStorageManager.appendBatch resolves safely
-              await redis.ltrim(REDIS_BUFFER_KEY, rawItems.length, -1);
-
-              if (rawItems.length < chunkSize) {
-                break;
+              try {
+                await redis.eval(UNLOCK_LUA_SCRIPT, 1, REDIS_FLUSH_LOCK_KEY, lockToken);
+              } catch {
+                // Lock auto-expires after lockTtlMs
               }
             }
-          } finally {
+          }
+        }
+
+        if (state.buffer.length > 0) {
+          const ramBatch = [...state.buffer];
+          state.buffer = [];
+          const validRamBatch: DataEvent[] = [];
+          for (const evt of ramBatch) {
+            if (
+              await this.isClientDeletedForBuffer(
+                evt.clientId,
+                redis,
+                deletedCheckCache,
+              )
+            ) {
+              continue;
+            }
+            validRamBatch.push(evt);
+          }
+
+          if (validRamBatch.length > 0) {
             try {
-              await redis.eval(UNLOCK_LUA_SCRIPT, 1, REDIS_FLUSH_LOCK_KEY, lockToken);
-            } catch {
-              // Lock auto-expires after FLUSH_LOCK_TTL_MS
+              const res = await CSVStorageManager.appendBatch(validRamBatch);
+              totalWritten += res.written;
+              for (const f of res.filesUpdated) filesSet.add(f);
+            } catch (err) {
+              state.buffer.unshift(...validRamBatch);
+              throw err;
             }
           }
         }
-      }
 
-      if (state.buffer.length > 0) {
-        const ramBatch = [...state.buffer];
-        state.buffer = [];
-        try {
-          const res = await CSVStorageManager.appendBatch(ramBatch);
-          totalWritten += res.written;
-          for (const f of res.filesUpdated) filesSet.add(f);
-        } catch (err) {
-          state.buffer.unshift(...ramBatch);
-          throw err;
-        }
-      }
-
-      if (totalWritten > 0) {
-        state.totalFlushed += totalWritten;
-        const filesUpdated = Array.from(filesSet);
-        for (const listener of state.flushListeners) {
-          try {
-            listener(totalWritten, filesUpdated);
-          } catch {
-            // ignore
+        if (totalWritten > 0) {
+          state.totalFlushed += totalWritten;
+          const filesUpdated = Array.from(filesSet);
+          for (const listener of state.flushListeners) {
+            try {
+              listener(totalWritten, filesUpdated);
+            } catch {
+              // ignore
+            }
           }
         }
-      }
 
-      return { count: totalWritten, files: Array.from(filesSet) };
-    } finally {
-      state.isFlushing = false;
+        return {
+          count: totalWritten,
+          files: Array.from(filesSet),
+          ...(lockTimedOut ? { lockTimedOut: true } : {}),
+        };
+      } finally {
+        state.isFlushing = false;
+        state.activeFlushPromise = null;
+      }
+    };
+
+    let flushDone = false;
+    let promise: Promise<FlushResult> | null = null;
+    promise = (async () => {
+      try {
+        return await executeFlush();
+      } finally {
+        flushDone = true;
+        state.isFlushing = false;
+        if (state.activeFlushPromise === promise) {
+          state.activeFlushPromise = null;
+        }
+      }
+    })();
+    if (!flushDone) {
+      state.activeFlushPromise = promise;
     }
+    return promise;
   }
 
   /**
@@ -495,6 +916,15 @@ export class DataBufferEngine {
     };
   }
 
+  public static getLocalBufferSnapshot(limit?: number): DataEvent[] {
+    const state = getState();
+    if (typeof limit === 'number' && Number.isFinite(limit) && limit >= 0) {
+      const cap = Math.floor(limit);
+      return cap === 0 ? [] : state.buffer.slice(-cap);
+    }
+    return [...state.buffer];
+  }
+
   public static getRecentEvents(limit = 50, filterClientId?: string): DataEvent[] {
     const state = getState();
     if (filterClientId && filterClientId !== 'all') {
@@ -514,7 +944,8 @@ export class DataBufferEngine {
 
     if (redis) {
       try {
-        const readCap = Math.min(REDIS_RECENT_LIMIT, Math.max(limit * 4, limit));
+        const recentLimit = this.getRecentLimit();
+        const readCap = Math.min(recentLimit, Math.max(limit * 4, limit));
         const rawItems = await redis.lrange(REDIS_RECENT_KEY, 0, readCap - 1);
         state.redisConnected = true;
 
@@ -523,6 +954,9 @@ export class DataBufferEngine {
           try {
             const parsed = JSON.parse(raw) as DataEvent;
             if (!parsed || !parsed.eventId) continue;
+            if (state.deletedClientIds.has(normalizeBufferClientId(parsed.clientId))) {
+              continue;
+            }
             if (filterClientId && filterClientId !== 'all' && parsed.clientId !== filterClientId) {
               continue;
             }

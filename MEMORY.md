@@ -1,7 +1,7 @@
 # MEMORY.md — DataStack Cross-IDE Persistent Project Memory
 
-> **Last Synchronized**: 2026-11-18 11:00:00 UTC  
-> **Status**: Fresh Source-Code Forensic Audit Complete (`notes/forensic-audit-report.md` — 27 verified findings across 5 categories; awaiting approval to plan incremental remediation phases)  
+> **Last Synchronized**: 2026-11-19  
+> **Status**: **Production & Deployment Hardening Complete (`BASELINE-2026-11-19-R2` + Deployment Hardening) — `4 / 4` R2 Phases (`18/18` bugs) + `5/5` Docker/Coolify Redeploy Fixes (`DEPLOY-BUG-01`–`05`) Verified (`85/85` TS tests, `10/10` Python tests, ESLint-enabled build & lint `0` errors / `0` warnings).**  
 > **Scope Rule**: Maintain this file accurately across VS Code, Google Antigravity, Cursor, and any other IDE after every modification, feature update, or bug fix (see `.ai-rules` and `AGENTS.md`).
 
 ---
@@ -69,9 +69,13 @@ datastack/
 │       ├── dashboard/ clients/ data/ export/ login/ profile/ sdk/ settings/ setup/ simulator/ storage/
 ├── components/
 │   ├── ui/                        # Single-source-of-truth UI primitives (Button, Input, Table, Modal, Panel, etc.)
-│   ├── layout/                    # MainLayout, Navbar, Sidebar, PageShell, AdminPageHeader, Footer
+│   ├── layout/                    # MainLayout, Navbar, Sidebar, VconShell, PageShell, AdminPageHeader, Footer
 │   ├── sections/                  # Modular feature sections (DashboardOverview, ClientsTable, DataBrowser, ExportWorkspace, SettingsWorkspace, etc.)
 │   └── pwa/                       # PwaLifecycle.tsx service worker registration
+├── lib/
+│   ├── adminAuth.ts               # Uniform API session guard (requireAdminApiSession) + proxy-safe extractClientIp()
+│   ├── vconCache.ts               # In-memory SWR cache + clearAuthCaches() for logout/SW cleanup
+│   └── vconUiHelpers.ts           # Pure Admin UI sync helpers (settings bounds, bridge sync, UTC presets, timestamps)
 ├── core/
 │   ├── adminSettings/             # settingsManager.ts (DB hydration, Port 4000 sync, unhydrated prune guard)
 │   ├── apiEngine/                 # apiService.ts (dashboard metrics & Port 4000 internal bridge queries)
@@ -81,6 +85,9 @@ datastack/
 │   ├── sdk/                       # sdkManager.ts (DB JWT hydration, client lifecycle, deleted_clients tombstone)
 │   ├── Security/                  # security.ts (rate limit, maxPayloadSizeKb, idempotency, internal headers)
 │   └── Storage/                   # csvStorage.ts (cooperative lock, rotation, cached streaming row count, prune)
+├── scripts/
+│   ├── dev-all.js                 # Local concurrent Next.js (3000) + Ingestion (4000) dev runner
+│   └── start-all.js               # Production concurrent Next.js (`next start`) + Ingestion (`server/index.js`) runner
 ├── server/
 │   ├── index.js                   # Express 5 + Socket.IO (Port 4000), /health, /internal/* bridge, PG sync, graceful exit
 │   ├── socket/handlers.js         # Handshake JWT auth, ping_verify, sync_data, batch_sync
@@ -139,15 +146,24 @@ datastack/
 │       ├── configuration-reference.md # Complete environment variable & setting bounds
 │       ├── dependencies.md        # Runtime & dev dependencies audit with rationales
 │       └── glossary.md            # Technical domain terminology & concept glossary
-├── notes/                         # Fresh forensic audit output only (legacy reports/plans cleared):
-│   └── forensic-audit-report.md   # 100% source-verified audit report (27 issues: 5C, 11H, 10M, 1L)
+├── notes/                         # Production Hardening Governance & Scope-Lock Suite (`BASELINE-2026-11-19-R2`):
+│   ├── README.md                  # Master governance index & 6-step scope-locked execution protocol
+│   ├── FORENSIC_AUDIT_REPORT.md   # 100% raw-code verified audit (18 bugs: 0C/6H/8M/4L), Demo vs Prod & UI-vs-Reality matrices
+│   ├── BASELINE_FREEZE.md         # Frozen baseline snapshot (`BASELINE-2026-11-19-R2`) & 1:1 bug alignment
+│   ├── PRODUCTION_READINESS_SCOPE_LOCK.md # (Doc 001) Exact bug fix contracts & per-phase Scope Locks (`Phase-01`..`Phase-04`)
+│   ├── PRODUCTION_ROADMAP.md      # (Doc 002) Dependency-ordered A-Z 4-phase roadmap & burn-down tracker
+│   ├── PHASE_EXECUTION_LOG.md     # (Doc 003) Live phase completion log (`4/4` complete) & zero-regression guardrails
+│   ├── ERROR_HANDLING_MATRIX.md   # (Doc 004) Active error-handling catalog & 9 planned hardening additions
+│   └── ACTUAL_IMPLEMENTATION_STATUS.md # Ground-truth working vs completed-per-phase vs remaining ledger
 └── tests/                         # Automated verification suites:
     ├── phase01-auth.test.ts       # Auth fail-closed, tokenVersion, brute-force lockout, Bearer revocation, CSRF
     ├── phase02-sync.test.ts       # Internal bridge auth, settings sync, JWT rotation kick, rate/security metrics
     ├── phase03-storage-buffer.test.ts # Redis durability, cooperative CSV locks, streaming row count, export filters
-    ├── phase05_sdk_test.py        # Python SDK WebSocket/HTTP fallback, offline spool, file streaming
-    ├── phase06-pwa-landing.test.ts # PWA manifest/icons/sw + navigation routes
-    └── phase07-deployment.test.ts # Compose/Redis AOF, Nginx /health, lockfile, prune guard, shutdown flush
+    ├── phase04-ui-sync.test.ts      # UI/API settings bounds, bridge status, UTC presets, timestamp & folder matching
+    ├── phase05-packaging.test.ts    # Python/Node packaging parity, PEP 561 py.typed, Node engines & start-all exit
+    ├── phase05_sdk_test.py          # Python SDK WebSocket/HTTP fallback, offline spool, file streaming, edge hardening
+    ├── phase06-pwa-landing.test.ts  # PWA manifest/icons/sw + navigation routes
+    └── phase07-deployment.test.ts   # Compose/Redis AOF, Nginx /health, lockfile, prune guard, shutdown flush
 ```
 
 ---
@@ -175,10 +191,114 @@ All planned hardening & deployment phases (**Phase-01 through Phase-07**) are **
 7. **Docker / Coolify Deployment & Persistence Hardening (Completed — Phase-07)**
    - Redis AOF persistence (`redisdata:/data`), deterministic `package-lock.json` for `npm ci`, Nginx `location = /health` → `ingestion:4000`, `/api/health` container probes, non-blocking startup ownership check in Dockerfiles, unhydrated-DB `autoPruneDays` safety guard in `SettingsManager`, DB JWT hydration in `SDKManager`, graceful `SIGTERM`/`SIGINT` flush in `DataBufferEngine`, and non-destructive `ADD COLUMN IF NOT EXISTS` DDL guards.
 
-- **Current Forensic Audit Status (2026-11-18)**:
-  - All prior notes in `notes/` were cleared and replaced exclusively with `notes/forensic-audit-report.md` backed strictly by source-code citations and verbatim proofs (zero markdown extrapolation).
-  - Baseline checks currently pass (`24/24` TS tests, `eslint .` clean, `3/3` Python unit tests), while deep source inspection uncovered **27 verified defects/gaps** (`5` Critical, `11` High, `10` Medium, `1` Low) across Auth/Middleware (`A01–A05`), Demo-vs-Prod Split-Brain (`B01–B05`), Buffer/CSV Storage (`C01–C06`), Admin UI vs Backend Reality (`D01–D07`), and SDK/Packaging/PWA (`E01–E04`).
-  - Next step pending user approval: organize remediation into an incremental phased plan based strictly on `notes/forensic-audit-report.md`.
+- **Current Remediation Status (2026-11-18)**:
+  - **Phase-01 Complete & Verified** (`BUG-A01`, `BUG-A02`, `BUG-A03`, `BUG-A04`, `BUG-A05`, `BUG-E02`):
+    - Removed spoofable header/UA CSRF bypasses in `middleware.ts` and rejected `sec-fetch-site: cross-site`.
+    - Enforced DB-backed `tokenVersion` session validation across `/vcon/*` layout (`app/vcon/layout.tsx` + `components/layout/VconShell.tsx`) and read/export APIs (`/api/data`, `GET /api/events`, `/api/export`, `/api/metrics`, `/api/storage`).
+    - Prevented transient DB errors from triggering false `/vcon/setup` redirects and prevented swallowed `NEXT_REDIRECT` errors on `/`, `/vcon/login`, and `/vcon/setup`.
+    - Standardized `SDKManager.normalizeClientId`, blocked deleted/unregistered clients on `/api/health` and Admin `POST /api/events`, hardened `POST /api/clients` & `PATCH /api/clients/[id]` input validation, and excluded `/vcon/*` from Service Worker caching with `CLEAR_AUTH_CACHE` on sign-out.
+    - Verified: `26/26` TS tests, `3/3` Python tests, `npm run build` clean, `eslint .` clean, Playwright browser auth/logout E2E clean.
+  - **Phase-02 Complete & Verified** (`BUG-B01`–`BUG-B05`):
+    - Enforced fail-closed client verification in `server/index.js` (`verifyClientInDb`) backed by PG, deletion tombstones, Redis `datastack:clients:*` mirrors, and normalized `clientId` keys across both runtimes.
+    - Added cross-runtime Redis idempotency (`datastack:idem:*`) and fixed-window rate limiting (`datastack:rl:*`) in `core/Security/security.ts` (`validateEventAsync`) and `server/socket/handlers.js` (`validateSingleEventAsync`) with automatic local RAM fallback.
+    - Surfaced bridge sync telemetry (`BridgeSyncResult`, `SettingsBridgeSyncStatus`, `runtime.ingestionBridgeStatus`, `POST /api/settings` `bridgeSync`) and normalized `SDKManager.incrementEventCountAsync()`.
+    - Fixed Socket `sync_data` flat payload preservation (`extractSingleEventData`), reconciled `PORT_SOCKET`/`PORT` precedence and live `/internal/metrics` ports, and added concurrent production `scripts/start-all.js` for `npm start`.
+    - Verified: `29/29` TS tests, `3/3` Python tests, `npm run build` clean, `eslint .` clean, Playwright browser check (`/vcon/dashboard`, `/vcon/settings`, `/api/metrics`) clean with `0` console errors.
+  - **Phase-03 Complete & Verified** (`BUG-C01`–`BUG-C06`):
+    - Hardened Redis flush lock TTL (`30000ms`), added in-process `activeFlushPromise` coalescing with a `flushDone` identity guard (`core/data/buffer.ts`, `server/index.js`), isolated `redis.rpush` from best-effort `REDIS_RECENT_KEY`, and logged malformed buffered JSON warnings.
+    - Enforced `sanitizeClientId()` path containment and `lstat` symlink exclusion, unique lock owner tokens (`${pid}:${ts}:${uuid}`), atomic `rename` stale-lock takeover, owner-verified lock unlock, and structured `JSON.stringify([clientId, date])` partition grouping in `core/Storage/csvStorage.ts` and `server/workers/csvWriter.js`.
+    - Fixed trailing newline blank-row prevention (`fileEndsWithNewline`), proactive size-boundary rotation (`-partN.csv`), `StringDecoder('utf8')` streaming row counting, cooperatively locked `pruneExpiredPartitions`, and 1-hour `PRUNE_COOLDOWN_MS` in `core/adminSettings/settingsManager.ts`.
+    - Enforced `parser`/`fileStream` destruction in `finally` blocks across `/api/data`, `GET /api/events`, and `/api/export`, error propagation inside `makeExportStream`, `502` surfacing on Port `4000` flush failure in `/api/export`, normalized `clientId` filtering, numeric timestamp sorting (`parseTimestampMs`), and `?format=json` / `?includeHeader=false` parity for `?filename=` exports.
+    - Verified: `32/32` TS tests, `3/3` Python tests, `npm run build` clean, `eslint .` clean, Playwright browser check (`/vcon/dashboard`, `/vcon/data`, `/vcon/storage`, `/vcon/export`, `/api/data`, `/api/storage`, `/api/export`) clean with `0` console errors.
+  - **Phase-04 Complete & Verified** (`BUG-D01`–`BUG-D07`):
+    - Extracted pure UI synchronization helpers in `lib/vconUiHelpers.ts` (`SETTINGS_LIMITS`, `normalizeEditableSettings`, `describeSettingsBridgeSync`, `mapBridgeStatusToSocketUiState`, `parseEventTimestamp`, `formatEventTimeLabel`, `getUtcDateRangeForPreset`, `matchesSelectedClientFolder`, `extractContentDispositionFilename`).
+    - Updated `components/sections/SettingsWorkspace.tsx` (`BUG-D01`) to probe `/api/metrics` honestly (removing false `/api/health` fallback), surface `bridgeSync` warning/error toasts on save, align integer bounds with `/api/settings` (`1..100000`, `1..10240`, `0..3650`), and eliminate the startup `serverPort` double-fetch.
+    - Updated `app/vcon/storage/page.tsx` (`BUG-D02`) and `components/sections/ExportWorkspace.tsx` (`BUG-D03`) with `cache: 'no-store'`, `401` redirects, UTC preset ranges, normalized client folder filters, and fetch+Blob downloads with `502`/JSON error surfacing.
+    - Updated `components/sections/DashboardOverview.tsx` (`BUG-D04`) and `components/sections/DataBrowser.tsx` (`BUG-D05`) with `ingestionBridgeStatus` display, `auth_error` alert banner, safe ISO/epoch-ms timestamp formatting, invalid date-range guard, and Enter-key filter submission.
+    - Updated `components/sections/NewClientModal.tsx`, `components/sections/ClientsTable.tsx`, `app/vcon/simulator/page.tsx`, `app/vcon/sdk/page.tsx`, `components/sections/ProfileWorkspace.tsx`, and `components/layout/Sidebar.tsx` (`BUG-D06`, `BUG-D07`) with `1..100000` rate limit parity, live `runtime.serverPort` sync, real HTTP batch ingestion in Simulator, password bounds check, and `datastack:profile-updated` live Sidebar sync.
+    - Verified: `37/37` TS tests (`tests/phase04-ui-sync.test.ts`), `3/3` Python tests, `npm run build` clean, `eslint .` clean, Playwright browser check across all Admin Console routes clean with `0` console errors.
+  - **Phase-05 Complete & Verified** (`BUG-E01`, `BUG-E03`, `BUG-E04`):
+    - Hardened canonical Python SDK (`sdk/python/datastack/datastack/*`): normalized `CLIENT_ID` comparison (`_normalize_client_id`), sanitized ragged CSV extra columns (`restkey="_extra"`), accurate `send_file()` `success` + `unprocessedItems`, partial-batch `rateLimitedEventIds` retry exception fallback, `DataStackConfigError` wrapping for malformed numeric env/config values (`config.py`), concurrent `stop()` vs `set_idle_connected()` race fix + clean thread join (`heartbeat.py`), `os.fsync` + orphan `.tmp` unlink + warning logs (`spool.py`), and PEP 561 `py.typed` marker.
+    - Aligned packaging metadata across `sdk/python/datastack/pyproject.toml`, `sdk/python/datastack/setup.py`, and `sdk-python/setup.py`, coordinated child-exit shutdown in `scripts/start-all.js`, and added `engines.node >=20.0.0` in `package.json`.
+    - Verified: `39/39` TS tests (`tests/phase05-packaging.test.ts`), `6/6` Python tests (`tests/phase05_sdk_test.py`), `py_compile`, `npm run build`, and `eslint .` clean.
+  - **Previous Remediation Cycle (2026-11-18)**: Completed Phases 01–05 (`39/39` TS tests, `6/6` Python tests).
+  - **New Production Hardening Cycle (`BASELINE-2026-11-19`)**:
+    - Re-audited entire codebase from raw source code (`notes/FORENSIC_AUDIT_REPORT.md`): **29** verified bugs/mismatches (`4` Critical, `8` High, `13` Medium, `4` Low).
+    - **Phase-01 Complete & Verified (`2026-11-19`)** (`BUG-01`, `BUG-04`, `BUG-05`, `BUG-06`):
+      - Blocked volatile RAM admin creation in production without `DATABASE_URL` (`AdminDatabaseRequiredError`), surfaced production DB warning on `/vcon/setup`, and mapped pre-setup login to `409 SETUP_REQUIRED`.
+      - Added brute-force attempt throttling (`429` + `Retry-After`) and completion-first ordering to `POST /api/auth/setup`.
+      - Added server-side `token_version` revocation (`revokeAdminSessions()`) on `POST /api/auth/logout`, removed client `Origin` trust from cookie `Secure` flag, and added `sec-fetch-site: same-origin` CSRF fallback.
+      - Prevented empty production `jwt_secret` persistence in PG and replaced silent DB write `catch {}` swallows in `SettingsManager` and `SDKManager` with `DATABASE_WRITE_FAILED` propagation and safe RAM rollback.
+      - Verified: `43/43` TS tests, `6/6` Python tests, `npm run build`, `eslint .`, and Playwright login/logout revocation check clean.
+    - **Phase-02 Complete & Verified (`2026-11-19`)** (`BUG-02`, `BUG-03`, `BUG-17`, `BUG-22`):
+      - Protected Port 4000's `inMemoryClientRegistry` from empty Port 3000 `bulk_sync` wipes (`!forceReplace`), exposed `inMemoryClients` on `/internal/metrics`, added non-destructive hydration in `SDKManager` (`listClientsAsync`, `getClientAsync`, `syncAllClientsToIngestionAsync`), and auto-reconciled Port 4000 cold starts in `ApiEngine.getDashboardMetrics()`.
+      - Ordered `SettingsManager.updateSettingsAsync()` JWT rotation to sync Port 4000 *before* committing Port 3000 RAM/PG/re-sign, aborting fail-closed (`JWT_ROTATION_BRIDGE_FAILED`) on bridge rejection/prod unreachable, rolling back Port 4000 on PG/re-sign error, and adding a 60s dual-secret grace window in `server/index.js` `requireInternalAuth()`.
+      - Added authenticated `POST /internal/security-check` on Port 4000 (backed by zero-copy `validateSingleEventLocal`) so Port 3000 HTTP `SecurityEngine.validateEventAsync()` shares rate limits & idempotency with Port 4000 WS even without Redis, and exposed explicit `securityMode` (`redis_shared` | `bridge_coordinated` | `degraded_local`) in `/api/metrics`.
+      - Replaced per-event PG `UPDATE client_sdks` queries on both Port 3000 (`SDKManager`) and Port 4000 (`server/index.js`) with 1s coalescing in-memory deltas flushed via batched `UNNEST` SQL updates (flushed on reads and graceful shutdown).
+      - Verified: `47/47` TS tests, `6/6` Python tests, `npm run build`, and `eslint .` clean.
+    - **Phase-03 Complete & Verified (`2026-11-19`)** (`BUG-18`, `BUG-19`, `BUG-20`, `BUG-29`):
+      - Added bounded Redis flush lock wait/retry, periodic Lua `PEXPIRE` TTL renewal with ownership fencing before `LTRIM`, and explicit `FLUSH_LOCK_TIMEOUT` (`503` on `/internal/flush`) across both `core/data/buffer.ts` and `server/index.js`.
+      - Added full deleted-client buffer purge (`DataBufferEngine.purgeClientEventsAsync`, Port 4000 `purgeClientFromLocalBuffer`) plus flush-time and recent-read tombstone filtering so deleted client directories never resurrect on subsequent flushes; ordered `SDKManager.deleteClientAsync()` to purge buffers and sync Port 4000 before deleting disk files.
+      - Converted `server/index.js` `onBufferPush` to `async` and awaited it before firing Socket.IO ACK callbacks in `server/socket/handlers.js` (`sync_data` and `batch_sync`), returning `BUFFER_PERSIST_FAILED` on persistence error.
+      - Unified canonical CSV storage root resolution via `DATASTACK_STORAGE_DIR` (`resolveDefaultStorageDir()`) across `core/Storage/csvStorage.ts`, `server/workers/csvWriter.js`, `core/sdk/sdkManager.ts`, and `.env.example`.
+      - Verified: `51/51` TS tests, `6/6` Python tests, `npm run build`, and `eslint .` clean.
+    - **Phase-04 Complete & Verified (`2026-11-19`)** (`BUG-21`, `BUG-23`, `BUG-24`):
+      - Aligned HTTP `POST /api/events` single-event envelope stripping 1:1 with Port 4000 WS `sync_data` and eliminated fabricated `{ sample, rand }` telemetry on empty `{}`.
+      - Converted `GET /api/data` directory/stat scans to non-blocking async `node:fs/promises` with newest-first date-partition pruning, and scaled `REDIS_RECENT_LIMIT` boundedly (`500..5000`) via `resolveRedisRecentLimit()` / `DATASTACK_RECENT_LIMIT` across Port 3000 & Port 4000.
+      - Replaced all `Math.random()` client secrets (`crypto.randomBytes(16)`) and fallback `eventId`s (`crypto.randomBytes(6)`) with CSPRNG across `core/sdk/sdkManager.ts`, `app/api/events/route.ts`, and `server/socket/handlers.js`.
+      - Unified canonical PostgreSQL metadata DDL (`CORE_SCHEMA_TABLE_DDLS` + `CORE_SCHEMA_ALTER_DDLS` + `ensureCoreSchemaOnPool()`) in `core/Database/database.ts`, delegated `core/auth/adminUsers.ts` to it, mirrored all 5 tables + 3 additive `ALTER TABLE` guards 1:1 in standalone `server/index.js`, and documented canonical `pg` ownership in `prisma/schema.prisma`.
+      - Verified: `55/55` TS tests (`tests/phase04-ingestion-hygiene.test.ts` added), `6/6` Python tests, `npm run build`, and `eslint .` clean.
+    - **Phase-05 Complete & Verified (`2026-11-19`)** (`BUG-07`, `BUG-08`, `BUG-09`, `BUG-14`):
+      - Fixed Simulator HTTP `Burst 10` to send canonical `{ clientId, batch }` (with `events` batch alias & explicit `accepted` count in `POST /api/events`) and summarize exact server-confirmed counts via `summarizeHttpBatchResult()` without `res.ok ? count : 0` falsification.
+      - Fixed `parseEventTimestamp()` & added `getEventUtcDate()` in `lib/vconUiHelpers.ts` for integer and fractional epoch-seconds (`< 1e11 * 1000`) 1:1 with backend CSV parsers.
+      - Added pending-queue-only `getPendingBufferedSummary()` (`?bufferedOnly=true` / `?includeBufferedSummary=true`) and fair multi-client partition scanning (`selectRecentPartitionFiles()`, lifting the global 5-file cap) in `GET /api/events`.
+      - Updated `ExportWorkspace.tsx` to match buffered events strictly against active client/date filters via `countMatchingBufferedEvents()` (preventing empty filtered header downloads) and refresh `/api/storage`, `/api/metrics`, and `vconCache` immediately post-export; updated `DashboardOverview.tsx` to attribute strictly UTC-today buffered events to `Events today` and call `await refresh()` after Quick Export.
+      - Verified: `58/58` TS tests, `6/6` Python tests, `npm run build`, `eslint .`, and Playwright E2E browser check (`/vcon/simulator`, `/vcon/export`, `/vcon/dashboard`, `0` console errors/warnings) clean.
+    - **Phase-06 Complete & Verified (`2026-11-19`)** (`BUG-10`, `BUG-11`, `BUG-12`, `BUG-13`, `BUG-15`, `BUG-16`):
+      - Returned explicit `SESSION_EXPIRED` / `AUTH_UNAVAILABLE` vs `INVALID_PASSWORD` codes in `/api/auth/profile`, replaced dead `401 && !currentPassword` redirect with `shouldRedirectProfileUnauthorized()`, and formatted `Session Expires` with calendar date + 24h time (`formatSessionExpiryLabel()`).
+      - Added opt-in `?purgeFiles=true` checkbox in `ClientsTable.tsx` client deletion modal and removed the misleading unused `Secret key` row from `CredentialsDisplay`.
+      - Refactored `SettingsWorkspace.tsx` numeric inputs to string drafts (`NumericSettingDrafts`) validated inline via `validateEditableSettingsDraft()` (`noValidate` submit + tab jump to first invalid field, zero snap-to-`0`, zero silent clamping) and clarified `Socket port (PORT_SOCKET)` as read-only runtime config.
+      - Unified public endpoint resolution (`resolvePublicEndpoints()`) across `SettingsWorkspace`, `/vcon/sdk`, and `/vcon/simulator` (consistent on port-80 `localhost` proxies) and updated `SdkSection.tsx` + `/vcon/sdk` with external path/wheel `pip install` guidance.
+      - Added pre-hydration `datastack-theme` bootstrap script + `suppressHydrationWarning` in `app/layout.tsx` (zero light-mode FOUC) and theme restoration/toggle in `AdminSetup.tsx`.
+      - Upgraded `public/sw.js` (`datastack-cache-v3`) with an uncached `503` HTML offline navigation fallback shell (`buildOfflineShellResponse()`, `Cache-Control: no-store`) for `/vcon/dashboard` and public navigations.
+      - Verified: `64/64` TS tests, `6/6` Python tests, `npm run build`, `eslint .`, and Playwright Chromium E2E check (`/vcon/profile`, `/vcon/clients`, `/vcon/settings`, `/vcon/sdk`, Light Mode reload, `0` console errors/warnings) clean.
+    - **Fresh Post-Phase-07 Forensic Audit & Baseline Freeze (`BASELINE-2026-11-19-R2`)**:
+      - Previous `Phase-07` hardening (`BUG-25`–`BUG-28`) landed in Python SDK (`client.py`), legacy `sdk-python`, `scripts/start-all.js` / `dev-all.js`, `nginx/default.conf`, `server/index.js`, `docker/docker-compose.yml`, and `.env.example`.
+      - Conducted a brand-new 100% raw-source-code audit (`notes/FORENSIC_AUDIT_REPORT.md`) identifying **18 verified remaining bugs** (`0` Critical, `6` High, `8` Medium, `4` Low).
+      - Frozen baseline (`BASELINE-2026-11-19-R2`) and created the complete 7-document governance & Scope-Lock suite in `notes/` (`README.md`, `BASELINE_FREEZE.md`, `PRODUCTION_READINESS_SCOPE_LOCK.md`, `PRODUCTION_ROADMAP.md`, `PHASE_EXECUTION_LOG.md`, `ERROR_HANDLING_MATRIX.md`, `ACTUAL_IMPLEMENTATION_STATUS.md`).
+      - **R2 Phase-01 Complete & Verified (`2026-11-19`)** (`BUG-01`, `BUG-02`):
+        - Moved same-origin CSRF enforcement in `middleware.ts` ahead of the public-route early return so `POST /api/auth/login` and `POST /api/auth/setup` reject cross-origin/missing-origin requests with `403` while preserving same-origin browser submissions, `sec-fetch-site: same-origin` fallback, safe `GET` routes, and Bearer `POST /api/events`.
+        - Extracted shared reverse-proxy-safe `extractClientIp()` in `lib/adminAuth.ts` (trusting `x-real-ip` first, then rightmost non-empty `x-forwarded-for` hop) and wired it into both `app/api/auth/login/route.ts` and `app/api/auth/setup/route.ts` to block spoofed-XFF brute-force lockout bypasses.
+        - Verified: `14/14` `tests/phase01-auth.test.ts` pass, `npm run build`, `npm run lint`, live HTTP `403`/`401` CSRF probes, and Chromium `/vcon/login` → `/vcon/dashboard` E2E (`0` errors).
+      - **R2 Phase-02 Complete & Verified (`2026-11-19`)** (`BUG-05`, `BUG-06`, `BUG-07`, `BUG-08`, `BUG-09`, `BUG-10`):
+        - Attached `.on('error', ...)` listeners to `DatabaseEngine.getPool()` (`max: 10`) and `server/index.js` `dbPool`, and consolidated `core/auth/adminUsers.ts` onto the shared `DatabaseEngine.getPool()`.
+        - Replaced non-atomic Redis `LTRIM`+`LPUSH` client deletion purging in `core/data/buffer.ts` with atomic Lua script `PURGE_CLIENT_LIST_LUA_SCRIPT` (`cjson.decode` + chunked `RPUSH`), and replaced non-atomic Redis `INCR`+`PEXPIRE` rate limiting with atomic Lua script `REDIS_RATE_LIMIT_LUA_SCRIPT` across both `core/Security/security.ts` and `server/socket/handlers.js`.
+        - Enforced `throwOnLockTimeout: true` locally and remotely on `POST /internal/flush` in `GET /api/export` and `POST /api/storage`, surfacing explicit `503 FLUSH_LOCK_TIMEOUT`.
+        - Added `DataBufferEngine.registerShutdownHook()` and registered `SDKManager.flushPendingClientActivityAsync()` so Port `3000` flushes coalesced `total_events` deltas on `SIGTERM`/`SIGINT`.
+        - Wrapped `GET`, `PATCH` (`regenerate_token` & update), and `DELETE` in `app/api/clients/[id]/route.ts` with structured JSON `try/catch` error responses.
+        - Verified: `14/14` `tests/phase02-sync.test.ts` pass, `3/3` `R2 PHASE-02` buffer/storage tests pass, `npm run build` pass, `npm run lint` pass (`0` errors).
+      - **R2 Phase-03 Complete & Verified (`2026-11-19`)** (`BUG-03`, `BUG-04`, `BUG-11`, `BUG-12`, `BUG-13`, `BUG-15`):
+        - Unified `SettingsBridgeSyncStatus` & `POST /api/settings` `bridgeSync` response (`attempted`, `ok`, `synced`, `status`, `error`, `checkedAt`) and updated `describeSettingsBridgeSync()` + `SettingsWorkspace.tsx` so Port `4000` warnings/online state work reliably.
+        - Counted regular non-symlink `.csv` files in `SDKManager.purgeClientStorageDir()` (`deleteClientWithStatsAsync()`) and returned exact `purgedFiles` from `DELETE /api/clients/[id]?purgeFiles=true`.
+        - Aligned flat batch item metadata stripping (`eventId`, `timestamp`, `clientId`) 1:1 with single-event stripping across HTTP `POST /api/events`, WS `batch_sync`, and Python SDK `send_batch()`/`send_file()`.
+        - Exposed `DataBufferEngine.getLocalBufferSnapshot()` for exact Port `3000` RAM pending summary in `getPendingBufferedSummary()`.
+        - Added non-blocking `pruneExpiredPartitionsAsync()` off live event loops in `core/Storage/csvStorage.ts` & `server/workers/csvWriter.js` (wired into `settingsManager.ts` & `server/index.js`) and deduplicated `GET /api/storage` to a single `listAllFilesAsync()` scan with accurate client-scoped `stats`.
+        - Cleared `selectedClientToken` on `/vcon/sdk` client switch (with loading placeholder + disabled `Copy Config`), added `400 INVALID_DATE_RANGE` for `from > to` in `GET /api/export`, and normalized `clientId` filtering in `ApiEngine.getExportFiles*` & Port `4000` `/internal/recent`.
+        - Verified: `21/21` `phase04-*` tests pass, `2/2` `R2 PHASE-03` storage tests pass, `9/9` Python SDK tests pass, Chromium E2E across `/vcon/settings`, `/vcon/clients`, `/vcon/sdk`, `/vcon/storage` (`0` console errors), `npm run build` & `npm run lint` (`0` errors).
+      - **R2 Phase-04 Complete & Verified (`2026-11-19`)** (`BUG-14`, `BUG-16`, `BUG-17`, `BUG-18`):
+        - Added `from __future__ import annotations`, imported `Tuple`, and replaced PEP 585 `tuple[int, Dict[str, Any]]` with Python `3.8`-safe `Tuple[int, Dict[str, Any]]` in `sdk/python/datastack/datastack/client.py`, verified by a full-package Python `3.8` AST scan test in `tests/phase05_sdk_test.py`.
+        - Added unbuffered streaming `location = /api/export` (`proxy_buffering off;`, `proxy_read_timeout 300s;`) targeting `http://nextjs_upstream` in both `nginx/default.conf` and `docker/coolify-nginx.conf`.
+        - Removed `eslint: { ignoreDuringBuilds: true }` from `next.config.ts`, set `package.json` `"name": "datastack"`, pruned unused template packages (`@google/genai`, `firebase-tools`), and synchronized `package-lock.json`.
+        - Isolated `DATASTACK_DISABLE_LISTEN=1` and live Port `4000` coupling across `tests/phase01-auth.test.ts`, `tests/phase02-sync.test.ts`, `tests/phase03-storage-buffer.test.ts`, `tests/phase04-ingestion-hygiene.test.ts`, and `tests/phase07-deployment.test.ts`.
+        - Verified: `83/83` full TS suite pass (with live Port `4000` running, without manual env flags), `10/10` Python SDK tests + `py_compile` pass, `npm run build` (with ESLint active) pass, `npm run lint` (`0` errors, `0` warnings).
+      - **Progress**: `4 / 4` phases complete (`18 / 18` bugs resolved — **100% Production Ready**).
+    - **Pre-Release Docker & Coolify Deployment Hardening Complete & Verified (`2026-11-19`)** (`DEPLOY-BUG-01`–`05`, audited in `notes/DEPLOYMENT_COOLIFY_AUDIT_REPORT.md`):
+      - **`DEPLOY-BUG-01`**: Replaced static `upstream` blocks in `docker/coolify-nginx.conf` with Docker embedded DNS `resolver 127.0.0.11 valid=10s ipv6=off;` and variable `proxy_pass` targets (`$nextjs_upstream` = `http://web:3000`, `$socketio_upstream` = `http://ingestion:4000`), preventing `502 Bad Gateway` stale container IP outages after container restarts/redeploys.
+      - **`DEPLOY-BUG-02`**: Refactored Port `4000` startup in `server/index.js` into `startIngestionServer()` awaiting bounded `syncSettingsFromDatabase()` before `server.listen(PORT)` so rotated PG `jwt_secret` and rate-limit settings hydrate prior to `/health: 200` and `/internal/*` bridge traffic.
+      - **`DEPLOY-BUG-03`**: Memoized `ensureDatabaseSchema()` per active `dbPool` instance in `server/index.js` (resetting only on pool swap or DDL failure) so 3-second `syncSettingsFromDatabase()` ticks no longer issue 8 `CREATE/ALTER TABLE` DDLs repeatedly.
+      - **`DEPLOY-BUG-04`**: Reordered `gracefulShutdown()` in `server/index.js` to close Socket.IO/HTTP ingress first (`closeServerGracefully()`), drain `pendingRedisWrites` and `flushBuffer()`/`flushPendingClientActivity()` with bounded timeouts (`2000ms`/`6000ms`), and close Redis (`quit()` with `2000ms` timeout + `.disconnect()` fallback) and PostgreSQL (`dbPool.end()` bounded `2000ms`); added `stop_grace_period: 20s` to both `web` and `ingestion` in `docker/docker-compose.yml`.
+      - **`DEPLOY-BUG-05`**: Clarified Coolify `Base Directory: /` and `Docker Compose Location: /docker/docker-compose.yml` in `docs/users/installation.md` and `README.md`.
+      - Verified: `85/85` full TS suite pass (`11/11` in `tests/phase07-deployment.test.ts`), `10/10` Python SDK tests pass, `npm run build` clean, `npm run lint` (`0` errors, `0` warnings).
 
 ---
 

@@ -11,7 +11,11 @@ import {
 } from '@/components/ui/SettingsLayout';
 import { StatStrip } from '@/components/ui/StatStrip';
 import { useToast } from '@/components/ui/Toast';
-import { getCached, setCached } from '@/lib/vconCache';
+import { getCached, setCached, clearAuthCaches } from '@/lib/vconCache';
+import {
+  formatSessionExpiryLabel,
+  shouldRedirectProfileUnauthorized,
+} from '@/lib/vconUiHelpers';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 
@@ -49,20 +53,31 @@ export function ProfileWorkspace() {
   const [signingOut, setSigningOut] = useState(false);
 
   useEffect(() => {
-    fetch('/api/auth/profile', { credentials: 'include' })
+    fetch('/api/auth/profile', {
+      credentials: 'include',
+      cache: 'no-store',
+    })
       .then(async (res) => {
-        if (!res.ok) throw new Error('Unable to load profile');
-        return res.json();
+        if (res.status === 401) {
+          window.location.assign('/vcon/login');
+          return null;
+        }
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.error || 'Unable to load profile');
+        return body;
       })
       .then((data) => {
-        if (data.profile) {
+        if (data?.profile) {
           setProfile(setCached('vcon:profile', data.profile));
           setEmail(data.profile.email);
           setCached('vcon:profile-loaded', true);
         }
       })
-      .catch(() => {
-        error('Profile load failed', 'Could not load administrator profile.');
+      .catch((loadErr) => {
+        error(
+          'Profile load failed',
+          loadErr instanceof Error ? loadErr.message : 'Could not load administrator profile.'
+        );
       })
       .finally(() => setLoading(false));
   }, [error]);
@@ -78,6 +93,10 @@ export function ProfileWorkspace() {
       error('Validation error', 'Enter your current password to save changes.');
       return;
     }
+    if (newPassword && (newPassword.length < 8 || newPassword.length > 256)) {
+      error('Validation error', 'New password must be between 8 and 256 characters.');
+      return;
+    }
     if (newPassword && newPassword !== confirmPassword) {
       error('Validation error', 'New password and confirmation do not match.');
       return;
@@ -89,16 +108,24 @@ export function ProfileWorkspace() {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
+        cache: 'no-store',
         body: JSON.stringify({
           email: trimmedEmail,
           currentPassword,
           newPassword: newPassword || undefined,
         }),
       });
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
+      if (shouldRedirectProfileUnauthorized(response.status, data)) {
+        window.location.assign('/vcon/login');
+        return;
+      }
       if (!response.ok) throw new Error(data.error || 'Profile update failed');
       setProfile(setCached('vcon:profile', data.profile));
       setEmail(data.profile.email);
+      window.dispatchEvent(
+        new CustomEvent('datastack:profile-updated', { detail: data.profile })
+      );
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
@@ -123,6 +150,7 @@ export function ProfileWorkspace() {
         credentials: 'include',
       });
       if (!response.ok) throw new Error('Unable to sign out');
+      await clearAuthCaches();
       window.location.assign('/vcon/login');
     } catch {
       error('Sign out failed', 'Please try again.');
@@ -160,13 +188,7 @@ export function ProfileWorkspace() {
           { label: 'Auth Store', value: profile.storageMode },
           {
             label: 'Session Expires',
-            value: profile.sessionExpiresAt
-              ? new Date(profile.sessionExpiresAt).toLocaleTimeString([], {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                  hour12: false,
-                })
-              : 'Active',
+            value: formatSessionExpiryLabel(profile.sessionExpiresAt),
           },
         ]}
       />

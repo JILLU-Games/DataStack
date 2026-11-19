@@ -4,13 +4,15 @@ import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { ArrowRight } from 'lucide-react';
 import Link from 'next/link';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 export function AdminSetup({
   databaseReady = true,
+  databaseError = '',
   initialEmail = '',
 }: {
   databaseReady?: boolean;
+  databaseError?: string;
   initialEmail?: string;
 }) {
   const [email, setEmail] = useState(initialEmail || 'admin@datastack.dev');
@@ -19,8 +21,25 @@ export function AdminSetup({
   const [setupKey, setSetupKey] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState(
-    databaseReady ? '' : 'Database connection unavailable.',
+    databaseReady ? '' : databaseError || 'Database connection unavailable.',
   );
+  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+
+  useEffect(() => {
+    const savedTheme = localStorage.getItem('datastack-theme');
+    const initialTheme = savedTheme === 'light' ? 'light' : 'dark';
+    setTheme(initialTheme);
+    document.documentElement.classList.toggle('light', initialTheme === 'light');
+    document.documentElement.classList.toggle('dark', initialTheme === 'dark');
+  }, []);
+
+  const toggleTheme = () => {
+    const nextTheme = theme === 'dark' ? 'light' : 'dark';
+    setTheme(nextTheme);
+    localStorage.setItem('datastack-theme', nextTheme);
+    document.documentElement.classList.toggle('light', nextTheme === 'light');
+    document.documentElement.classList.toggle('dark', nextTheme === 'dark');
+  };
 
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -59,7 +78,17 @@ export function AdminSetup({
 
   return (
     <main className="relative grid min-h-dvh place-items-center bg-[var(--bg)] p-4 text-[var(--text)]">
-      <section className="w-full max-w-[320px] border border-[var(--border)] bg-[var(--surface)]">
+      <Button
+        type="button"
+        variant="icon"
+        size="icon"
+        icon={theme === 'dark' ? 'Sun' : 'Moon'}
+        aria-label="Toggle theme"
+        title="Toggle theme"
+        className="fixed right-3 top-3 z-10 h-7 w-7 border border-[var(--border)] text-[var(--text-muted)]"
+        onClick={toggleTheme}
+      />
+      <section className="z-0 w-full max-w-[320px] border border-[var(--border)] bg-[var(--surface)]">
         <header className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
           <Link href="/" className="flex items-center gap-2 text-[12.5px] font-medium text-[var(--text)]">
             <span className="grid h-3 w-3 place-items-center bg-[var(--accent)]" aria-hidden="true">
