@@ -73,12 +73,13 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const [clients, storageStats, diskHealth, bufferStats] = await Promise.all([
+    const [clients, allFiles, diskHealth, bufferStats] = await Promise.all([
       SDKManager.listClientsAsync(),
-      CSVStorageManager.getStatsAsync(),
-      CSVStorageManager.getDiskSpaceHealthAsync(),
+      CSVStorageManager.listAllFilesAsync(),
+      CSVStorageManager.getDiskUsageAsync(),
       DataBufferEngine.getBufferStatsAsync(),
     ]);
+    const storageStats = CSVStorageManager.formatStorageStats(allFiles);
 
     let activeSockets = 0;
     let bridgeUp = 0;
@@ -117,7 +118,9 @@ export async function GET(req: NextRequest) {
 
     let activeClientsCount = 0;
     let revokedClientsCount = 0;
+    let totalEventsCounter = 0;
     for (const c of clients) {
+      totalEventsCounter += Math.max(0, Number(c.totalEvents) || 0);
       if (c.status === "revoked") {
         revokedClientsCount += 1;
       } else {
@@ -135,6 +138,9 @@ export async function GET(req: NextRequest) {
       "# HELP datastack_active_sockets Currently connected Socket.IO SDK clients on Port 4000.",
       "# TYPE datastack_active_sockets gauge",
       `datastack_active_sockets ${activeSockets}`,
+      "# HELP datastack_events_total Cumulative events ingested across all registered clients.",
+      "# TYPE datastack_events_total counter",
+      `datastack_events_total ${Math.max(totalEventsCounter, storageStats.totalRows)}`,
       "# HELP datastack_buffer_events_total Total events currently queued in memory or Redis awaiting CSV flush.",
       "# TYPE datastack_buffer_events_total gauge",
       `datastack_buffer_events_total ${totalBufferedEvents}`,
@@ -143,7 +149,7 @@ export async function GET(req: NextRequest) {
       `datastack_storage_files_total ${storageStats.totalFiles}`,
       "# HELP datastack_storage_bytes_total Total bytes occupied by CSV and gzipped CSV partition files on disk.",
       "# TYPE datastack_storage_bytes_total gauge",
-      `datastack_storage_bytes_total ${storageStats.totalSizeBytes}`,
+      `datastack_storage_bytes_total ${storageStats.totalBytes}`,
       "# HELP datastack_storage_rows_total Total telemetry rows persisted across all partition files.",
       "# TYPE datastack_storage_rows_total gauge",
       `datastack_storage_rows_total ${storageStats.totalRows}`,
@@ -152,7 +158,7 @@ export async function GET(req: NextRequest) {
       `datastack_disk_used_percent ${diskHealth.usedPct}`,
       "# HELP datastack_disk_free_bytes Free bytes available on the underlying storage volume.",
       "# TYPE datastack_disk_free_bytes gauge",
-      `datastack_disk_free_bytes ${diskHealth.freeBytes}`,
+      `datastack_disk_free_bytes ${diskHealth.availableBytes}`,
       "# HELP datastack_disk_total_bytes Total capacity in bytes of the underlying storage volume.",
       "# TYPE datastack_disk_total_bytes gauge",
       `datastack_disk_total_bytes ${diskHealth.totalBytes}`,
@@ -177,7 +183,7 @@ export async function GET(req: NextRequest) {
     );
 
     const perClientBytes = new Map<string, number>();
-    for (const f of storageStats.files) {
+    for (const f of allFiles) {
       perClientBytes.set(
         f.clientId,
         (perClientBytes.get(f.clientId) || 0) + f.sizeBytes,

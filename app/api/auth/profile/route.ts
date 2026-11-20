@@ -1,5 +1,6 @@
 import {
   createAdminSessionToken,
+  formatAdminRoleLabel,
   getSessionCookieOptions,
 } from "@/core/auth/adminSession";
 import {
@@ -7,6 +8,8 @@ import {
   updateAdminAccount,
   verifyRequestAdminSession,
 } from "@/core/auth/adminUsers";
+import { recordAdminAuditLogAsync } from "@/core/auth/auditLog";
+import { extractClientIp } from "@/lib/adminAuth";
 import { NextRequest, NextResponse } from "next/server";
 
 const SESSION_COOKIE = "datastack_admin_session";
@@ -33,10 +36,13 @@ export async function GET(request: NextRequest) {
 
   try {
     const account = await getAdminAccountInfo(auth.session.email);
+    const effectiveRole = auth.session.role || account.role || "owner";
     return NextResponse.json({
       profile: {
         email: account.email,
-        role: "Owner",
+        role: formatAdminRoleLabel(effectiveRole),
+        roleKey: effectiveRole,
+        memberId: auth.session.memberId || account.memberId || "owner-1",
         storageMode: account.storageMode,
         createdAt: account.createdAt,
         sessionExpiresAt: new Date(auth.session.expiresAt).toISOString(),
@@ -125,24 +131,42 @@ export async function PUT(request: NextRequest) {
       );
     }
 
-    // Preserve remaining session duration (e.g., 30-day "Remember me" session)
     const remainingSeconds = Math.max(
       SESSION_SECONDS,
       Math.ceil((auth.session.expiresAt - Date.now()) / 1000),
     );
     const expiresAt = Date.now() + remainingSeconds * 1000;
+    const effectiveRole = result.role || auth.session.role || "owner";
+    const effectiveMemberId =
+      result.memberId || auth.session.memberId || "owner-1";
     const nextToken = await createAdminSessionToken(
       result.email,
       auth.sessionSecret,
       expiresAt,
       result.tokenVersion,
+      effectiveRole,
+      effectiveMemberId,
     );
+
+    await recordAdminAuditLogAsync({
+      actorEmail: result.email,
+      actorRole: effectiveRole,
+      action: newPassword ? "ADMIN_PASSWORD_UPDATED" : "ADMIN_PROFILE_UPDATED",
+      target: result.email,
+      ipAddress: extractClientIp(request),
+      metadata: {
+        emailChanged: result.email !== account.email,
+        passwordRotated: Boolean(newPassword),
+      },
+    });
 
     const response = NextResponse.json({
       success: true,
       profile: {
         email: result.email,
-        role: "Owner",
+        role: formatAdminRoleLabel(effectiveRole),
+        roleKey: effectiveRole,
+        memberId: effectiveMemberId,
         storageMode: account.storageMode,
         createdAt: account.createdAt,
         sessionExpiresAt: new Date(expiresAt).toISOString(),

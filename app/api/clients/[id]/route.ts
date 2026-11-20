@@ -1,12 +1,12 @@
-import { verifyRequestAdminSession } from "@/core/auth/adminUsers";
+import { recordAdminAuditLogAsync } from "@/core/auth/auditLog";
 import { SDKManager } from "@/core/sdk/sdkManager";
 import {
   validateAllowedIpsInput,
   validateClientExpiresAtInput,
 } from "@/core/Security/ipAllowlist";
+import { extractClientIp, requireAdminApiSession } from "@/lib/adminAuth";
 import { NextRequest, NextResponse } from "next/server";
 
-const SESSION_COOKIE = "datastack_admin_session";
 const ALLOWED_PATCH_KEYS = new Set([
   "action",
   "name",
@@ -21,14 +21,12 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const auth = await verifyRequestAdminSession(
-    req.cookies.get(SESSION_COOKIE)?.value,
-  );
+  const includeToken = req.nextUrl.searchParams.get("includeToken") === "true";
+  const auth = await requireAdminApiSession(req, {
+    minRole: includeToken ? "operator" : "viewer",
+  });
   if (!auth.valid) {
-    return NextResponse.json(
-      { error: "Authentication required." },
-      { status: auth.reason === "UNAUTHORIZED" ? 401 : 503 },
-    );
+    return auth.response;
   }
 
   const { id } = await params;
@@ -40,7 +38,6 @@ export async function GET(
     }
     const { secret, token, ...clientSummary } = client;
     void secret;
-    const includeToken = req.nextUrl.searchParams.get("includeToken") === "true";
     return NextResponse.json({
       client: {
         ...clientSummary,
@@ -65,14 +62,9 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const auth = await verifyRequestAdminSession(
-    req.cookies.get(SESSION_COOKIE)?.value,
-  );
+  const auth = await requireAdminApiSession(req, { minRole: "operator" });
   if (!auth.valid) {
-    return NextResponse.json(
-      { error: "Authentication required." },
-      { status: auth.reason === "UNAUTHORIZED" ? 401 : 503 },
-    );
+    return auth.response;
   }
 
   const { id } = await params;
@@ -90,7 +82,10 @@ export async function PATCH(
 
   if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody)) {
     return NextResponse.json(
-      { error: "Update payload must be a JSON object.", code: "VALIDATION_ERROR" },
+      {
+        error: "Update payload must be a JSON object.",
+        code: "VALIDATION_ERROR",
+      },
       { status: 400 },
     );
   }
@@ -120,8 +115,23 @@ export async function PATCH(
     try {
       const refreshed = await SDKManager.regenerateTokenAsync(normalizedId);
       if (!refreshed) {
-        return NextResponse.json({ error: "Client not found" }, { status: 404 });
+        return NextResponse.json(
+          { error: "Client not found" },
+          { status: 404 },
+        );
       }
+
+      await recordAdminAuditLogAsync({
+        actorEmail: auth.auth.session.email,
+        actorRole: auth.auth.session.role || "owner",
+        action: "CLIENT_TOKEN_ROTATED",
+        target: refreshed.clientId,
+        ipAddress: extractClientIp(req),
+        metadata: {
+          clientId: refreshed.clientId,
+        },
+      });
+
       return NextResponse.json({ client: refreshed });
     } catch (err: unknown) {
       const message =
@@ -130,7 +140,9 @@ export async function PATCH(
       return NextResponse.json(
         {
           error: message,
-          code: isDbWrite ? "DATABASE_WRITE_FAILED" : "TOKEN_REGENERATION_FAILED",
+          code: isDbWrite
+            ? "DATABASE_WRITE_FAILED"
+            : "TOKEN_REGENERATION_FAILED",
         },
         { status: isDbWrite ? 503 : 500 },
       );
@@ -152,7 +164,10 @@ export async function PATCH(
       body.name.trim().length > 120
     ) {
       return NextResponse.json(
-        { error: "Client name must be a non-empty string (max 120 characters).", code: "VALIDATION_ERROR" },
+        {
+          error: "Client name must be a non-empty string (max 120 characters).",
+          code: "VALIDATION_ERROR",
+        },
         { status: 400 },
       );
     }
@@ -166,7 +181,10 @@ export async function PATCH(
       body.rateLimit > 100000
     ) {
       return NextResponse.json(
-        { error: "rateLimit must be an integer between 1 and 100000.", code: "VALIDATION_ERROR" },
+        {
+          error: "rateLimit must be an integer between 1 and 100000.",
+          code: "VALIDATION_ERROR",
+        },
         { status: 400 },
       );
     }
@@ -180,7 +198,10 @@ export async function PATCH(
       body.storageQuotaMb > 1048576
     ) {
       return NextResponse.json(
-        { error: "storageQuotaMb must be an integer between 0 and 1048576.", code: "VALIDATION_ERROR" },
+        {
+          error: "storageQuotaMb must be an integer between 0 and 1048576.",
+          code: "VALIDATION_ERROR",
+        },
         { status: 400 },
       );
     }
@@ -196,7 +217,10 @@ export async function PATCH(
     const ipValidation = validateAllowedIpsInput(body.allowedIps);
     if (!ipValidation.valid) {
       return NextResponse.json(
-        { error: ipValidation.error || "Invalid allowedIps.", code: "VALIDATION_ERROR" },
+        {
+          error: ipValidation.error || "Invalid allowedIps.",
+          code: "VALIDATION_ERROR",
+        },
         { status: 400 },
       );
     }
@@ -206,16 +230,22 @@ export async function PATCH(
     const expValidation = validateClientExpiresAtInput(body.expiresAt);
     if (!expValidation.valid) {
       return NextResponse.json(
-        { error: expValidation.error || "Invalid expiresAt.", code: "VALIDATION_ERROR" },
+        {
+          error: expValidation.error || "Invalid expiresAt.",
+          code: "VALIDATION_ERROR",
+        },
         { status: 400 },
       );
     }
-    updates.expiresAt = expValidation.normalized;
+    updates.expiresAt = expValidation.iso ?? null;
   }
   if (body.status !== undefined) {
     if (body.status !== "active" && body.status !== "revoked") {
       return NextResponse.json(
-        { error: "status must be 'active' or 'revoked'.", code: "VALIDATION_ERROR" },
+        {
+          error: "status must be 'active' or 'revoked'.",
+          code: "VALIDATION_ERROR",
+        },
         { status: 400 },
       );
     }
@@ -224,7 +254,10 @@ export async function PATCH(
 
   if (Object.keys(updates).length === 0) {
     return NextResponse.json(
-      { error: "No valid fields provided for update.", code: "VALIDATION_ERROR" },
+      {
+        error: "No valid fields provided for update.",
+        code: "VALIDATION_ERROR",
+      },
       { status: 400 },
     );
   }
@@ -234,6 +267,16 @@ export async function PATCH(
     if (!updated) {
       return NextResponse.json({ error: "Client not found" }, { status: 404 });
     }
+
+    await recordAdminAuditLogAsync({
+      actorEmail: auth.auth.session.email,
+      actorRole: auth.auth.session.role || "owner",
+      action: "CLIENT_UPDATED",
+      target: updated.clientId,
+      ipAddress: extractClientIp(req),
+      metadata: updates,
+    });
+
     return NextResponse.json({ client: updated });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Update failed";
@@ -252,14 +295,9 @@ export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const auth = await verifyRequestAdminSession(
-    req.cookies.get(SESSION_COOKIE)?.value,
-  );
+  const auth = await requireAdminApiSession(req, { minRole: "operator" });
   if (!auth.valid) {
-    return NextResponse.json(
-      { error: "Authentication required." },
-      { status: auth.reason === "UNAUTHORIZED" ? 401 : 503 },
-    );
+    return auth.response;
   }
 
   const { id } = await params;
@@ -272,13 +310,27 @@ export async function DELETE(
     if (!result.deleted) {
       return NextResponse.json({ error: "Client not found" }, { status: 404 });
     }
+
+    await recordAdminAuditLogAsync({
+      actorEmail: auth.auth.session.email,
+      actorRole: auth.auth.session.role || "owner",
+      action: "CLIENT_DELETED",
+      target: normalizedId,
+      ipAddress: extractClientIp(req),
+      metadata: {
+        purgeFiles,
+        purgedFiles: result.purgedFiles,
+      },
+    });
+
     return NextResponse.json({
       success: true,
       message: `Client ${normalizedId} deleted`,
       purgedFiles: result.purgedFiles,
     });
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Client deletion failed";
+    const message =
+      err instanceof Error ? err.message : "Client deletion failed";
     const isDbWrite = message.includes("DATABASE_WRITE_FAILED");
     return NextResponse.json(
       {

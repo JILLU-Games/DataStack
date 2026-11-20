@@ -1,4 +1,5 @@
 import {
+  type AdminRole,
   createAdminSessionToken,
   getAdminSessionSecret,
   getSessionCookieOptions,
@@ -9,6 +10,7 @@ import {
   clearAdminLoginAttempts,
   consumeAdminLoginAttempt,
 } from "@/core/auth/adminUsers";
+import { recordAdminAuditLogAsync } from "@/core/auth/auditLog";
 import { extractClientIp } from "@/lib/adminAuth";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -79,7 +81,13 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  let authResult: { authenticated: boolean; tokenVersion: number };
+  let authResult: {
+    authenticated: boolean;
+    tokenVersion: number;
+    role: AdminRole;
+    memberId: string;
+    email: string;
+  };
   try {
     authResult = await authenticateAdminCredentials(email, password);
   } catch (err) {
@@ -117,13 +125,29 @@ export async function POST(request: NextRequest) {
   const remember = body.remember === true;
   const maxAge = remember ? REMEMBERED_SESSION_SECONDS : SESSION_SECONDS;
   const expiresAt = Date.now() + maxAge * 1000;
+  const effectiveEmail = authResult.email || email;
   const token = await createAdminSessionToken(
-    email,
+    effectiveEmail,
     sessionSecret,
     expiresAt,
     authResult.tokenVersion,
+    authResult.role,
+    authResult.memberId,
   );
-  const response = NextResponse.json({ success: true });
+
+  await recordAdminAuditLogAsync({
+    actorEmail: effectiveEmail,
+    actorRole: authResult.role || "owner",
+    action: "ADMIN_LOGIN",
+    target: effectiveEmail,
+    ipAddress: clientIp,
+    metadata: { remember },
+  });
+
+  const response = NextResponse.json({
+    success: true,
+    role: authResult.role || "owner",
+  });
 
   response.cookies.set(
     SESSION_COOKIE,

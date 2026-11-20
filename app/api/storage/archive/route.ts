@@ -1,4 +1,5 @@
 import { SettingsManager } from "@/core/adminSettings/settingsManager";
+import { recordAdminAuditLogAsync } from "@/core/auth/auditLog";
 import { SecretVaultError } from "@/core/Security/secretVault";
 import { CSVStorageManager } from "@/core/Storage/csvStorage";
 import {
@@ -6,11 +7,11 @@ import {
   normalizeS3EndpointUrl,
   uploadFileToS3,
 } from "@/core/Storage/s3Archive";
-import { requireAdminApiSession } from "@/lib/adminAuth";
+import { extractClientIp, requireAdminApiSession } from "@/lib/adminAuth";
 import { NextRequest, NextResponse } from "next/server";
 
 export async function POST(req: NextRequest) {
-  const auth = await requireAdminApiSession(req);
+  const auth = await requireAdminApiSession(req, { minRole: "operator" });
   if (!auth.valid) {
     return auth.response;
   }
@@ -134,6 +135,20 @@ export async function POST(req: NextRequest) {
         details: { errorCount: archiveResult.errors.length },
       });
     }
+
+    await recordAdminAuditLogAsync({
+      actorEmail: auth.auth.session.email,
+      actorRole: auth.auth.session.role || "owner",
+      action: "S3_ARCHIVE_TRIGGERED",
+      target: s3Config.bucket,
+      ipAddress: extractClientIp(req),
+      metadata: {
+        archivedCount: archiveResult.archivedCount,
+        prunedCount: archiveResult.prunedCount,
+        compressedCount,
+        pruneAfterUpload,
+      },
+    });
 
     return NextResponse.json({
       success: archiveResult.errors.length === 0,

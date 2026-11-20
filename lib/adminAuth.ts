@@ -1,27 +1,79 @@
+import {
+  type AdminRole,
+  getAdminRoleRank,
+  normalizeAdminRole,
+} from "@/core/auth/adminSession";
 import { verifyRequestAdminSession } from "@/core/auth/adminUsers";
 import { NextRequest, NextResponse } from "next/server";
 
 export const ADMIN_SESSION_COOKIE = "datastack_admin_session";
 
-export async function requireAdminApiSession(req: NextRequest) {
+export interface RequireAdminSessionOptions {
+  minRole?: AdminRole;
+  allowedRoles?: AdminRole[];
+}
+
+export async function requireAdminApiSession(
+  req: NextRequest,
+  options?: RequireAdminSessionOptions,
+) {
   const token = req.cookies.get(ADMIN_SESSION_COOKIE)?.value;
   const auth = await verifyRequestAdminSession(token);
-  if (auth.valid) {
-    return { valid: true as const, auth };
+  if (!auth.valid) {
+    return {
+      valid: false as const,
+      response: NextResponse.json(
+        {
+          error:
+            auth.reason === "UNAUTHORIZED"
+              ? "Authentication required."
+              : "Admin authentication is temporarily unavailable.",
+        },
+        { status: auth.reason === "UNAUTHORIZED" ? 401 : 503 },
+      ),
+    };
   }
 
-  return {
-    valid: false as const,
-    response: NextResponse.json(
-      {
-        error:
-          auth.reason === "UNAUTHORIZED"
-            ? "Authentication required."
-            : "Admin authentication is temporarily unavailable.",
-      },
-      { status: auth.reason === "UNAUTHORIZED" ? 401 : 503 },
-    ),
-  };
+  const currentRole = normalizeAdminRole(auth.session.role, "owner");
+
+  if (options?.minRole) {
+    const currentRank = getAdminRoleRank(currentRole);
+    const requiredRank = getAdminRoleRank(options.minRole);
+    if (currentRank < requiredRank) {
+      return {
+        valid: false as const,
+        response: NextResponse.json(
+          {
+            error: `INSUFFICIENT_ROLE_PERMISSION: Role '${currentRole}' does not have permission for this action (requires '${options.minRole}').`,
+            code: "INSUFFICIENT_ROLE_PERMISSION",
+            currentRole,
+            requiredRole: options.minRole,
+          },
+          { status: 403 },
+        ),
+      };
+    }
+  }
+
+  if (options?.allowedRoles && options.allowedRoles.length > 0) {
+    const allowedRanks = options.allowedRoles.map((r) => normalizeAdminRole(r));
+    if (!allowedRanks.includes(currentRole)) {
+      return {
+        valid: false as const,
+        response: NextResponse.json(
+          {
+            error: `INSUFFICIENT_ROLE_PERMISSION: Role '${currentRole}' is not permitted for this action.`,
+            code: "INSUFFICIENT_ROLE_PERMISSION",
+            currentRole,
+            allowedRoles: allowedRanks,
+          },
+          { status: 403 },
+        ),
+      };
+    }
+  }
+
+  return { valid: true as const, auth };
 }
 
 /**

@@ -3,10 +3,42 @@ const encoder = new TextEncoder();
 const DEV_DEFAULT_SESSION_SECRET =
   "datastack-admin-session-default-secret-32-chars";
 
+export type AdminRole = "owner" | "admin" | "operator" | "viewer";
+
 export interface AdminSessionPayload {
   email: string;
   expiresAt: number;
   tokenVersion: number;
+  role?: AdminRole;
+  memberId?: string;
+}
+
+export function normalizeAdminRole(
+  raw: unknown,
+  fallback: AdminRole = "viewer",
+): AdminRole {
+  if (typeof raw !== "string") return fallback;
+  const clean = raw.trim().toLowerCase();
+  if (clean === "owner") return "owner";
+  if (clean === "admin") return "admin";
+  if (clean === "operator") return "operator";
+  if (clean === "viewer") return "viewer";
+  return fallback;
+}
+
+export function getAdminRoleRank(role?: string): number {
+  const normalized = normalizeAdminRole(role, "owner");
+  if (normalized === "owner") return 3;
+  if (normalized === "admin" || normalized === "operator") return 2;
+  return 1;
+}
+
+export function formatAdminRoleLabel(role?: string): string {
+  const normalized = normalizeAdminRole(role, "owner");
+  if (normalized === "owner") return "Owner";
+  if (normalized === "admin") return "Admin";
+  if (normalized === "operator") return "Operator";
+  return "Viewer";
 }
 
 export function getAdminSessionSecret(): string | null {
@@ -50,14 +82,19 @@ export async function createAdminSessionToken(
   secret: string,
   expiresAt: number,
   tokenVersion = 1,
+  role?: AdminRole,
+  memberId?: string,
 ) {
   const safeVersion =
     Number.isInteger(tokenVersion) && tokenVersion >= 1 ? tokenVersion : 1;
-  const payload = encodeBase64Url(
-    encoder.encode(
-      JSON.stringify({ email, expiresAt, tokenVersion: safeVersion }),
-    ),
-  );
+  const payloadObj: AdminSessionPayload = {
+    email,
+    expiresAt,
+    tokenVersion: safeVersion,
+    ...(role ? { role: normalizeAdminRole(role, "owner") } : {}),
+    ...(memberId ? { memberId } : {}),
+  };
+  const payload = encodeBase64Url(encoder.encode(JSON.stringify(payloadObj)));
   const signature = await crypto.subtle.sign(
     "HMAC",
     await importKey(secret),
@@ -94,7 +131,12 @@ export async function getAdminSessionPayload(
       Number.isInteger(session.tokenVersion) &&
       session.tokenVersion >= 1
     ) {
-      return session;
+      return {
+        ...session,
+        ...(session.role
+          ? { role: normalizeAdminRole(session.role, "owner") }
+          : {}),
+      };
     }
     return null;
   } catch {

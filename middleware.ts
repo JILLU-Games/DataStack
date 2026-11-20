@@ -13,6 +13,7 @@ function isProtectedApi(pathname: string, method: string) {
   if (pathname === "/api/auth/setup" && method === "POST") return false;
   if (pathname === "/api/events" && method === "POST") return false;
   if (pathname === "/api/health" && method === "GET") return false;
+  if (pathname === "/api/prometheus" && method === "GET") return false;
   return pathname.startsWith("/api/");
 }
 

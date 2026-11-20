@@ -476,3 +476,133 @@ test("DEPLOY-BUG-02, 03 & 04: Port 4000 memoizes schema DDLs, hydrates rotated J
     ingestionServer.stopTimers();
   }
 });
+
+test("V2-Deploy-Fix-01 (DEPLOY-V2-BUG-01, 02 & 03): middleware permits GET /api/prometheus Bearer scrapes, Port 4000 blocks unhydrated DB pruning, and prisma/schema.prisma mirrors all 7 V2 tables", async () => {
+  // 1. DEPLOY-V2-BUG-01: middleware.ts allows GET /api/prometheus without a browser cookie so route handler can verify Bearer token
+  const { middleware } = await import("../middleware");
+  const { NextRequest } = await import("next/server");
+
+  const promReq = new NextRequest("http://localhost:3000/api/prometheus", {
+    method: "GET",
+    headers: {
+      authorization: "Bearer prom_scrape_token_123",
+    },
+  });
+  const promMwRes = await middleware(promReq);
+  assert.notEqual(
+    promMwRes.status,
+    401,
+    "middleware.ts must not block GET /api/prometheus with 401 before route handler verifies Bearer token",
+  );
+  assert.equal(promMwRes.headers.get("x-middleware-next"), "1");
+
+  // Meanwhile, protected admin APIs like GET /api/metrics still require admin session cookie in middleware
+  const prevSecret = process.env.DATASTACK_ADMIN_SESSION_SECRET;
+  process.env.DATASTACK_ADMIN_SESSION_SECRET =
+    "test-session-secret-32-characters-minimum-length";
+  try {
+    const metricsReq = new NextRequest("http://localhost:3000/api/metrics", {
+      method: "GET",
+    });
+    const metricsMwRes = await middleware(metricsReq);
+    assert.equal(metricsMwRes.status, 401);
+  } finally {
+    if (prevSecret === undefined) {
+      delete process.env.DATASTACK_ADMIN_SESSION_SECRET;
+    } else {
+      process.env.DATASTACK_ADMIN_SESSION_SECRET = prevSecret;
+    }
+  }
+
+  // 2. DEPLOY-V2-BUG-02: Port 4000 isDbReadyForMaintenance() is false when dbPool is configured but unhydrated
+  const prevDisableListen = process.env.DATASTACK_DISABLE_LISTEN;
+  process.env.DATASTACK_DISABLE_LISTEN = "1";
+  const ingestionServer = require("../server/index.js") as {
+    setDbPoolForTests: (pool: unknown) => void;
+    isDbReadyForMaintenance: () => boolean;
+    syncSettingsFromDatabase: () => Promise<boolean>;
+    stopTimers: () => void;
+  };
+  if (prevDisableListen === undefined) {
+    delete process.env.DATASTACK_DISABLE_LISTEN;
+  } else {
+    process.env.DATASTACK_DISABLE_LISTEN = prevDisableListen;
+  }
+
+  try {
+    // Without dbPool (in-memory mode), maintenance is ready immediately
+    ingestionServer.setDbPoolForTests(null);
+    assert.equal(ingestionServer.isDbReadyForMaintenance(), true);
+
+    // With dbPool attached but before hydration succeeds, maintenance is blocked
+    let shouldFailDb = true;
+    const fakePool = {
+      async query(sql: string) {
+        if (shouldFailDb) {
+          throw new Error("DB starting up");
+        }
+        if (/SELECT\s+max_events_per_sec/i.test(sql)) {
+          return { rowCount: 0, rows: [] };
+        }
+        return { rowCount: 0, rows: [] };
+      },
+    };
+    ingestionServer.setDbPoolForTests(fakePool);
+    assert.equal(
+      ingestionServer.isDbReadyForMaintenance(),
+      false,
+      "Port 4000 must block background pruning while DATABASE_URL pool is unhydrated",
+    );
+    assert.equal(await ingestionServer.syncSettingsFromDatabase(), false);
+    assert.equal(ingestionServer.isDbReadyForMaintenance(), false);
+
+    // Once DB hydrates, maintenance becomes ready
+    shouldFailDb = false;
+    assert.equal(await ingestionServer.syncSettingsFromDatabase(), true);
+    assert.equal(ingestionServer.isDbReadyForMaintenance(), true);
+  } finally {
+    ingestionServer.setDbPoolForTests(null);
+    ingestionServer.stopTimers();
+  }
+
+  // 3. DEPLOY-V2-BUG-03: prisma/schema.prisma mirrors all 7 V2 tables and V2 columns
+  const prismaSrc = readFileSync(
+    resolve(process.cwd(), "prisma/schema.prisma"),
+    "utf8",
+  );
+  for (const table of [
+    "client_sdks",
+    "admin_settings",
+    "deleted_clients",
+    "admin_users",
+    "admin_login_attempts",
+    "admin_team_members",
+    "admin_audit_logs",
+  ]) {
+    assert.match(
+      prismaSrc,
+      new RegExp(`@@map\\("${table}"\\)`),
+      `prisma/schema.prisma must map ${table}`,
+    );
+  }
+  for (const col of [
+    "storage_quota_mb",
+    "allowed_ips",
+    "expires_at",
+    "compress_after_days",
+    "enable_s3_backup",
+    "s3_secret_access_key_enc",
+    "disk_pause_threshold_pct",
+    "enable_webhook_alerts",
+    "webhook_secret_enc",
+    "enable_prometheus_metrics",
+    "prometheus_metrics_token_enc",
+  ]) {
+    assert.match(
+      prismaSrc,
+      new RegExp(`@map\\("${col}"\\)`),
+      `prisma/schema.prisma must map V2 column ${col}`,
+    );
+  }
+});
+

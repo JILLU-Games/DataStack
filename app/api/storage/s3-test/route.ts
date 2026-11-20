@@ -11,7 +11,7 @@ import { requireAdminApiSession } from "@/lib/adminAuth";
 import { NextRequest, NextResponse } from "next/server";
 
 export async function POST(req: NextRequest) {
-  const auth = await requireAdminApiSession(req);
+  const auth = await requireAdminApiSession(req, { minRole: "operator" });
   if (!auth.valid) {
     return auth.response;
   }

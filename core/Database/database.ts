@@ -83,6 +83,32 @@ export const CORE_SCHEMA_TABLE_DDLS = [
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `,
+  `
+    CREATE TABLE IF NOT EXISTS admin_team_members (
+      id TEXT PRIMARY KEY,
+      email TEXT NOT NULL UNIQUE,
+      role TEXT NOT NULL DEFAULT 'viewer',
+      status TEXT NOT NULL DEFAULT 'active',
+      password_salt BYTEA NOT NULL,
+      password_hash BYTEA NOT NULL,
+      token_version INTEGER NOT NULL DEFAULT 1,
+      invited_by TEXT NOT NULL DEFAULT 'owner',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS admin_audit_logs (
+      id TEXT PRIMARY KEY,
+      actor_email TEXT NOT NULL,
+      actor_role TEXT NOT NULL,
+      action TEXT NOT NULL,
+      target TEXT NOT NULL,
+      ip_address TEXT NOT NULL DEFAULT '',
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
 ] as const;
 
 export const CORE_SCHEMA_ALTER_DDLS = [

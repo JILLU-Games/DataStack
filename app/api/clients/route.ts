@@ -1,22 +1,16 @@
-import { verifyRequestAdminSession } from "@/core/auth/adminUsers";
+import { recordAdminAuditLogAsync } from "@/core/auth/auditLog";
 import { SDKManager } from "@/core/sdk/sdkManager";
 import {
   validateAllowedIpsInput,
   validateClientExpiresAtInput,
 } from "@/core/Security/ipAllowlist";
+import { extractClientIp, requireAdminApiSession } from "@/lib/adminAuth";
 import { NextRequest, NextResponse } from "next/server";
 
-const SESSION_COOKIE = "datastack_admin_session";
-
 export async function GET(req: NextRequest) {
-  const auth = await verifyRequestAdminSession(
-    req.cookies.get(SESSION_COOKIE)?.value,
-  );
+  const auth = await requireAdminApiSession(req, { minRole: "viewer" });
   if (!auth.valid) {
-    return NextResponse.json(
-      { error: "Authentication required." },
-      { status: auth.reason === "UNAUTHORIZED" ? 401 : 503 },
-    );
+    return auth.response;
   }
 
   try {
@@ -37,14 +31,9 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const auth = await verifyRequestAdminSession(
-    req.cookies.get(SESSION_COOKIE)?.value,
-  );
+  const auth = await requireAdminApiSession(req, { minRole: "operator" });
   if (!auth.valid) {
-    return NextResponse.json(
-      { error: "Authentication required." },
-      { status: auth.reason === "UNAUTHORIZED" ? 401 : 503 },
-    );
+    return auth.response;
   }
 
   let body: Record<string, unknown>;
@@ -71,9 +60,17 @@ export async function POST(req: NextRequest) {
       expiresAt,
     } = body;
 
-    if (typeof clientId !== "string" || typeof name !== "string" || !clientId.trim() || !name.trim()) {
+    if (
+      typeof clientId !== "string" ||
+      typeof name !== "string" ||
+      !clientId.trim() ||
+      !name.trim()
+    ) {
       return NextResponse.json(
-        { error: "clientId and name are required strings", code: "VALIDATION_ERROR" },
+        {
+          error: "clientId and name are required strings",
+          code: "VALIDATION_ERROR",
+        },
         { status: 400 },
       );
     }
@@ -87,17 +84,32 @@ export async function POST(req: NextRequest) {
     }
 
     const parsedRateLimit = rateLimit === undefined ? 100 : Number(rateLimit);
-    if (!Number.isInteger(parsedRateLimit) || parsedRateLimit < 1 || parsedRateLimit > 100000) {
+    if (
+      !Number.isInteger(parsedRateLimit) ||
+      parsedRateLimit < 1 ||
+      parsedRateLimit > 100000
+    ) {
       return NextResponse.json(
-        { error: "rateLimit must be an integer between 1 and 100000.", code: "VALIDATION_ERROR" },
+        {
+          error: "rateLimit must be an integer between 1 and 100000.",
+          code: "VALIDATION_ERROR",
+        },
         { status: 400 },
       );
     }
 
-    const parsedQuotaMb = storageQuotaMb === undefined ? 0 : Number(storageQuotaMb);
-    if (!Number.isInteger(parsedQuotaMb) || parsedQuotaMb < 0 || parsedQuotaMb > 1048576) {
+    const parsedQuotaMb =
+      storageQuotaMb === undefined ? 0 : Number(storageQuotaMb);
+    if (
+      !Number.isInteger(parsedQuotaMb) ||
+      parsedQuotaMb < 0 ||
+      parsedQuotaMb > 1048576
+    ) {
       return NextResponse.json(
-        { error: "storageQuotaMb must be an integer between 0 and 1048576.", code: "VALIDATION_ERROR" },
+        {
+          error: "storageQuotaMb must be an integer between 0 and 1048576.",
+          code: "VALIDATION_ERROR",
+        },
         { status: 400 },
       );
     }
@@ -113,7 +125,10 @@ export async function POST(req: NextRequest) {
       const ipValidation = validateAllowedIpsInput(allowedIps);
       if (!ipValidation.valid) {
         return NextResponse.json(
-          { error: ipValidation.error || "Invalid allowedIps.", code: "VALIDATION_ERROR" },
+          {
+            error: ipValidation.error || "Invalid allowedIps.",
+            code: "VALIDATION_ERROR",
+          },
           { status: 400 },
         );
       }
@@ -125,11 +140,14 @@ export async function POST(req: NextRequest) {
       const expValidation = validateClientExpiresAtInput(expiresAt);
       if (!expValidation.valid) {
         return NextResponse.json(
-          { error: expValidation.error || "Invalid expiresAt.", code: "VALIDATION_ERROR" },
+          {
+            error: expValidation.error || "Invalid expiresAt.",
+            code: "VALIDATION_ERROR",
+          },
           { status: 400 },
         );
       }
-      normalizedExpiresAt = expValidation.normalized;
+      normalizedExpiresAt = expValidation.iso ?? null;
     }
 
     const existing = await SDKManager.getClientAsync(safeClientId);
@@ -147,6 +165,21 @@ export async function POST(req: NextRequest) {
       storageQuotaMb: parsedQuotaMb,
       allowedIps: normalizedAllowedIps,
       expiresAt: normalizedExpiresAt,
+    });
+
+    await recordAdminAuditLogAsync({
+      actorEmail: auth.auth.session.email,
+      actorRole: auth.auth.session.role || "owner",
+      action: "CLIENT_CREATED",
+      target: newClient.clientId,
+      ipAddress: extractClientIp(req),
+      metadata: {
+        name: newClient.name,
+        rateLimit: newClient.rateLimit,
+        storageQuotaMb: newClient.storageQuotaMb,
+        allowedIps: newClient.allowedIps,
+        expiresAt: newClient.expiresAt,
+      },
     });
 
     return NextResponse.json({ client: newClient }, { status: 201 });

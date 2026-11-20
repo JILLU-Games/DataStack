@@ -1,11 +1,12 @@
 import { SettingsManager } from "@/core/adminSettings/settingsManager";
 import { dispatchWebhookAlertAsync } from "@/core/alerts/webhookNotifier";
+import { recordAdminAuditLogAsync } from "@/core/auth/auditLog";
 import { SecretVaultError } from "@/core/Security/secretVault";
-import { requireAdminApiSession } from "@/lib/adminAuth";
+import { extractClientIp, requireAdminApiSession } from "@/lib/adminAuth";
 import { NextRequest, NextResponse } from "next/server";
 
 export async function POST(req: NextRequest) {
-  const auth = await requireAdminApiSession(req);
+  const auth = await requireAdminApiSession(req, { minRole: "owner" });
   if (!auth.valid) {
     return auth.response;
   }
@@ -73,7 +74,7 @@ export async function POST(req: NextRequest) {
         title: "Webhook Verification",
         message: "Test alert dispatched from DataStack Admin Console.",
         details: {
-          triggeredBy: auth.auth.user?.email || "admin",
+          triggeredBy: auth.auth.session.email || "admin",
         },
       },
       {
@@ -84,6 +85,18 @@ export async function POST(req: NextRequest) {
       },
       { bypassCooldown: true },
     );
+
+    await recordAdminAuditLogAsync({
+      actorEmail: auth.auth.session.email,
+      actorRole: auth.auth.session.role || "owner",
+      action: "WEBHOOK_TEST_TRIGGERED",
+      target: webhookUrl,
+      ipAddress: extractClientIp(req),
+      metadata: {
+        ok: result.ok,
+        status: result.status,
+      },
+    });
 
     if (!result.ok) {
       return NextResponse.json(

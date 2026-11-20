@@ -50,7 +50,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const auth = await requireAdminApiSession(req);
+  const auth = await requireAdminApiSession(req, { minRole: 'operator' });
   if (!auth.valid) {
     return auth.response;
   }

@@ -617,11 +617,17 @@ let activeActivityFlushPromise = null;
 
 let schemaEnsurePromise = null;
 let schemaEnsurePool = null;
+let hasHydratedSettingsFromDb = false;
+
+function isDbReadyForMaintenance() {
+  return !dbPool || hasHydratedSettingsFromDb === true;
+}
 
 function setDbPoolForTests(pool) {
   dbPool = pool;
   schemaEnsurePromise = null;
   schemaEnsurePool = null;
+  hasHydratedSettingsFromDb = false;
 }
 
 async function flushPendingClientActivity() {
@@ -1089,7 +1095,7 @@ function applyRuntimeSettingsObject(settingsObj) {
       const nextCompressDays = Math.floor(parsedCompress);
       const changed = nextCompressDays !== runtimeConfig.compressAfterDays;
       runtimeConfig.compressAfterDays = nextCompressDays;
-      if (changed && nextCompressDays > 0) {
+      if (changed && nextCompressDays > 0 && isDbReadyForMaintenance()) {
         void writer.compressOldPartitionsAsync(nextCompressDays).catch(() => undefined);
       }
     }
@@ -1101,7 +1107,12 @@ function applyRuntimeSettingsObject(settingsObj) {
       const nextPruneDays = Math.floor(parsedPrune);
       const changed = nextPruneDays !== runtimeConfig.autoPruneDays;
       runtimeConfig.autoPruneDays = nextPruneDays;
-      if (changed && nextPruneDays > 0 && !runtimeConfig.enableS3Backup) {
+      if (
+        changed &&
+        nextPruneDays > 0 &&
+        !runtimeConfig.enableS3Backup &&
+        isDbReadyForMaintenance()
+      ) {
         void writer.pruneExpiredPartitionsAsync(nextPruneDays).catch(() => undefined);
       }
     }
@@ -1290,7 +1301,11 @@ async function syncSettingsFromDatabase() {
        FROM admin_settings
        WHERE id = 'default'`,
     );
-    if (!res.rowCount || res.rowCount === 0) return true;
+    if (!res.rowCount || res.rowCount === 0) {
+      hasHydratedSettingsFromDb = true;
+      return true;
+    }
+    hasHydratedSettingsFromDb = true;
     const row = res.rows[0];
     const parsedPrune =
       row.auto_prune_days !== undefined && row.auto_prune_days !== null
@@ -1459,6 +1474,7 @@ app.post('/internal/security-check', (req, res) => {
 
 // Internal instant settings synchronization triggered by Next.js POST /api/settings
 app.post('/internal/settings-sync', (req, res) => {
+  hasHydratedSettingsFromDb = true;
   const result = applyRuntimeSettingsObject(req.body || {});
   res.json({
     success: true,
@@ -1811,6 +1827,7 @@ async function startIngestionServer() {
   }
 
   pruneTimer = setInterval(() => {
+    if (!isDbReadyForMaintenance()) return;
     if (runtimeConfig.compressAfterDays > 0) {
       void writer
         .compressOldPartitionsAsync(runtimeConfig.compressAfterDays)
@@ -1860,6 +1877,7 @@ module.exports = {
   applyRuntimeSettingsObject,
   ensureDatabaseSchema,
   syncSettingsFromDatabase,
+  isDbReadyForMaintenance,
   gracefulShutdown,
   startIngestionServer,
   setRedisClientForTests,

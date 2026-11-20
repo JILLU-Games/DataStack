@@ -2,11 +2,10 @@ import {
   SettingsManager,
   type AdminSettingsUpdateInput,
 } from "@/core/adminSettings/settingsManager";
-import { verifyRequestAdminSession } from "@/core/auth/adminUsers";
+import { recordAdminAuditLogAsync } from "@/core/auth/auditLog";
 import { SecretVaultError } from "@/core/Security/secretVault";
+import { extractClientIp, requireAdminApiSession } from "@/lib/adminAuth";
 import { NextRequest, NextResponse } from "next/server";
-
-const SESSION_COOKIE = "datastack_admin_session";
 
 const ALLOWED_SETTING_KEYS = new Set([
   "maxEventsPerSec",
@@ -69,19 +68,9 @@ function parseOptionalString(
 
 export async function GET(req: NextRequest) {
   try {
-    const auth = await verifyRequestAdminSession(
-      req.cookies.get(SESSION_COOKIE)?.value,
-    );
+    const auth = await requireAdminApiSession(req, { minRole: "viewer" });
     if (!auth.valid) {
-      return NextResponse.json(
-        {
-          error:
-            auth.reason === "UNAUTHORIZED"
-              ? "Authentication required."
-              : "Admin authentication is temporarily unavailable.",
-        },
-        { status: auth.reason === "UNAUTHORIZED" ? 401 : 503 },
-      );
+      return auth.response;
     }
 
     const settings = await SettingsManager.getPublicSettingsAsync();
@@ -94,19 +83,9 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
-    const auth = await verifyRequestAdminSession(
-      req.cookies.get(SESSION_COOKIE)?.value,
-    );
+    const auth = await requireAdminApiSession(req, { minRole: "owner" });
     if (!auth.valid) {
-      return NextResponse.json(
-        {
-          error:
-            auth.reason === "UNAUTHORIZED"
-              ? "Authentication required."
-              : "Admin authentication is temporarily unavailable.",
-        },
-        { status: auth.reason === "UNAUTHORIZED" ? 401 : 503 },
-      );
+      return auth.response;
     }
 
     let rawBody: unknown;
@@ -368,6 +347,16 @@ export async function POST(req: NextRequest) {
     }
 
     await SettingsManager.updateSettingsAsync(validated);
+    await recordAdminAuditLogAsync({
+      actorEmail: auth.auth.session.email,
+      actorRole: auth.auth.session.role || "owner",
+      action: "SETTINGS_UPDATED",
+      target: "admin_settings",
+      ipAddress: extractClientIp(req),
+      metadata: {
+        updatedFields: Object.keys(validated),
+      },
+    });
     const settings = await SettingsManager.getPublicSettingsAsync();
     const bridgeSync = SettingsManager.getLastBridgeSyncStatus();
     return NextResponse.json({

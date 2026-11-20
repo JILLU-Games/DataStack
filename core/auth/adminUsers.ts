@@ -7,10 +7,13 @@ import {
 } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import {
+  type AdminRole,
   type AdminSessionPayload,
   getAdminSessionPayload,
   getAdminSessionSecret,
+  normalizeAdminRole,
 } from "./adminSession";
+import { clearAuditLogsForTests } from "./auditLog";
 import { DatabaseEngine, ensureCoreSchemaOnPool } from "../Database/database";
 
 const PASSWORD_HASH_BYTES = 64;
@@ -50,15 +53,52 @@ interface InMemoryAdmin {
   createdAt: Date;
 }
 
+interface InMemoryTeamMember {
+  id: string;
+  email: string;
+  role: AdminRole;
+  status: "active" | "disabled";
+  passwordSalt: Buffer;
+  passwordHash: Buffer;
+  tokenVersion: number;
+  invitedBy: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface AdminTeamMemberPublic {
+  id: string;
+  email: string;
+  role: AdminRole;
+  status: "active" | "disabled";
+  tokenVersion: number;
+  invitedBy: string;
+  isPrimaryOwner: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 type AdminDatabaseGlobals = typeof globalThis & {
   __dataStackAdminSchema?: Promise<void>;
   __dataStackInMemoryAdmin?: InMemoryAdmin;
+  __dataStackInMemoryTeamMembers?: Map<string, InMemoryTeamMember>;
+  __dataStackLastVerifiedMemberId?: string;
 };
 
 const globals = globalThis as AdminDatabaseGlobals;
 const localLoginThrottle = new Map<string, LoginThrottleEntry>();
 let lastLocalThrottleCleanup = 0;
 let lastDatabaseThrottleCleanup = 0;
+
+function getInMemoryTeamMap(): Map<string, InMemoryTeamMember> {
+  if (!(globals.__dataStackInMemoryTeamMembers instanceof Map)) {
+    globals.__dataStackInMemoryTeamMembers = new Map<
+      string,
+      InMemoryTeamMember
+    >();
+  }
+  return globals.__dataStackInMemoryTeamMembers;
+}
 
 export class AdminSetupRequiredError extends Error {
   public readonly code = "SETUP_REQUIRED";
@@ -77,6 +117,27 @@ export class AdminDatabaseRequiredError extends Error {
   ) {
     super(message);
     this.name = "AdminDatabaseRequiredError";
+  }
+}
+
+export class PrimaryOwnerProtectedError extends Error {
+  public readonly code = "CANNOT_REVOKE_PRIMARY_OWNER";
+
+  constructor(
+    message = "CANNOT_REVOKE_PRIMARY_OWNER: The primary Owner account (id=1) cannot be deleted, disabled, or demoted.",
+  ) {
+    super(message);
+    this.name = "PrimaryOwnerProtectedError";
+  }
+}
+
+export class TeamMemberValidationError extends Error {
+  public readonly code: string;
+
+  constructor(message: string, code = "VALIDATION_ERROR") {
+    super(message);
+    this.name = "TeamMemberValidationError";
+    this.code = code;
   }
 }
 
@@ -205,7 +266,10 @@ function consumeLocalLoginAttempt(
 
   const blockedUntil = buckets.reduce(
     (latest, bucket) =>
-      Math.max(latest, localLoginThrottle.get(bucket.keyHash)?.blockedUntil ?? 0),
+      Math.max(
+        latest,
+        localLoginThrottle.get(bucket.keyHash)?.blockedUntil ?? 0,
+      ),
     0,
   );
   if (blockedUntil > now) {
@@ -479,7 +543,13 @@ export async function createInitialAdmin(email: string, password: string) {
 export async function authenticateAdminCredentials(
   email: string,
   password: string,
-): Promise<{ authenticated: boolean; tokenVersion: number }> {
+): Promise<{
+  authenticated: boolean;
+  tokenVersion: number;
+  role: AdminRole;
+  memberId: string;
+  email: string;
+}> {
   const cleanEmail = email.trim().toLowerCase();
   const pool = getPool();
 
@@ -491,7 +561,13 @@ export async function authenticateAdminCredentials(
        WHERE id = 1`,
     );
     if (!result.rowCount || result.rowCount === 0) {
-      return { authenticated: false, tokenVersion: 0 };
+      return {
+        authenticated: false,
+        tokenVersion: 0,
+        role: "owner",
+        memberId: "owner-1",
+        email: cleanEmail,
+      };
     }
     const admin = result.rows[0] as {
       email: string;
@@ -503,23 +579,114 @@ export async function authenticateAdminCredentials(
       cleanEmail,
       admin.email.trim().toLowerCase(),
     );
-    const actualHash = await derivePasswordHash(password, admin.password_salt);
-    const passwordMatches = timingSafeEqual(actualHash, admin.password_hash);
+    if (emailMatches) {
+      const actualHash = await derivePasswordHash(
+        password,
+        admin.password_salt,
+      );
+      const passwordMatches = timingSafeEqual(actualHash, admin.password_hash);
+      return {
+        authenticated: passwordMatches,
+        tokenVersion: passwordMatches ? Number(admin.token_version) || 1 : 0,
+        role: "owner",
+        memberId: "owner-1",
+        email: admin.email,
+      };
+    }
+
+    // Check secondary team members in PostgreSQL
+    const teamResult = await pool.query(
+      `SELECT id, email, role, status, password_salt, password_hash, COALESCE(token_version, 1) AS token_version
+       FROM admin_team_members
+       WHERE LOWER(email) = $1`,
+      [cleanEmail],
+    );
+    if (!teamResult.rowCount || teamResult.rowCount === 0) {
+      return {
+        authenticated: false,
+        tokenVersion: 0,
+        role: "viewer",
+        memberId: "",
+        email: cleanEmail,
+      };
+    }
+
+    const member = teamResult.rows[0] as {
+      id: string;
+      email: string;
+      role: string;
+      status: string;
+      password_salt: Buffer;
+      password_hash: Buffer;
+      token_version: number;
+    };
+    if (member.status !== "active") {
+      return {
+        authenticated: false,
+        tokenVersion: 0,
+        role: normalizeAdminRole(member.role),
+        memberId: member.id,
+        email: member.email,
+      };
+    }
+    const actualHash = await derivePasswordHash(password, member.password_salt);
+    const passwordMatches = timingSafeEqual(actualHash, member.password_hash);
     return {
-      authenticated: emailMatches && passwordMatches,
-      tokenVersion: Number(admin.token_version) || 1,
+      authenticated: passwordMatches,
+      tokenVersion: passwordMatches ? Number(member.token_version) || 1 : 0,
+      role: normalizeAdminRole(member.role),
+      memberId: member.id,
+      email: member.email,
     };
   }
 
   const inMem = await getOrInitInMemoryAdmin();
-  if (!matchesSecret(cleanEmail, inMem.email)) {
-    return { authenticated: false, tokenVersion: 0 };
+  if (matchesSecret(cleanEmail, inMem.email)) {
+    const actualHash = await derivePasswordHash(password, inMem.passwordSalt);
+    const authenticated = timingSafeEqual(actualHash, inMem.passwordHash);
+    return {
+      authenticated,
+      tokenVersion: authenticated ? inMem.tokenVersion : 0,
+      role: "owner",
+      memberId: "owner-1",
+      email: inMem.email,
+    };
   }
-  const actualHash = await derivePasswordHash(password, inMem.passwordSalt);
-  const authenticated = timingSafeEqual(actualHash, inMem.passwordHash);
+
+  // Check in-memory team members
+  const teamMap = getInMemoryTeamMap();
+  for (const member of teamMap.values()) {
+    if (matchesSecret(cleanEmail, member.email.toLowerCase())) {
+      if (member.status !== "active") {
+        return {
+          authenticated: false,
+          tokenVersion: 0,
+          role: member.role,
+          memberId: member.id,
+          email: member.email,
+        };
+      }
+      const actualHash = await derivePasswordHash(
+        password,
+        member.passwordSalt,
+      );
+      const authenticated = timingSafeEqual(actualHash, member.passwordHash);
+      return {
+        authenticated,
+        tokenVersion: authenticated ? member.tokenVersion : 0,
+        role: member.role,
+        memberId: member.id,
+        email: member.email,
+      };
+    }
+  }
+
   return {
-    authenticated,
-    tokenVersion: authenticated ? inMem.tokenVersion : 0,
+    authenticated: false,
+    tokenVersion: 0,
+    role: "viewer",
+    memberId: "",
+    email: cleanEmail,
   };
 }
 
@@ -528,7 +695,8 @@ export async function verifyAdminCredentials(email: string, password: string) {
   return result.authenticated;
 }
 
-export async function getAdminAccountInfo(fallbackEmail?: string) {
+export async function getAdminAccountInfo(targetEmail?: string) {
+  const cleanTarget = targetEmail?.trim().toLowerCase() || "";
   const pool = getPool();
   if (pool) {
     await ensureAdminTable();
@@ -543,8 +711,46 @@ export async function getAdminAccountInfo(fallbackEmail?: string) {
         created_at: Date | string;
         token_version: number;
       };
+      if (!cleanTarget || cleanTarget === row.email.trim().toLowerCase()) {
+        return {
+          email: row.email,
+          role: "owner" as AdminRole,
+          memberId: "owner-1",
+          createdAt: new Date(row.created_at).toISOString(),
+          tokenVersion: Number(row.token_version) || 1,
+          storageMode: "PostgreSQL" as const,
+        };
+      }
+
+      const memberResult = await pool.query(
+        `SELECT id, email, role, status, created_at, COALESCE(token_version, 1) AS token_version
+         FROM admin_team_members
+         WHERE LOWER(email) = $1`,
+        [cleanTarget],
+      );
+      if (memberResult.rowCount && memberResult.rowCount > 0) {
+        const m = memberResult.rows[0] as {
+          id: string;
+          email: string;
+          role: string;
+          status: string;
+          created_at: Date | string;
+          token_version: number;
+        };
+        return {
+          email: m.email,
+          role: normalizeAdminRole(m.role),
+          memberId: m.id,
+          createdAt: new Date(m.created_at).toISOString(),
+          tokenVersion: Number(m.token_version) || 1,
+          storageMode: "PostgreSQL" as const,
+        };
+      }
+
       return {
         email: row.email,
+        role: "owner" as AdminRole,
+        memberId: "owner-1",
         createdAt: new Date(row.created_at).toISOString(),
         tokenVersion: Number(row.token_version) || 1,
         storageMode: "PostgreSQL" as const,
@@ -554,8 +760,25 @@ export async function getAdminAccountInfo(fallbackEmail?: string) {
   }
 
   const inMem = await getOrInitInMemoryAdmin();
+  if (cleanTarget && cleanTarget !== inMem.email.toLowerCase()) {
+    for (const member of getInMemoryTeamMap().values()) {
+      if (member.email.toLowerCase() === cleanTarget) {
+        return {
+          email: member.email,
+          role: member.role,
+          memberId: member.id,
+          createdAt: member.createdAt.toISOString(),
+          tokenVersion: member.tokenVersion,
+          storageMode: "In-Memory" as const,
+        };
+      }
+    }
+  }
+
   return {
-    email: fallbackEmail || inMem.email,
+    email: targetEmail || inMem.email,
+    role: "owner" as AdminRole,
+    memberId: "owner-1",
     createdAt: inMem.createdAt.toISOString(),
     tokenVersion: inMem.tokenVersion,
     storageMode: "In-Memory" as const,
@@ -581,16 +804,90 @@ export async function verifyRequestAdminSession(
     return { valid: false, reason: "UNAUTHORIZED" };
   }
 
+  const sessionEmail = session.email.trim().toLowerCase();
+
   try {
     const account = await getAdminAccountInfo();
-    const emailMatches = matchesSecret(
-      session.email.trim().toLowerCase(),
+    const ownerEmailMatches = matchesSecret(
+      sessionEmail,
       account.email.trim().toLowerCase(),
     );
-    if (!emailMatches || session.tokenVersion !== account.tokenVersion) {
-      return { valid: false, reason: "UNAUTHORIZED" };
+
+    if (ownerEmailMatches) {
+      if (session.tokenVersion !== account.tokenVersion) {
+        return { valid: false, reason: "UNAUTHORIZED" };
+      }
+      globals.__dataStackLastVerifiedMemberId = "owner-1";
+      return {
+        valid: true,
+        session: {
+          ...session,
+          role: "owner",
+          memberId: "owner-1",
+        },
+        sessionSecret,
+      };
     }
-    return { valid: true, session, sessionSecret };
+
+    // Check secondary team member (in PG or in-memory)
+    const pool = getPool();
+    if (pool) {
+      const teamRes = await pool.query(
+        `SELECT id, email, role, status, COALESCE(token_version, 1) AS token_version
+         FROM admin_team_members
+         WHERE LOWER(email) = $1`,
+        [sessionEmail],
+      );
+      if (!teamRes.rowCount || teamRes.rowCount === 0) {
+        return { valid: false, reason: "UNAUTHORIZED" };
+      }
+      const member = teamRes.rows[0] as {
+        id: string;
+        email: string;
+        role: string;
+        status: string;
+        token_version: number;
+      };
+      if (
+        member.status !== "active" ||
+        session.tokenVersion !== (Number(member.token_version) || 1)
+      ) {
+        return { valid: false, reason: "UNAUTHORIZED" };
+      }
+      globals.__dataStackLastVerifiedMemberId = member.id;
+      return {
+        valid: true,
+        session: {
+          ...session,
+          role: normalizeAdminRole(member.role),
+          memberId: member.id,
+        },
+        sessionSecret,
+      };
+    }
+
+    for (const member of getInMemoryTeamMap().values()) {
+      if (matchesSecret(sessionEmail, member.email.toLowerCase())) {
+        if (
+          member.status !== "active" ||
+          session.tokenVersion !== member.tokenVersion
+        ) {
+          return { valid: false, reason: "UNAUTHORIZED" };
+        }
+        globals.__dataStackLastVerifiedMemberId = member.id;
+        return {
+          valid: true,
+          session: {
+            ...session,
+            role: member.role,
+            memberId: member.id,
+          },
+          sessionSecret,
+        };
+      }
+    }
+
+    return { valid: false, reason: "UNAUTHORIZED" };
   } catch (error) {
     if (getPool()) {
       return { valid: false, reason: "UNAVAILABLE" };
@@ -611,8 +908,11 @@ export async function updateAdminAccount({
   nextEmail: string;
   nextPassword?: string;
 }) {
-  const verified = await verifyAdminCredentials(currentEmail, currentPassword);
-  if (!verified) {
+  const authCheck = await authenticateAdminCredentials(
+    currentEmail,
+    currentPassword,
+  );
+  if (!authCheck.authenticated) {
     return { ok: false as const, error: "Current password is incorrect." };
   }
 
@@ -625,41 +925,126 @@ export async function updateAdminAccount({
   const pool = getPool();
   if (pool) {
     await ensureAdminTable();
-    const updated = await pool.query(
-      `UPDATE admin_users
+    if (authCheck.memberId === "owner-1") {
+      const updated = await pool.query(
+        `UPDATE admin_users
+         SET email = $1,
+             password_salt = $2,
+             password_hash = $3,
+             token_version = COALESCE(token_version, 1) + 1
+         WHERE id = 1
+         RETURNING token_version`,
+        [cleanEmail, salt, passwordHash],
+      );
+      if (!updated.rowCount || updated.rowCount === 0) {
+        return { ok: false as const, error: "Admin account not found." };
+      }
+      return {
+        ok: true as const,
+        email: cleanEmail,
+        role: "owner" as AdminRole,
+        memberId: "owner-1",
+        tokenVersion: Number(updated.rows[0].token_version) || 1,
+      };
+    }
+
+    const updatedMember = await pool.query(
+      `UPDATE admin_team_members
        SET email = $1,
            password_salt = $2,
            password_hash = $3,
-           token_version = COALESCE(token_version, 1) + 1
-       WHERE id = 1
-       RETURNING token_version`,
-      [cleanEmail, salt, passwordHash],
+           token_version = COALESCE(token_version, 1) + 1,
+           updated_at = NOW()
+       WHERE id = $4
+       RETURNING token_version, role`,
+      [cleanEmail, salt, passwordHash, authCheck.memberId],
     );
-    if (!updated.rowCount || updated.rowCount === 0) {
-      return { ok: false as const, error: "Admin account not found." };
+    if (!updatedMember.rowCount || updatedMember.rowCount === 0) {
+      return { ok: false as const, error: "Team account not found." };
     }
     return {
       ok: true as const,
       email: cleanEmail,
-      tokenVersion: Number(updated.rows[0].token_version) || 1,
+      role: normalizeAdminRole(updatedMember.rows[0].role),
+      memberId: authCheck.memberId,
+      tokenVersion: Number(updatedMember.rows[0].token_version) || 1,
     };
   }
 
-  const existing = await getOrInitInMemoryAdmin();
-  const nextVersion = existing.tokenVersion + 1;
-  globals.__dataStackInMemoryAdmin = {
-    id: 1,
+  if (authCheck.memberId === "owner-1") {
+    const existing = await getOrInitInMemoryAdmin();
+    const nextVersion = existing.tokenVersion + 1;
+    globals.__dataStackInMemoryAdmin = {
+      id: 1,
+      email: cleanEmail,
+      passwordSalt: salt,
+      passwordHash,
+      tokenVersion: nextVersion,
+      createdAt: existing.createdAt,
+    };
+    return {
+      ok: true as const,
+      email: cleanEmail,
+      role: "owner" as AdminRole,
+      memberId: "owner-1",
+      tokenVersion: nextVersion,
+    };
+  }
+
+  const teamMap = getInMemoryTeamMap();
+  const member = teamMap.get(authCheck.memberId);
+  if (!member) {
+    return { ok: false as const, error: "Team account not found." };
+  }
+  const nextVersion = member.tokenVersion + 1;
+  teamMap.set(member.id, {
+    ...member,
     email: cleanEmail,
     passwordSalt: salt,
     passwordHash,
     tokenVersion: nextVersion,
-    createdAt: existing.createdAt,
+    updatedAt: new Date(),
+  });
+  return {
+    ok: true as const,
+    email: cleanEmail,
+    role: member.role,
+    memberId: member.id,
+    tokenVersion: nextVersion,
   };
-  return { ok: true as const, email: cleanEmail, tokenVersion: nextVersion };
 }
 
-export async function revokeAdminSessions(): Promise<number> {
+export async function revokeAdminSessions(memberId?: string): Promise<number> {
+  const effectiveMemberId =
+    memberId || globals.__dataStackLastVerifiedMemberId || "owner-1";
   const pool = getPool();
+
+  if (effectiveMemberId !== "owner-1" && effectiveMemberId !== "1") {
+    if (pool) {
+      await ensureAdminTable();
+      const updated = await pool.query(
+        `UPDATE admin_team_members
+         SET token_version = COALESCE(token_version, 1) + 1,
+             updated_at = NOW()
+         WHERE id = $1
+         RETURNING token_version`,
+        [effectiveMemberId],
+      );
+      if (updated.rowCount && updated.rowCount > 0) {
+        return Number(updated.rows[0].token_version) || 1;
+      }
+    } else {
+      const teamMap = getInMemoryTeamMap();
+      const member = teamMap.get(effectiveMemberId);
+      if (member) {
+        member.tokenVersion += 1;
+        member.updatedAt = new Date();
+        teamMap.set(member.id, member);
+        return member.tokenVersion;
+      }
+    }
+  }
+
   if (pool) {
     await ensureAdminTable();
     const updated = await pool.query(
@@ -674,14 +1059,491 @@ export async function revokeAdminSessions(): Promise<number> {
     return Number(updated.rows[0].token_version) || 1;
   }
 
-  const existing = globals.__dataStackInMemoryAdmin ?? (await getOrInitInMemoryAdmin());
+  const existing =
+    globals.__dataStackInMemoryAdmin ?? (await getOrInitInMemoryAdmin());
   existing.tokenVersion += 1;
   globals.__dataStackInMemoryAdmin = existing;
   return existing.tokenVersion;
 }
 
+function isPrimaryOwnerTargetId(id: string): boolean {
+  const clean = id.trim().toLowerCase();
+  return clean === "owner-1" || clean === "1" || clean === "owner";
+}
+
+function isValidEmailFormat(email: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+export async function listAdminTeamMembersAsync(): Promise<
+  AdminTeamMemberPublic[]
+> {
+  const pool = getPool();
+  const list: AdminTeamMemberPublic[] = [];
+
+  if (pool) {
+    await ensureAdminTable();
+    const ownerRes = await pool.query(
+      `SELECT email, created_at, COALESCE(token_version, 1) AS token_version
+       FROM admin_users
+       WHERE id = 1`,
+    );
+    if (ownerRes.rowCount && ownerRes.rowCount > 0) {
+      const o = ownerRes.rows[0] as {
+        email: string;
+        created_at: Date | string;
+        token_version: number;
+      };
+      const iso = new Date(o.created_at).toISOString();
+      list.push({
+        id: "owner-1",
+        email: o.email,
+        role: "owner",
+        status: "active",
+        tokenVersion: Number(o.token_version) || 1,
+        invitedBy: "system",
+        isPrimaryOwner: true,
+        createdAt: iso,
+        updatedAt: iso,
+      });
+    }
+
+    const teamRes = await pool.query(
+      `SELECT id, email, role, status, COALESCE(token_version, 1) AS token_version, invited_by, created_at, updated_at
+       FROM admin_team_members
+       ORDER BY created_at ASC`,
+    );
+    for (const row of teamRes.rows as Array<{
+      id: string;
+      email: string;
+      role: string;
+      status: string;
+      token_version: number;
+      invited_by: string;
+      created_at: Date | string;
+      updated_at: Date | string;
+    }>) {
+      list.push({
+        id: row.id,
+        email: row.email,
+        role: normalizeAdminRole(row.role),
+        status: row.status === "disabled" ? "disabled" : "active",
+        tokenVersion: Number(row.token_version) || 1,
+        invitedBy: row.invited_by || "owner",
+        isPrimaryOwner: false,
+        createdAt: new Date(row.created_at).toISOString(),
+        updatedAt: new Date(row.updated_at).toISOString(),
+      });
+    }
+    return list;
+  }
+
+  const inMemOwner = await getOrInitInMemoryAdmin();
+  const ownerIso = inMemOwner.createdAt.toISOString();
+  list.push({
+    id: "owner-1",
+    email: inMemOwner.email,
+    role: "owner",
+    status: "active",
+    tokenVersion: inMemOwner.tokenVersion,
+    invitedBy: "system",
+    isPrimaryOwner: true,
+    createdAt: ownerIso,
+    updatedAt: ownerIso,
+  });
+
+  for (const member of getInMemoryTeamMap().values()) {
+    list.push({
+      id: member.id,
+      email: member.email,
+      role: member.role,
+      status: member.status,
+      tokenVersion: member.tokenVersion,
+      invitedBy: member.invitedBy,
+      isPrimaryOwner: false,
+      createdAt: member.createdAt.toISOString(),
+      updatedAt: member.updatedAt.toISOString(),
+    });
+  }
+
+  return list;
+}
+
+export async function createAdminTeamMemberAsync(input: {
+  email: string;
+  password: string;
+  role: string;
+  invitedBy?: string;
+}): Promise<AdminTeamMemberPublic> {
+  const cleanEmail = (input.email || "").trim().toLowerCase();
+  if (!isValidEmailFormat(cleanEmail)) {
+    throw new TeamMemberValidationError(
+      "Enter a valid email address for the team member.",
+      "INVALID_EMAIL",
+    );
+  }
+
+  const password = typeof input.password === "string" ? input.password : "";
+  if (password.length < 8 || password.length > 256) {
+    throw new TeamMemberValidationError(
+      "Password must be between 8 and 256 characters.",
+      "INVALID_PASSWORD",
+    );
+  }
+
+  const rawRole = (input.role || "").trim().toLowerCase();
+  if (
+    rawRole !== "owner" &&
+    rawRole !== "admin" &&
+    rawRole !== "operator" &&
+    rawRole !== "viewer"
+  ) {
+    throw new TeamMemberValidationError(
+      "Role must be one of: owner, admin, operator, viewer.",
+      "INVALID_ROLE",
+    );
+  }
+  const role = normalizeAdminRole(rawRole);
+  const invitedBy = (input.invitedBy || "owner").trim().toLowerCase();
+  const memberId = `adm_${Date.now()}_${randomBytes(4).toString("hex")}`;
+  const salt = randomBytes(PASSWORD_SALT_BYTES);
+  const passwordHash = await derivePasswordHash(password, salt);
+  const now = new Date();
+
+  const pool = getPool();
+  if (pool) {
+    await ensureAdminTable();
+    const ownerCheck = await pool.query(
+      `SELECT 1 FROM admin_users WHERE LOWER(email) = $1`,
+      [cleanEmail],
+    );
+    if (ownerCheck.rowCount && ownerCheck.rowCount > 0) {
+      throw new TeamMemberValidationError(
+        `An administrator with email '${cleanEmail}' already exists.`,
+        "TEAM_MEMBER_EXISTS",
+      );
+    }
+
+    const dupCheck = await pool.query(
+      `SELECT 1 FROM admin_team_members WHERE LOWER(email) = $1`,
+      [cleanEmail],
+    );
+    if (dupCheck.rowCount && dupCheck.rowCount > 0) {
+      throw new TeamMemberValidationError(
+        `An administrator with email '${cleanEmail}' already exists.`,
+        "TEAM_MEMBER_EXISTS",
+      );
+    }
+
+    await pool.query(
+      `INSERT INTO admin_team_members (
+         id, email, role, status, password_salt, password_hash, token_version, invited_by, created_at, updated_at
+       )
+       VALUES ($1, $2, $3, 'active', $4, $5, 1, $6, $7::timestamptz, $7::timestamptz)`,
+      [
+        memberId,
+        cleanEmail,
+        role,
+        salt,
+        passwordHash,
+        invitedBy,
+        now.toISOString(),
+      ],
+    );
+
+    return {
+      id: memberId,
+      email: cleanEmail,
+      role,
+      status: "active",
+      tokenVersion: 1,
+      invitedBy,
+      isPrimaryOwner: false,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+    };
+  }
+
+  const inMemOwner = await getOrInitInMemoryAdmin();
+  if (inMemOwner.email.toLowerCase() === cleanEmail) {
+    throw new TeamMemberValidationError(
+      `An administrator with email '${cleanEmail}' already exists.`,
+      "TEAM_MEMBER_EXISTS",
+    );
+  }
+  const teamMap = getInMemoryTeamMap();
+  for (const existing of teamMap.values()) {
+    if (existing.email.toLowerCase() === cleanEmail) {
+      throw new TeamMemberValidationError(
+        `An administrator with email '${cleanEmail}' already exists.`,
+        "TEAM_MEMBER_EXISTS",
+      );
+    }
+  }
+
+  const record: InMemoryTeamMember = {
+    id: memberId,
+    email: cleanEmail,
+    role,
+    status: "active",
+    passwordSalt: salt,
+    passwordHash,
+    tokenVersion: 1,
+    invitedBy,
+    createdAt: now,
+    updatedAt: now,
+  };
+  teamMap.set(memberId, record);
+
+  return {
+    id: memberId,
+    email: cleanEmail,
+    role,
+    status: "active",
+    tokenVersion: 1,
+    invitedBy,
+    isPrimaryOwner: false,
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString(),
+  };
+}
+
+export async function updateAdminTeamMemberAsync(
+  id: string,
+  input: {
+    role?: string;
+    status?: string;
+    password?: string;
+    revokeSessions?: boolean;
+  },
+): Promise<AdminTeamMemberPublic> {
+  if (isPrimaryOwnerTargetId(id)) {
+    throw new PrimaryOwnerProtectedError();
+  }
+
+  let nextRole: AdminRole | undefined;
+  if (input.role !== undefined) {
+    const rawRole = String(input.role).trim().toLowerCase();
+    if (
+      rawRole !== "owner" &&
+      rawRole !== "admin" &&
+      rawRole !== "operator" &&
+      rawRole !== "viewer"
+    ) {
+      throw new TeamMemberValidationError(
+        "Role must be one of: owner, admin, operator, viewer.",
+        "INVALID_ROLE",
+      );
+    }
+    nextRole = normalizeAdminRole(rawRole);
+  }
+
+  let nextStatus: "active" | "disabled" | undefined;
+  if (input.status !== undefined) {
+    const rawStatus = String(input.status).trim().toLowerCase();
+    if (rawStatus !== "active" && rawStatus !== "disabled") {
+      throw new TeamMemberValidationError(
+        "Status must be 'active' or 'disabled'.",
+        "INVALID_STATUS",
+      );
+    }
+    nextStatus = rawStatus;
+  }
+
+  let nextSalt: Buffer | undefined;
+  let nextHash: Buffer | undefined;
+  if (input.password !== undefined && input.password !== "") {
+    if (
+      typeof input.password !== "string" ||
+      input.password.length < 8 ||
+      input.password.length > 256
+    ) {
+      throw new TeamMemberValidationError(
+        "Password must be between 8 and 256 characters.",
+        "INVALID_PASSWORD",
+      );
+    }
+    nextSalt = randomBytes(PASSWORD_SALT_BYTES);
+    nextHash = await derivePasswordHash(input.password, nextSalt);
+  }
+
+  const pool = getPool();
+  if (pool) {
+    await ensureAdminTable();
+    const ownerRes = await pool.query(
+      `SELECT email FROM admin_users WHERE id = 1`,
+    );
+    if (
+      ownerRes.rowCount &&
+      ownerRes.rowCount > 0 &&
+      id.trim().toLowerCase() ===
+        String(ownerRes.rows[0].email).trim().toLowerCase()
+    ) {
+      throw new PrimaryOwnerProtectedError();
+    }
+
+    const existingRes = await pool.query(
+      `SELECT id, email, role, status, COALESCE(token_version, 1) AS token_version, invited_by, created_at
+       FROM admin_team_members
+       WHERE id = $1`,
+      [id],
+    );
+    if (!existingRes.rowCount || existingRes.rowCount === 0) {
+      throw new TeamMemberValidationError(
+        `Team member '${id}' not found.`,
+        "TEAM_MEMBER_NOT_FOUND",
+      );
+    }
+    const existing = existingRes.rows[0] as {
+      id: string;
+      email: string;
+      role: string;
+      status: string;
+      token_version: number;
+      invited_by: string;
+      created_at: Date | string;
+    };
+
+    const finalRole = nextRole ?? normalizeAdminRole(existing.role);
+    const finalStatus =
+      nextStatus ?? (existing.status === "disabled" ? "disabled" : "active");
+    const nextTokenVersion = (Number(existing.token_version) || 1) + 1;
+
+    if (nextSalt && nextHash) {
+      await pool.query(
+        `UPDATE admin_team_members
+         SET role = $1,
+             status = $2,
+             password_salt = $3,
+             password_hash = $4,
+             token_version = $5,
+             updated_at = NOW()
+         WHERE id = $6`,
+        [finalRole, finalStatus, nextSalt, nextHash, nextTokenVersion, id],
+      );
+    } else {
+      await pool.query(
+        `UPDATE admin_team_members
+         SET role = $1,
+             status = $2,
+             token_version = $3,
+             updated_at = NOW()
+         WHERE id = $4`,
+        [finalRole, finalStatus, nextTokenVersion, id],
+      );
+    }
+
+    return {
+      id: existing.id,
+      email: existing.email,
+      role: finalRole,
+      status: finalStatus,
+      tokenVersion: nextTokenVersion,
+      invitedBy: existing.invited_by || "owner",
+      isPrimaryOwner: false,
+      createdAt: new Date(existing.created_at).toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  const inMemOwner = await getOrInitInMemoryAdmin();
+  if (id.trim().toLowerCase() === inMemOwner.email.toLowerCase()) {
+    throw new PrimaryOwnerProtectedError();
+  }
+
+  const teamMap = getInMemoryTeamMap();
+  const existing = teamMap.get(id);
+  if (!existing) {
+    throw new TeamMemberValidationError(
+      `Team member '${id}' not found.`,
+      "TEAM_MEMBER_NOT_FOUND",
+    );
+  }
+
+  const updated: InMemoryTeamMember = {
+    ...existing,
+    role: nextRole ?? existing.role,
+    status: nextStatus ?? existing.status,
+    passwordSalt: nextSalt ?? existing.passwordSalt,
+    passwordHash: nextHash ?? existing.passwordHash,
+    tokenVersion: existing.tokenVersion + 1,
+    updatedAt: new Date(),
+  };
+  teamMap.set(id, updated);
+
+  return {
+    id: updated.id,
+    email: updated.email,
+    role: updated.role,
+    status: updated.status,
+    tokenVersion: updated.tokenVersion,
+    invitedBy: updated.invitedBy,
+    isPrimaryOwner: false,
+    createdAt: updated.createdAt.toISOString(),
+    updatedAt: updated.updatedAt.toISOString(),
+  };
+}
+
+export async function deleteAdminTeamMemberAsync(
+  id: string,
+): Promise<{ id: string; email: string }> {
+  if (isPrimaryOwnerTargetId(id)) {
+    throw new PrimaryOwnerProtectedError();
+  }
+
+  const pool = getPool();
+  if (pool) {
+    await ensureAdminTable();
+    const ownerRes = await pool.query(
+      `SELECT email FROM admin_users WHERE id = 1`,
+    );
+    if (
+      ownerRes.rowCount &&
+      ownerRes.rowCount > 0 &&
+      id.trim().toLowerCase() ===
+        String(ownerRes.rows[0].email).trim().toLowerCase()
+    ) {
+      throw new PrimaryOwnerProtectedError();
+    }
+
+    const delRes = await pool.query(
+      `DELETE FROM admin_team_members WHERE id = $1 RETURNING id, email`,
+      [id],
+    );
+    if (!delRes.rowCount || delRes.rowCount === 0) {
+      throw new TeamMemberValidationError(
+        `Team member '${id}' not found.`,
+        "TEAM_MEMBER_NOT_FOUND",
+      );
+    }
+    return {
+      id: String(delRes.rows[0].id),
+      email: String(delRes.rows[0].email),
+    };
+  }
+
+  const inMemOwner = await getOrInitInMemoryAdmin();
+  if (id.trim().toLowerCase() === inMemOwner.email.toLowerCase()) {
+    throw new PrimaryOwnerProtectedError();
+  }
+
+  const teamMap = getInMemoryTeamMap();
+  const existing = teamMap.get(id);
+  if (!existing) {
+    throw new TeamMemberValidationError(
+      `Team member '${id}' not found.`,
+      "TEAM_MEMBER_NOT_FOUND",
+    );
+  }
+  teamMap.delete(id);
+  return { id: existing.id, email: existing.email };
+}
+
 export function resetAdminStateForTests() {
   globals.__dataStackInMemoryAdmin = undefined;
+  globals.__dataStackInMemoryTeamMembers?.clear();
+  globals.__dataStackLastVerifiedMemberId = undefined;
   localLoginThrottle.clear();
   lastLocalThrottleCleanup = 0;
+  clearAuditLogsForTests();
 }

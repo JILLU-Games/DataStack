@@ -9,11 +9,11 @@ import test from "node:test";
 import { NextRequest } from "next/server";
 import { io as ioClient, type Socket } from "socket.io-client";
 import { PATCH as patchClientRoute } from "../app/api/clients/[id]/route";
-import { GET as clientsGet, POST as clientsPost } from "../app/api/clients/route";
+import { POST as clientsPost } from "../app/api/clients/route";
 import { POST as eventsPost } from "../app/api/events/route";
 import { GET as exportGet } from "../app/api/export/route";
 import { GET as prometheusGet } from "../app/api/prometheus/route";
-import { GET as settingsGet, POST as settingsPost } from "../app/api/settings/route";
+import { POST as settingsPost } from "../app/api/settings/route";
 import { POST as webhookTestPost } from "../app/api/settings/webhook-test/route";
 import { SettingsManager } from "../core/adminSettings/settingsManager";
 import {
@@ -113,16 +113,16 @@ test("V2-Phase-02 [IP Allowlist & Token Expiry]: validateAllowedIpsInput, isClie
   // Expiration validation & evaluation
   assert.deepEqual(validateClientExpiresAtInput(null), {
     valid: true,
-    normalized: null,
+    iso: null,
   });
   assert.deepEqual(validateClientExpiresAtInput(""), {
     valid: true,
-    normalized: null,
+    iso: null,
   });
   const validExp = validateClientExpiresAtInput("2030-06-15T12:00:00.000Z");
   assert.equal(validExp.valid, true);
   if (validExp.valid) {
-    assert.equal(validExp.normalized, "2030-06-15T12:00:00.000Z");
+    assert.equal(validExp.iso, "2030-06-15T12:00:00.000Z");
   }
   const badExp = validateClientExpiresAtInput("not-a-timestamp");
   assert.equal(badExp.valid, false);
@@ -170,7 +170,7 @@ test("V2-Phase-02 [Webhook Notifier & /api/settings/webhook-test]: HMAC-SHA256 s
 
   try {
     // 1. Format & signature verification
-    const formatted = formatOutboundWebhookBody({
+    const formattedJsonStr = formatOutboundWebhookBody({
       event: "DISK_SPACE_LOW",
       severity: "critical",
       title: "Disk Threshold Reached",
@@ -179,34 +179,37 @@ test("V2-Phase-02 [Webhook Notifier & /api/settings/webhook-test]: HMAC-SHA256 s
       timestamp: "2026-11-19T12:00:00.000Z",
       details: { usedPct: 95.4 },
     });
+    const formatted = JSON.parse(formattedJsonStr) as {
+      text: string;
+      content: string;
+    };
     assert.ok(formatted.text.includes("DISK_SPACE_LOW"));
     assert.equal(formatted.content, formatted.text);
 
-    const bodyJson = JSON.stringify(formatted);
-    const sig = buildWebhookSignature(bodyJson, "webhook_secret_xyz");
+    const sig = buildWebhookSignature(formattedJsonStr, "webhook_secret_xyz");
     assert.ok(sig.startsWith("sha256="));
 
     // 2. Cooldown deduplication test
     const first = await dispatchWebhookAlertAsync(
       {
-        enabled: true,
-        url: webhookUrl,
-        secret: "webhook_secret_xyz",
-        cooldownSec: 120,
-      },
-      {
-        event: "CLIENT_QUOTA_EXCEEDED",
+        event: "STORAGE_QUOTA_EXCEEDED",
         severity: "warning",
         title: "Client Quota Exceeded",
         message: "Quota reached for svc_alpha",
         clientId: "svc_alpha",
+      },
+      {
+        enabled: true,
+        webhookUrl,
+        webhookSecret: "webhook_secret_xyz",
+        cooldownSec: 120,
       },
     );
     assert.equal(first.ok, true);
     assert.equal(receivedRequests.length, 1);
     assert.equal(
       receivedRequests[0].headers["x-datastack-event"],
-      "CLIENT_QUOTA_EXCEEDED",
+      "STORAGE_QUOTA_EXCEEDED",
     );
     assert.equal(
       receivedRequests[0].headers["x-datastack-signature"],
@@ -216,21 +219,22 @@ test("V2-Phase-02 [Webhook Notifier & /api/settings/webhook-test]: HMAC-SHA256 s
     // Duplicate event for same client within cooldown window is suppressed
     const second = await dispatchWebhookAlertAsync(
       {
-        enabled: true,
-        url: webhookUrl,
-        secret: "webhook_secret_xyz",
-        cooldownSec: 120,
-      },
-      {
-        event: "CLIENT_QUOTA_EXCEEDED",
+        event: "STORAGE_QUOTA_EXCEEDED",
         severity: "warning",
         title: "Client Quota Exceeded",
         message: "Quota reached again for svc_alpha",
         clientId: "svc_alpha",
       },
+      {
+        enabled: true,
+        webhookUrl,
+        webhookSecret: "webhook_secret_xyz",
+        cooldownSec: 120,
+      },
     );
     assert.equal(second.ok, true);
-    assert.equal(second.suppressedByCooldown, true);
+    assert.equal(second.skipped, true);
+    assert.equal(second.reason, "COOLDOWN_ACTIVE");
     assert.equal(receivedRequests.length, 1);
 
     // 3. Test POST /api/settings/webhook-test route (200 & 502 WEBHOOK_DELIVERY_FAILED V2-E06)
@@ -271,16 +275,43 @@ test("V2-Phase-02 [Webhook Notifier & /api/settings/webhook-test]: HMAC-SHA256 s
     assert.equal(failTestData.code, "WEBHOOK_DELIVERY_FAILED");
   } finally {
     await new Promise<void>((resolve) => mockWebhookServer.close(() => resolve()));
+    await DataBufferEngine.shutdown();
+    resetAdminStateForTests();
   }
 });
 
 test("V2-Phase-02 [HTTP & Socket Ingestion Security]: Per-client IP allowlist (403 V2-E07) & Token expiration (401 V2-E08)", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "datastack-v2-p2-sec-"));
   const prevStorageDir = process.env.DATASTACK_STORAGE_DIR;
+  const prevDisableListen = process.env.DATASTACK_DISABLE_LISTEN;
+  const prevDbUrl = process.env.DATABASE_URL;
   process.env.DATASTACK_STORAGE_DIR = tmpDir;
-  CSVStorageManager.resetForTests(tmpDir);
-  await CSVStorageManager.initializeAsync();
+  process.env.DATASTACK_DISABLE_LISTEN = "1";
+  delete process.env.DATABASE_URL;
+
+  const origBaseStorageDir = CSVStorageManager.baseStorageDir;
+  CSVStorageManager.baseStorageDir = tmpDir;
+  CSVStorageManager.clearQuotaCaches();
   clearWebhookCooldownCacheForTests();
+
+  const serverMod = require("../server/index.js") as {
+    server: http.Server;
+    io: { close: (cb: () => void) => void };
+    writer: { baseDir: string; clearQuotaCaches: () => void };
+    verifyClientInDb: (
+      clientId: string,
+      token: string,
+      bypassCache?: boolean,
+      clientIp?: string,
+    ) => Promise<{ ok: boolean; reason?: string }>;
+    setDbPoolForTests: (pool: unknown) => void;
+    stopTimers: () => void;
+  };
+  const origWriterBaseDir = serverMod.writer.baseDir;
+  serverMod.writer.baseDir = tmpDir;
+  serverMod.writer.clearQuotaCaches();
+
+  const openSockets: Socket[] = [];
 
   try {
     const adminCookie = await makeAdminCookie();
@@ -295,6 +326,7 @@ test("V2-Phase-02 [HTTP & Socket Ingestion Security]: Per-client IP allowlist (4
           "content-type": "application/json",
         },
         body: JSON.stringify({
+          clientId: "ip_restricted_svc",
           name: "IP Restricted Client",
           rateLimit: 100,
           storageQuotaMb: 0,
@@ -303,7 +335,7 @@ test("V2-Phase-02 [HTTP & Socket Ingestion Security]: Per-client IP allowlist (4
         }),
       }),
     );
-    assert.equal(createRes.status, 200);
+    assert.equal(createRes.status, 201);
     const createData = await createRes.json();
     const client = createData.client;
     assert.equal(client.allowedIps, "10.10.0.0/16");
@@ -320,7 +352,7 @@ test("V2-Phase-02 [HTTP & Socket Ingestion Security]: Per-client IP allowlist (4
         },
         body: JSON.stringify({
           eventId: "evt_ip_denied",
-          payload: { step: 1 },
+          data: { step: 1 },
         }),
       }),
     );
@@ -339,7 +371,7 @@ test("V2-Phase-02 [HTTP & Socket Ingestion Security]: Per-client IP allowlist (4
         },
         body: JSON.stringify({
           eventId: "evt_ip_allowed",
-          payload: { step: 2 },
+          data: { step: 2 },
         }),
       }),
     );
@@ -377,7 +409,7 @@ test("V2-Phase-02 [HTTP & Socket Ingestion Security]: Per-client IP allowlist (4
         },
         body: JSON.stringify({
           eventId: "evt_expired",
-          payload: { step: 3 },
+          data: { step: 3 },
         }),
       }),
     );
@@ -386,93 +418,120 @@ test("V2-Phase-02 [HTTP & Socket Ingestion Security]: Per-client IP allowlist (4
     assert.equal(expiredJson.code, "CLIENT_TOKEN_EXPIRED");
 
     // 5. Verify Port 4000 Socket.IO server enforces IP allowlist & token expiry
-    process.env.DATASTACK_DISABLE_LISTEN = "1";
-    const ingestionApp = require("../server/index.js");
+    let mockExpiresAt: string | null = pastIso;
+    const mockAllowedIps = "10.10.0.0/16";
+    serverMod.setDbPoolForTests({
+      query: async (sql: string) => {
+        if (sql.includes("FROM client_sdks")) {
+          return {
+            rowCount: 1,
+            rows: [
+              {
+                client_id: client.clientId,
+                token: client.token,
+                status: "active",
+                rate_limit: 100,
+                storage_quota_mb: 0,
+                allowed_ips: mockAllowedIps,
+                expires_at: mockExpiresAt,
+              },
+            ],
+          };
+        }
+        return { rowCount: 0, rows: [] };
+      },
+    });
 
-    // Sync expired client to Port 4000 in-memory cache and verify verifyClientInDb returns CLIENT_TOKEN_EXPIRED
-    await new Promise<void>((resolve) =>
-      ingestionApp.server.listen(0, "127.0.0.1", () => resolve()),
+    const expiredCheck = await serverMod.verifyClientInDb(
+      client.clientId,
+      client.token,
+      true,
+      "10.10.42.9",
     );
-    const port4000 = (ingestionApp.server.address() as AddressInfo).port;
+    assert.equal(expiredCheck.allowed, false);
+    assert.equal(expiredCheck.code, "CLIENT_TOKEN_EXPIRED");
 
-    try {
-      const expiredCheck = await ingestionApp.verifyClientInDb(
-        client.clientId,
-        client.token,
-        true,
-        "10.10.42.9",
-      );
-      assert.equal(expiredCheck.ok, false);
-      assert.equal(expiredCheck.reason, "CLIENT_TOKEN_EXPIRED");
+    // Clear expiration, keep IP allowlist 10.10.0.0/16, and check 127.0.0.1
+    mockExpiresAt = null;
+    const ipForbiddenCheck = await serverMod.verifyClientInDb(
+      client.clientId,
+      client.token,
+      true,
+      "127.0.0.1",
+    );
+    assert.equal(ipForbiddenCheck.allowed, false);
+    assert.equal(ipForbiddenCheck.code, "CLIENT_IP_FORBIDDEN");
 
-      // Clear expiration via PATCH, keep IP allowlist 10.10.0.0/16, and check Socket.IO handshake from 127.0.0.1
-      await patchClientRoute(
-        new NextRequest(
-          `http://localhost:3000/api/clients/${encodeURIComponent(client.clientId)}`,
-          {
-            method: "PATCH",
-            headers: {
-              cookie: adminCookie,
-              "content-type": "application/json",
-            },
-            body: JSON.stringify({
-              expiresAt: null,
-            }),
-          },
-        ),
-        { params: Promise.resolve({ id: client.clientId }) },
-      );
+    // Start Port 4000 server on ephemeral port and verify Socket.IO handshake from 127.0.0.1 is rejected with CLIENT_IP_FORBIDDEN
+    await new Promise<void>((resolve) =>
+      serverMod.server.listen(0, "127.0.0.1", () => resolve()),
+    );
+    const port4000 = (serverMod.server.address() as AddressInfo).port;
 
-      const ipForbiddenCheck = await ingestionApp.verifyClientInDb(
-        client.clientId,
-        client.token,
-        true,
-        "127.0.0.1",
-      );
-      assert.equal(ipForbiddenCheck.ok, false);
-      assert.equal(ipForbiddenCheck.reason, "CLIENT_IP_FORBIDDEN");
-
-      // Socket.IO connection from 127.0.0.1 should fail handshake with CLIENT_IP_FORBIDDEN
-      const socketError = await new Promise<string>((resolve) => {
-        const sock: Socket = ioClient(`http://127.0.0.1:${port4000}`, {
-          auth: { clientId: client.clientId, token: client.token },
-          transports: ["websocket"],
-          reconnection: false,
-        });
-        sock.on("connect_error", (err) => {
-          sock.close();
-          resolve(err.message);
-        });
-        sock.on("connect", () => {
-          sock.close();
-          resolve("CONNECTED_UNEXPECTEDLY");
-        });
+    const socketError = await new Promise<string>((resolve) => {
+      const sock: Socket = ioClient(`http://127.0.0.1:${port4000}`, {
+        auth: { clientId: client.clientId, token: client.token },
+        transports: ["websocket"],
+        reconnection: false,
+        timeout: 3000,
       });
-      assert.ok(socketError.includes("CLIENT_IP_FORBIDDEN"));
-    } finally {
-      await new Promise<void>((resolve) =>
-        ingestionApp.server.close(() => resolve()),
-      );
-    }
+      openSockets.push(sock);
+      sock.on("connect_error", (err) => {
+        sock.disconnect();
+        resolve(err.message);
+      });
+      sock.on("connect", () => {
+        sock.disconnect();
+        resolve("CONNECTED_UNEXPECTEDLY");
+      });
+    });
+    assert.ok(socketError.includes("CLIENT_IP_FORBIDDEN"));
   } finally {
-    await DataBufferEngine.flushAllAsync();
-    SDKManager.stopActivityFlushTimerForTests();
-    if (prevStorageDir === undefined) {
-      delete process.env.DATASTACK_STORAGE_DIR;
-    } else {
-      process.env.DATASTACK_STORAGE_DIR = prevStorageDir;
+    for (const s of openSockets) {
+      try {
+        s.disconnect();
+      } catch {
+        // ignore
+      }
     }
-    CSVStorageManager.resetForTests();
+    serverMod.writer.baseDir = origWriterBaseDir;
+    serverMod.writer.clearQuotaCaches();
+    serverMod.setDbPoolForTests(null);
+    serverMod.stopTimers();
+    await new Promise<void>((resolve) => {
+      serverMod.io.close(() => {
+        if (serverMod.server.listening) {
+          serverMod.server.close(() => resolve());
+        } else {
+          resolve();
+        }
+      });
+    });
+    SDKManager.stopActivityFlushTimerForTests();
+    CSVStorageManager.clearQuotaCaches();
+    await DataBufferEngine.shutdown();
+    CSVStorageManager.baseStorageDir = origBaseStorageDir;
+    if (prevStorageDir === undefined) delete process.env.DATASTACK_STORAGE_DIR;
+    else process.env.DATASTACK_STORAGE_DIR = prevStorageDir;
+    if (prevDisableListen === undefined) delete process.env.DATASTACK_DISABLE_LISTEN;
+    else process.env.DATASTACK_DISABLE_LISTEN = prevDisableListen;
+    if (prevDbUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = prevDbUrl;
     await fs.rm(tmpDir, { recursive: true, force: true });
+    resetAdminStateForTests();
   }
 });
 
 test("V2-Phase-02 [Prometheus Metrics & NDJSON Streaming Export]: GET /api/prometheus (V2-FEAT-04 / V2-E09) & GET /api/export?format=ndjson (V2-FEAT-06)", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "datastack-v2-p2-prom-"));
   const prevStorageDir = process.env.DATASTACK_STORAGE_DIR;
+  const prevDbUrl = process.env.DATABASE_URL;
   process.env.DATASTACK_STORAGE_DIR = tmpDir;
-  CSVStorageManager.resetForTests(tmpDir);
-  await CSVStorageManager.initializeAsync();
+  delete process.env.DATABASE_URL;
+
+  const origBaseStorageDir = CSVStorageManager.baseStorageDir;
+  CSVStorageManager.baseStorageDir = tmpDir;
+  CSVStorageManager.clearQuotaCaches();
 
   try {
     const adminCookie = await makeAdminCookie();
@@ -546,7 +605,7 @@ test("V2-Phase-02 [Prometheus Metrics & NDJSON Streaming Export]: GET /api/prome
     assert.ok(metricsBody.includes("datastack_disk_used_percent"));
 
     // 5. Seed events and export as streaming NDJSON (GET /api/export?format=ndjson) (V2-FEAT-06)
-    await CSVStorageManager.appendBatchAsync("client_ndjson", [
+    await CSVStorageManager.appendBatch([
       {
         clientId: "client_ndjson",
         eventId: "evt_nd_1",
@@ -575,10 +634,10 @@ test("V2-Phase-02 [Prometheus Metrics & NDJSON Streaming Export]: GET /api/prome
         .get("content-type")
         ?.includes("application/x-ndjson"),
     );
+    const disposition = ndjsonRes.headers.get("content-disposition") || "";
     assert.ok(
-      ndjsonRes.headers
-        .get("content-disposition")
-        ?.includes("datastack-client_ndjson.ndjson"),
+      disposition.includes("client_ndjson_export_") &&
+        disposition.endsWith('.ndjson"'),
     );
     const ndjsonText = await ndjsonRes.text();
     const lines = ndjsonText
@@ -610,8 +669,6 @@ test("V2-Phase-02 [Prometheus Metrics & NDJSON Streaming Export]: GET /api/prome
       DEFAULT_ALERTING_SETTINGS,
     );
   } finally {
-    await DataBufferEngine.flushAllAsync();
-    SDKManager.stopActivityFlushTimerForTests();
     await SettingsManager.updateSettingsAsync({
       enableWebhookAlerts: false,
       webhookUrl: "",
@@ -620,12 +677,15 @@ test("V2-Phase-02 [Prometheus Metrics & NDJSON Streaming Export]: GET /api/prome
       enablePrometheusMetrics: false,
       clearPrometheusToken: true,
     });
-    if (prevStorageDir === undefined) {
-      delete process.env.DATASTACK_STORAGE_DIR;
-    } else {
-      process.env.DATASTACK_STORAGE_DIR = prevStorageDir;
-    }
-    CSVStorageManager.resetForTests();
+    SDKManager.stopActivityFlushTimerForTests();
+    await DataBufferEngine.shutdown();
+    CSVStorageManager.clearQuotaCaches();
+    CSVStorageManager.baseStorageDir = origBaseStorageDir;
+    if (prevStorageDir === undefined) delete process.env.DATASTACK_STORAGE_DIR;
+    else process.env.DATASTACK_STORAGE_DIR = prevStorageDir;
+    if (prevDbUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = prevDbUrl;
     await fs.rm(tmpDir, { recursive: true, force: true });
+    resetAdminStateForTests();
   }
 });

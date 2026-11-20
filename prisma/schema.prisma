@@ -1,7 +1,7 @@
 // REFERENCE SCHEMA ONLY — NOT EXECUTED BY PRISMA CLI AT RUNTIME.
 // Canonical PostgreSQL runtime DDL is owned by `core/Database/database.ts` (Port 3000 via `pg`)
 // and mirrored 1:1 in `server/index.js` (Port 4000 standalone container).
-// Keep all 5 models below strictly synchronized with `core/Database/database.ts` (verified by tests).
+// Keep all 7 models below strictly synchronized with `core/Database/database.ts` (verified by tests).
 
 generator client {
   provider = "prisma-client-js"
@@ -12,20 +12,23 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// CRITICAL: PostgreSQL is ONLY for Admin / Config / SDK Registration — NOT for collected data.
-// All collected data is strictly written to CSV files in /storage/data/{clientId}/{YYYY-MM-DD}.csv
+// CRITICAL: PostgreSQL is ONLY for Admin / Config / SDK Registration / Audit Governance — NOT for collected telemetry data.
+// All collected telemetry data is strictly written to CSV / .csv.gz files in /storage/data/{clientId}/{YYYY-MM-DD}.csv
 
 model ClientSDK {
-  clientId    String    @id @map("client_id")
-  name        String
-  secret      String
-  token       String
-  rateLimit   Int       @default(100) @map("rate_limit") // Max events per second
-  status      String    @default("active") // active | revoked
-  totalEvents BigInt    @default(0) @map("total_events")
-  lastActive  DateTime? @map("last_active") @db.Timestamptz(6)
-  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  clientId       String    @id @map("client_id")
+  name           String
+  secret         String
+  token          String
+  rateLimit      Int       @default(100) @map("rate_limit") // Max events per second
+  storageQuotaMb Int       @default(0) @map("storage_quota_mb") // 0 = unlimited
+  allowedIps     String    @default("") @map("allowed_ips") // Comma-separated IPv4/IPv6/CIDR allowlist
+  expiresAt      DateTime? @map("expires_at") @db.Timestamptz(6)
+  status         String    @default("active") // active | revoked
+  totalEvents    BigInt    @default(0) @map("total_events")
+  lastActive     DateTime? @map("last_active") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@map("client_sdks")
 }
@@ -58,19 +61,62 @@ model AdminLoginAttempt {
   @@map("admin_login_attempts")
 }
 
+model AdminTeamMember {
+  id           String   @id
+  email        String   @unique
+  role         String   @default("viewer") // owner | admin | operator | viewer
+  status       String   @default("active") // active | disabled
+  passwordSalt Bytes    @map("password_salt")
+  passwordHash Bytes    @map("password_hash")
+  tokenVersion Int      @default(1) @map("token_version")
+  invitedBy    String   @default("owner") @map("invited_by")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("admin_team_members")
+}
+
+model AdminAuditLog {
+  id           String   @id
+  actorEmail   String   @map("actor_email")
+  actorRole    String   @map("actor_role")
+  action       String
+  target       String
+  ipAddress    String   @default("") @map("ip_address")
+  metadataJson String   @default("{}") @map("metadata_json")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("admin_audit_logs")
+}
+
 model AdminSettings {
-  id                   String   @id @default("default")
-  serverPort           Int      @default(4000) @map("server_port")
-  webPort              Int      @default(3000) @map("web_port")
-  maxEventsPerSec      Int      @default(100) @map("max_events_per_sec")
-  maxPayloadSizeKb     Int      @default(100) @map("max_payload_size_kb")
-  batchFlushThreshold  Int      @default(500) @map("batch_flush_threshold")
-  batchFlushIntervalMs Int      @default(2000) @map("batch_flush_interval_ms")
-  fileRotationMb       Int      @default(100) @map("file_rotation_mb")
-  jwtSecret            String   @map("jwt_secret")
-  enableIdempotency    Boolean  @default(true) @map("enable_idempotency")
-  autoPruneDays        Int      @default(30) @map("auto_prune_days")
-  updatedAt            DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                        String   @id @default("default")
+  serverPort                Int      @default(4000) @map("server_port")
+  webPort                   Int      @default(3000) @map("web_port")
+  maxEventsPerSec           Int      @default(100) @map("max_events_per_sec")
+  maxPayloadSizeKb          Int      @default(100) @map("max_payload_size_kb")
+  batchFlushThreshold       Int      @default(500) @map("batch_flush_threshold")
+  batchFlushIntervalMs      Int      @default(2000) @map("batch_flush_interval_ms")
+  fileRotationMb            Int      @default(100) @map("file_rotation_mb")
+  jwtSecret                 String   @map("jwt_secret")
+  enableIdempotency         Boolean  @default(true) @map("enable_idempotency")
+  autoPruneDays             Int      @default(30) @map("auto_prune_days")
+  compressAfterDays         Int      @default(0) @map("compress_after_days")
+  enableS3Backup            Boolean  @default(false) @map("enable_s3_backup")
+  s3Endpoint                String   @default("") @map("s3_endpoint")
+  s3Region                  String   @default("auto") @map("s3_region")
+  s3Bucket                  String   @default("") @map("s3_bucket")
+  s3Prefix                  String   @default("datastack/") @map("s3_prefix")
+  s3AccessKeyId             String   @default("") @map("s3_access_key_id")
+  s3SecretAccessKeyEnc      String   @default("") @map("s3_secret_access_key_enc")
+  diskPauseThresholdPct     Int      @default(95) @map("disk_pause_threshold_pct")
+  enableWebhookAlerts       Boolean  @default(false) @map("enable_webhook_alerts")
+  webhookUrl                String   @default("") @map("webhook_url")
+  webhookSecretEnc          String   @default("") @map("webhook_secret_enc")
+  webhookCooldownSec        Int      @default(300) @map("webhook_cooldown_sec")
+  enablePrometheusMetrics   Boolean  @default(false) @map("enable_prometheus_metrics")
+  prometheusMetricsTokenEnc String   @default("") @map("prometheus_metrics_token_enc")
+  updatedAt                 DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@map("admin_settings")
 }

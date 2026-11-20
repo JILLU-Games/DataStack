@@ -34,6 +34,8 @@ const NAVIGATION_SECTIONS = [
     items: [
       { name: 'Python SDK', href: '/vcon/sdk', icon: 'FileCode2' },
       { name: 'Simulator', href: '/vcon/simulator', icon: 'Play' },
+      { name: 'Team & RBAC', href: '/vcon/team', icon: 'Users' },
+      { name: 'Audit Log', href: '/vcon/audit', icon: 'FileText' },
       { name: 'Settings', href: '/vcon/settings', icon: 'Sliders' },
       { name: 'Profile', href: '/vcon/profile', icon: 'User' },
     ],
