@@ -1,7 +1,10 @@
 import { SettingsManager } from "@/core/adminSettings/settingsManager";
 import { dispatchWebhookAlertAsync } from "@/core/alerts/webhookNotifier";
 import { recordAdminAuditLogAsync } from "@/core/auth/auditLog";
-import { SecretVaultError } from "@/core/Security/secretVault";
+import {
+  decryptSecret,
+  SecretVaultError,
+} from "@/core/Security/secretVault";
 import { extractClientIp, requireAdminApiSession } from "@/lib/adminAuth";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -28,17 +31,20 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const savedConfig = await SettingsManager.getDecryptedWebhookConfigAsync();
+    const saved = await SettingsManager.getSettingsAsync();
     const webhookUrl =
       typeof body.webhookUrl === "string"
         ? body.webhookUrl.trim()
-        : savedConfig.webhookUrl.trim();
+        : saved.webhookUrl.trim();
     const clearWebhookSecret = body.clearWebhookSecret === true;
-    const webhookSecret = clearWebhookSecret
-      ? ""
-      : typeof body.webhookSecret === "string" && body.webhookSecret.trim()
+    const draftSecret =
+      typeof body.webhookSecret === "string" && body.webhookSecret.trim()
         ? body.webhookSecret.trim()
-        : savedConfig.webhookSecret;
+        : "";
+    let webhookSecret = draftSecret;
+    if (!webhookSecret && !clearWebhookSecret && saved.webhookSecretEnc) {
+      webhookSecret = decryptSecret(saved.webhookSecretEnc);
+    }
 
     if (!webhookUrl) {
       return NextResponse.json(
@@ -81,7 +87,7 @@ export async function POST(req: NextRequest) {
         enabled: true,
         webhookUrl,
         webhookSecret,
-        cooldownSec: savedConfig.cooldownSec,
+        cooldownSec: saved.webhookCooldownSec,
       },
       { bypassCooldown: true },
     );

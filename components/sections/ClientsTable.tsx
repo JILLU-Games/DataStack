@@ -14,7 +14,12 @@ import {
   TableRow,
   TableWrap,
 } from '@/components/ui/Table';
+import { useVconRole } from '@/components/layout/VconShell';
 import { useToast } from '@/components/ui/Toast';
+import {
+  formatDateForLocalInput,
+  getVconRoleCapabilities,
+} from '@/lib/vconUiHelpers';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import type { ClientCredentials, ClientItem } from './clients/types';
@@ -22,6 +27,7 @@ import type { ClientCredentials, ClientItem } from './clients/types';
 interface ClientsTableProps {
   clients: ClientItem[];
   now: number;
+  canManage?: boolean;
   onStatusChange: () => Promise<void>;
 }
 
@@ -35,9 +41,19 @@ function relativeTime(timestamp: string | undefined, now: number) {
   return `${Math.floor(seconds / 86_400)}d ago`;
 }
 
-export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps) {
+export function ClientsTable({
+  clients,
+  now,
+  canManage,
+  onStatusChange,
+}: ClientsTableProps) {
   const router = useRouter();
   const { success, error } = useToast();
+  const currentRole = useVconRole();
+  const allowMutations =
+    canManage !== undefined
+      ? canManage
+      : getVconRoleCapabilities(currentRole).canOperate;
   const [credentials, setCredentials] = useState<ClientCredentials | null>(null);
   const [confirmAction, setConfirmAction] = useState<{
     type: 'rotate' | 'revoke' | 'delete';
@@ -59,21 +75,13 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
   };
 
   const openEditModal = (client: ClientItem) => {
+    if (!allowMutations) return;
     setEditClient(client);
     setEditName(client.name);
     setEditRateLimit(String(client.rateLimit || 100));
     setEditStorageQuotaMb(String(client.storageQuotaMb ?? 0));
     setEditAllowedIps(client.allowedIps || '');
-    if (client.expiresAt) {
-      const parsedDate = new Date(client.expiresAt);
-      setEditExpiresAt(
-        !Number.isNaN(parsedDate.getTime())
-          ? parsedDate.toISOString().slice(0, 16)
-          : '',
-      );
-    } else {
-      setEditExpiresAt('');
-    }
+    setEditExpiresAt(formatDateForLocalInput(client.expiresAt));
     setEditError('');
   };
 
@@ -339,49 +347,53 @@ export function ClientsTable({ clients, now, onStatusChange }: ClientsTableProps
                           aria-label={`View events for ${client.clientId}`}
                           onClick={() => router.push(`/vcon/data?clientId=${encodeURIComponent(client.clientId)}`)}
                         />
-                        <Button
-                          type="button"
-                          variant="icon"
-                          size="icon"
-                          icon="Pencil"
-                          className="h-6 w-6 border border-transparent hover:border-[var(--border)] hover:bg-[var(--surface-2)]"
-                          title={`Edit ${client.clientId}`}
-                          aria-label={`Edit ${client.clientId}`}
-                          onClick={() => openEditModal(client)}
-                        />
-                        <Button
-                          type="button"
-                          variant="icon"
-                          size="icon"
-                          icon="RefreshCw"
-                          className="h-6 w-6 border border-transparent hover:border-[var(--border)] hover:bg-[var(--surface-2)]"
-                          title={`Rotate key for ${client.clientId}`}
-                          aria-label={`Rotate key for ${client.clientId}`}
-                          onClick={() => setConfirmAction({ type: 'rotate', client })}
-                        />
-                        <Button
-                          type="button"
-                          variant="icon"
-                          size="icon"
-                          icon={client.status === 'active' ? 'ShieldOff' : 'ShieldCheck'}
-                          className={`h-6 w-6 border border-transparent ${client.status === 'active' ? 'hover:border-[var(--warning)] hover:text-[var(--warning)]' : 'hover:border-[var(--border)] hover:bg-[var(--surface-2)]'}`}
-                          title={`${client.status === 'active' ? 'Revoke' : 'Reactivate'} ${client.clientId}`}
-                          aria-label={`${client.status === 'active' ? 'Revoke' : 'Reactivate'} ${client.clientId}`}
-                          onClick={() => toggleStatus(client)}
-                        />
-                        <Button
-                          type="button"
-                          variant="icon"
-                          size="icon"
-                          icon="Trash2"
-                          className="h-6 w-6 border border-transparent hover:border-[var(--danger)] hover:text-[var(--danger)]"
-                          title={`Delete ${client.clientId}`}
-                          aria-label={`Delete ${client.clientId}`}
-                          onClick={() => {
-                            setPurgeFilesOnDelete(false);
-                            setConfirmAction({ type: 'delete', client });
-                          }}
-                        />
+                        {allowMutations && (
+                          <>
+                            <Button
+                              type="button"
+                              variant="icon"
+                              size="icon"
+                              icon="Pencil"
+                              className="h-6 w-6 border border-transparent hover:border-[var(--border)] hover:bg-[var(--surface-2)]"
+                              title={`Edit ${client.clientId}`}
+                              aria-label={`Edit ${client.clientId}`}
+                              onClick={() => openEditModal(client)}
+                            />
+                            <Button
+                              type="button"
+                              variant="icon"
+                              size="icon"
+                              icon="RefreshCw"
+                              className="h-6 w-6 border border-transparent hover:border-[var(--border)] hover:bg-[var(--surface-2)]"
+                              title={`Rotate key for ${client.clientId}`}
+                              aria-label={`Rotate key for ${client.clientId}`}
+                              onClick={() => setConfirmAction({ type: 'rotate', client })}
+                            />
+                            <Button
+                              type="button"
+                              variant="icon"
+                              size="icon"
+                              icon={client.status === 'active' ? 'ShieldOff' : 'ShieldCheck'}
+                              className={`h-6 w-6 border border-transparent ${client.status === 'active' ? 'hover:border-[var(--warning)] hover:text-[var(--warning)]' : 'hover:border-[var(--border)] hover:bg-[var(--surface-2)]'}`}
+                              title={`${client.status === 'active' ? 'Revoke' : 'Reactivate'} ${client.clientId}`}
+                              aria-label={`${client.status === 'active' ? 'Revoke' : 'Reactivate'} ${client.clientId}`}
+                              onClick={() => toggleStatus(client)}
+                            />
+                            <Button
+                              type="button"
+                              variant="icon"
+                              size="icon"
+                              icon="Trash2"
+                              className="h-6 w-6 border border-transparent hover:border-[var(--danger)] hover:text-[var(--danger)]"
+                              title={`Delete ${client.clientId}`}
+                              aria-label={`Delete ${client.clientId}`}
+                              onClick={() => {
+                                setPurgeFilesOnDelete(false);
+                                setConfirmAction({ type: 'delete', client });
+                              }}
+                            />
+                          </>
+                        )}
                       </div>
                     </TableCell>
                   </TableRow>

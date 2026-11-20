@@ -1,6 +1,7 @@
 'use client';
 
 import { PageShell } from '@/components/layout/PageShell';
+import { useVconRole } from '@/components/layout/VconShell';
 import { Button } from '@/components/ui/Button';
 import { CodeBlock } from '@/components/ui/CodeBlock';
 import { Select, Textarea } from '@/components/ui/Input';
@@ -10,7 +11,9 @@ import { StatStrip } from '@/components/ui/StatStrip';
 import { useToast } from '@/components/ui/Toast';
 import { getCached, setCached } from '@/lib/vconCache';
 import {
+  getVconRoleCapabilities,
   resolvePublicEndpoints,
+  shouldRedirectSimulatorUnauthorized,
   summarizeHttpBatchResult,
 } from '@/lib/vconUiHelpers';
 import Link from 'next/link';
@@ -32,6 +35,8 @@ function getSocketOrigin(serverPort: number): string {
 
 export default function SimulatorPage() {
   const { success, warning, error } = useToast();
+  const currentRole = useVconRole();
+  const { canOperate } = getVconRoleCapabilities(currentRole);
   const [clients, setClients] = useState<SimulatorClient[]>(() =>
     getCached<SimulatorClient[]>('vcon:clients', [])
   );
@@ -181,6 +186,10 @@ export default function SimulatorPage() {
   };
 
   const handleSendSingle = async () => {
+    if (!canOperate) {
+      error('Read-only role', 'Event simulation requires operator or owner access.');
+      return;
+    }
     if (!selectedClient) {
       error('No target client', 'Register a client in /vcon/clients first.');
       return;
@@ -223,20 +232,29 @@ export default function SimulatorPage() {
           data: parsedData,
         }),
       });
-      if (res.status === 401) {
+      const data = await res.json().catch(() => ({}));
+      if (
+        shouldRedirectSimulatorUnauthorized(
+          res.status,
+          data && typeof data === 'object' ? (data as Record<string, unknown>) : null,
+        )
+      ) {
         window.location.assign('/vcon/login');
         return;
       }
 
-      const data = await res.json();
-      setLastResponse({ transport: 'http', status: res.status, ...data });
+      setLastResponse({
+        transport: 'http',
+        status: res.status,
+        ...(data && typeof data === 'object' ? data : {}),
+      });
 
       if (res.ok) {
         setDispatchStatus('Accepted');
         success('Event Accepted', `${data.event?.eventId || selectedClient} buffered`);
       } else {
         setDispatchStatus('Rejected');
-        error('Event Rejected', data.error || 'Server rejected');
+        error('Event Rejected', data.error || `Server rejected (HTTP ${res.status})`);
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Dispatch error';
@@ -249,6 +267,10 @@ export default function SimulatorPage() {
   };
 
   const handleSendBatch = async (count = 10) => {
+    if (!canOperate) {
+      error('Read-only role', 'Event simulation requires operator or owner access.');
+      return;
+    }
     if (!selectedClient) {
       error('No target client', 'Register a client in /vcon/clients first.');
       return;
@@ -298,12 +320,17 @@ export default function SimulatorPage() {
           batch: batchPayload,
         }),
       });
-      if (res.status === 401) {
+      const data = await res.json().catch(() => ({}));
+      if (
+        shouldRedirectSimulatorUnauthorized(
+          res.status,
+          data && typeof data === 'object' ? (data as Record<string, unknown>) : null,
+        )
+      ) {
         window.location.assign('/vcon/login');
         return;
       }
 
-      const data = await res.json().catch(() => ({}));
       const summary = summarizeHttpBatchResult(
         res.ok,
         data && typeof data === 'object' ? (data as Record<string, unknown>) : null,
@@ -346,7 +373,8 @@ export default function SimulatorPage() {
             size="xs"
             variant="secondary"
             loading={sending}
-            disabled={sending || !selectedClient}
+            disabled={!canOperate || sending || !selectedClient}
+            title={!canOperate ? 'Requires operator or owner role' : undefined}
             onClick={() => void handleSendBatch(10)}
           >
             Burst 10
@@ -356,7 +384,8 @@ export default function SimulatorPage() {
             variant="primary"
             icon="Send"
             loading={sending}
-            disabled={sending || !selectedClient}
+            disabled={!canOperate || sending || !selectedClient}
+            title={!canOperate ? 'Requires operator or owner role' : undefined}
             onClick={() => void handleSendSingle()}
           >
             Send Event
@@ -364,6 +393,15 @@ export default function SimulatorPage() {
         </>
       }
     >
+      {!canOperate && (
+        <div
+          role="status"
+          className="mb-3 border border-[var(--border-strong)] bg-[var(--surface-2)] px-3 py-2 text-[11.5px] text-[var(--text-muted)]"
+        >
+          Read-only access (<span className="font-mono text-[var(--text)]">{currentRole}</span>) — dispatching simulated events requires operator or owner permissions.
+        </div>
+      )}
+
       {clients.length === 0 && (
         <div
           role="alert"

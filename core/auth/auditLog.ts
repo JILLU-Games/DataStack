@@ -2,7 +2,9 @@ import { randomBytes } from "node:crypto";
 import { DatabaseEngine } from "@/core/Database/database";
 
 export type AuditActionType =
+  | "ADMIN_SETUP"
   | "ADMIN_LOGIN"
+  | "ADMIN_LOGOUT"
   | "ADMIN_PROFILE_UPDATED"
   | "ADMIN_PASSWORD_UPDATED"
   | "TEAM_MEMBER_CREATED"
@@ -11,9 +13,11 @@ export type AuditActionType =
   | "TEAM_MEMBER_DELETED"
   | "CLIENT_CREATED"
   | "CLIENT_UPDATED"
+  | "CLIENT_REVOKED"
   | "CLIENT_TOKEN_ROTATED"
   | "CLIENT_DELETED"
   | "SETTINGS_UPDATED"
+  | "STORAGE_FLUSH_TRIGGERED"
   | "S3_ARCHIVE_TRIGGERED"
   | "WEBHOOK_TEST_TRIGGERED"
   | string;

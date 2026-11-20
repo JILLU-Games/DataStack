@@ -3,7 +3,9 @@ import { after, beforeEach, describe, it } from "node:test";
 import { NextRequest } from "next/server";
 import { GET as auditGet } from "@/app/api/audit/route";
 import { POST as loginPost } from "@/app/api/auth/login/route";
+import { POST as logoutPost } from "@/app/api/auth/logout/route";
 import { GET as profileGet, PUT as profilePut } from "@/app/api/auth/profile/route";
+import { POST as setupPost } from "@/app/api/auth/setup/route";
 import {
   DELETE as clientDelete,
   GET as clientGet,
@@ -24,7 +26,10 @@ import {
 } from "@/core/auth/adminSession";
 import {
   createInitialAdmin,
+  getAdminSetupKey,
   resetAdminStateForTests,
+  revokeAdminSessions,
+  verifyRequestAdminSession,
 } from "@/core/auth/adminUsers";
 import { DataBufferEngine } from "@/core/data/buffer";
 
@@ -617,5 +622,239 @@ describe("V2-Phase-03: Multi-Admin RBAC & Immutable Admin Audit Log", () => {
     const freshJson = await freshRes.json();
     assert.equal(freshJson.profile.role, "Operator");
     assert.equal(freshJson.profile.roleKey, "operator");
+  });
+
+  it("5. V2-Audit-Phase-01: Prevents cross-table/in-memory duplicate admin emails (BUG-V2-AUDIT-03), isolates multi-admin session logout from global race (BUG-V2-AUDIT-04), and records ADMIN_SETUP, ADMIN_LOGOUT, CLIENT_REVOKED, and STORAGE_FLUSH_TRIGGERED audit actions (BUG-V2-AUDIT-02)", async () => {
+    const setupKey = getAdminSetupKey()!;
+    const setupRes = await setupPost(
+      new NextRequest("http://localhost:3000/api/auth/setup", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-real-ip": "198.51.100.10",
+        },
+        body: JSON.stringify({
+          email: "founder@datastack.dev",
+          password: "FounderPassword123!",
+          setupKey,
+        }),
+      }),
+    );
+    assert.equal(setupRes.status, 200);
+    const ownerCookie = setupRes.cookies.get("datastack_admin_session")?.value!;
+    assert.ok(ownerCookie);
+
+    // Owner creates two team members: Alice (admin) and Bob (operator)
+    const aliceRes = await teamPost(
+      new NextRequest("http://localhost:3000/api/team", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: `datastack_admin_session=${ownerCookie}`,
+        },
+        body: JSON.stringify({
+          email: "alice@datastack.dev",
+          password: "AlicePassword123!",
+          role: "admin",
+        }),
+      }),
+    );
+    assert.equal(aliceRes.status, 201);
+    const aliceMember = (await aliceRes.json()).member;
+
+    const bobRes = await teamPost(
+      new NextRequest("http://localhost:3000/api/team", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: `datastack_admin_session=${ownerCookie}`,
+        },
+        body: JSON.stringify({
+          email: "bob@datastack.dev",
+          password: "BobPassword123!",
+          role: "operator",
+        }),
+      }),
+    );
+    assert.equal(bobRes.status, 201);
+
+    // Login as Alice and Bob
+    const aliceLogin = await loginPost(
+      new NextRequest("http://localhost:3000/api/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          email: "alice@datastack.dev",
+          password: "AlicePassword123!",
+        }),
+      }),
+    );
+    assert.equal(aliceLogin.status, 200);
+    const aliceCookie = aliceLogin.cookies.get("datastack_admin_session")?.value!;
+
+    const bobLogin = await loginPost(
+      new NextRequest("http://localhost:3000/api/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          email: "bob@datastack.dev",
+          password: "BobPassword123!",
+        }),
+      }),
+    );
+    assert.equal(bobLogin.status, 200);
+    const bobCookie = bobLogin.cookies.get("datastack_admin_session")?.value!;
+
+    // BUG-V2-AUDIT-03: Alice cannot change her email to Primary Owner's email OR Bob's email -> 409 ADMIN_EMAIL_CONFLICT
+    const aliceCollideOwner = await profilePut(
+      new NextRequest("http://localhost:3000/api/auth/profile", {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json",
+          cookie: `datastack_admin_session=${aliceCookie}`,
+        },
+        body: JSON.stringify({
+          email: "FOUNDER@datastack.dev",
+          currentPassword: "AlicePassword123!",
+        }),
+      }),
+    );
+    assert.equal(aliceCollideOwner.status, 409);
+    assert.equal((await aliceCollideOwner.json()).code, "ADMIN_EMAIL_CONFLICT");
+
+    const aliceCollideBob = await profilePut(
+      new NextRequest("http://localhost:3000/api/auth/profile", {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json",
+          cookie: `datastack_admin_session=${aliceCookie}`,
+        },
+        body: JSON.stringify({
+          email: "bob@datastack.dev",
+          currentPassword: "AlicePassword123!",
+        }),
+      }),
+    );
+    assert.equal(aliceCollideBob.status, 409);
+    assert.equal((await aliceCollideBob.json()).code, "ADMIN_EMAIL_CONFLICT");
+
+    // Primary Owner cannot change email to Alice's email -> 409 ADMIN_EMAIL_CONFLICT
+    const ownerCollideAlice = await profilePut(
+      new NextRequest("http://localhost:3000/api/auth/profile", {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json",
+          cookie: `datastack_admin_session=${ownerCookie}`,
+        },
+        body: JSON.stringify({
+          email: "alice@datastack.dev",
+          currentPassword: "FounderPassword123!",
+        }),
+      }),
+    );
+    assert.equal(ownerCollideAlice.status, 409);
+    assert.equal((await ownerCollideAlice.json()).code, "ADMIN_EMAIL_CONFLICT");
+
+    // BUG-V2-AUDIT-04: Simulate concurrent verification where Bob's session is verified right before Alice's session revocation
+    const aliceVerified = await verifyRequestAdminSession(aliceCookie);
+    assert.equal(aliceVerified.valid, true);
+    const bobVerified = await verifyRequestAdminSession(bobCookie);
+    assert.equal(bobVerified.valid, true);
+
+    // Explicitly revoke Alice's session even though Bob was the last verified globally
+    await revokeAdminSessions({
+      memberId: aliceMember.id,
+      email: "alice@datastack.dev",
+    });
+
+    // Alice's cookie must now be revoked, while Bob's and Owner's cookies remain valid!
+    const aliceAfterRevoke = await verifyRequestAdminSession(aliceCookie);
+    assert.equal(aliceAfterRevoke.valid, false);
+    const bobStillValid = await verifyRequestAdminSession(bobCookie);
+    assert.equal(bobStillValid.valid, true);
+    const ownerStillValid = await verifyRequestAdminSession(ownerCookie);
+    assert.equal(ownerStillValid.valid, true);
+
+    // Create a client, revoke it (CLIENT_REVOKED), trigger manual storage flush (STORAGE_FLUSH_TRIGGERED), and log out Bob (ADMIN_LOGOUT)
+    const createClientRes = await clientsPost(
+      new NextRequest("http://localhost:3000/api/clients", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: `datastack_admin_session=${ownerCookie}`,
+        },
+        body: JSON.stringify({
+          clientId: "phase01_audit_client",
+          name: "Phase 01 Audit Client",
+        }),
+      }),
+    );
+    assert.equal(createClientRes.status, 201);
+
+    const revokeClientRes = await clientPatch(
+      new NextRequest("http://localhost:3000/api/clients/phase01_audit_client", {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          cookie: `datastack_admin_session=${ownerCookie}`,
+        },
+        body: JSON.stringify({ status: "revoked" }),
+      }),
+      { params: Promise.resolve({ id: "phase01_audit_client" }) },
+    );
+    assert.equal(revokeClientRes.status, 200);
+
+    const flushRes = await storagePost(
+      new NextRequest("http://localhost:3000/api/storage", {
+        method: "POST",
+        headers: { cookie: `datastack_admin_session=${ownerCookie}` },
+      }),
+    );
+    // Even if Port 4000 is mocked to 127.0.0.1:1, test without explicit INGESTION_INTERNAL_URL so local flush succeeds
+    void flushRes;
+    delete process.env.INGESTION_INTERNAL_URL;
+    const flushLocalRes = await storagePost(
+      new NextRequest("http://localhost:3000/api/storage", {
+        method: "POST",
+        headers: { cookie: `datastack_admin_session=${ownerCookie}` },
+      }),
+    );
+    assert.equal(flushLocalRes.status, 200);
+
+    const bobLogoutRes = await logoutPost(
+      new NextRequest("http://localhost:3000/api/auth/logout", {
+        method: "POST",
+        headers: {
+          cookie: `datastack_admin_session=${bobCookie}`,
+          "x-real-ip": "198.51.100.25",
+        },
+      }),
+    );
+    assert.equal(bobLogoutRes.status, 200);
+
+    // Bob's session is now invalidated on server, while Owner's session is still valid
+    assert.equal((await verifyRequestAdminSession(bobCookie)).valid, false);
+    assert.equal((await verifyRequestAdminSession(ownerCookie)).valid, true);
+
+    // BUG-V2-AUDIT-02: Verify all 4 newly wired audit actions appear in GET /api/audit
+    const auditRes = await auditGet(
+      new NextRequest("http://localhost:3000/api/audit?limit=100", {
+        headers: { cookie: `datastack_admin_session=${ownerCookie}` },
+      }),
+    );
+    assert.equal(auditRes.status, 200);
+    const logs = (await auditRes.json()).logs as Array<{
+      action: string;
+      actorEmail: string;
+      target: string;
+    }>;
+    const recordedActions = new Set(logs.map((l) => l.action));
+    assert.ok(recordedActions.has("ADMIN_SETUP"), "Expected ADMIN_SETUP audit log");
+    assert.ok(recordedActions.has("ADMIN_LOGOUT"), "Expected ADMIN_LOGOUT audit log");
+    assert.ok(recordedActions.has("CLIENT_REVOKED"), "Expected CLIENT_REVOKED audit log");
+    assert.ok(
+      recordedActions.has("STORAGE_FLUSH_TRIGGERED"),
+      "Expected STORAGE_FLUSH_TRIGGERED audit log",
+    );
   });
 });

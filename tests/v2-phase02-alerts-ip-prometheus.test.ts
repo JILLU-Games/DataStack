@@ -12,6 +12,7 @@ import { PATCH as patchClientRoute } from "../app/api/clients/[id]/route";
 import { POST as clientsPost } from "../app/api/clients/route";
 import { POST as eventsPost } from "../app/api/events/route";
 import { GET as exportGet } from "../app/api/export/route";
+import { GET as healthGet } from "../app/api/health/route";
 import { GET as prometheusGet } from "../app/api/prometheus/route";
 import { POST as settingsPost } from "../app/api/settings/route";
 import { POST as webhookTestPost } from "../app/api/settings/webhook-test/route";
@@ -109,6 +110,28 @@ test("V2-Phase-02 [IP Allowlist & Token Expiry]: validateAllowedIpsInput, isClie
   // Loopback equivalence between 127.0.0.1 and ::1
   assert.equal(isClientIpAllowed("::1", "127.0.0.1"), true);
   assert.equal(isClientIpAllowed("127.0.0.1", "::1"), true);
+
+  // BUG-V2-AUDIT-06: IPv6 CIDR (/0..128) BlockList matching & bracketed/port/zone normalization
+  assert.equal(
+    isClientIpAllowed("2001:db8:abcd:0012::1", "2001:db8::/32"),
+    true,
+  );
+  assert.equal(
+    isClientIpAllowed("[2001:db8:abcd:0012::99]:8443", "2001:db8::/32"),
+    true,
+  );
+  assert.equal(
+    isClientIpAllowed("2001:db9::1", "2001:db8::/32"),
+    false,
+  );
+  assert.equal(
+    isClientIpAllowed("fe80::1ff:fe23:4567:890a%eth0", "fe80::/64"),
+    true,
+  );
+  assert.equal(
+    isClientIpAllowed("203.0.113.10:54321", "203.0.113.0/24"),
+    true,
+  );
 
   // Expiration validation & evaluation
   assert.deepEqual(validateClientExpiresAtInput(null), {
@@ -687,5 +710,205 @@ test("V2-Phase-02 [Prometheus Metrics & NDJSON Streaming Export]: GET /api/prome
     else process.env.DATABASE_URL = prevDbUrl;
     await fs.rm(tmpDir, { recursive: true, force: true });
     resetAdminStateForTests();
+  }
+});
+
+test("V2-Audit-Phase-02 [BUG-V2-AUDIT-05, BUG-V2-AUDIT-06, BUG-V2-AUDIT-08]: Port 4000 outbound webhook alerts, IPv6 CIDR parity & GET /api/health expiry/IP checks", async () => {
+  const prevDisableListen = process.env.DATASTACK_DISABLE_LISTEN;
+  const prevDbUrl = process.env.DATABASE_URL;
+  process.env.DATASTACK_DISABLE_LISTEN = "1";
+  delete process.env.DATABASE_URL;
+
+  const serverIndex = require("../server/index.js");
+  const { Server: SocketIOServer } = require("socket.io");
+  const { setupSocketHandlers } = require("../server/socket/handlers.js");
+
+  // 1. BUG-V2-AUDIT-06: Port 4000 isClientIpAllowed supports IPv6 CIDR (/0..128) and semicolon delimiters
+  assert.equal(
+    serverIndex.isClientIpAllowed("2001:db8:1234::5", "10.0.0.0/8; 2001:db8::/32"),
+    true,
+  );
+  assert.equal(
+    serverIndex.isClientIpAllowed("[2001:db8:9999::1]:9443", "2001:db8::/32"),
+    true,
+  );
+  assert.equal(
+    serverIndex.isClientIpAllowed("2001:db9::1", "2001:db8::/32"),
+    false,
+  );
+  assert.equal(
+    serverIndex.isClientIpAllowed("fe80::1234%eth0", "fe80::/64"),
+    true,
+  );
+
+  // 2. BUG-V2-AUDIT-05: Port 4000 Socket.IO outbound webhook alerts with HMAC-SHA256 signature
+  const receivedPort4000Webhooks: Array<{
+    headers: http.IncomingHttpHeaders;
+    body: string;
+    json: Record<string, unknown>;
+  }> = [];
+
+  const mockWebhookServer = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    req.on("end", () => {
+      const bodyStr = Buffer.concat(chunks).toString("utf8");
+      let parsed: Record<string, unknown> = {};
+      try {
+        parsed = JSON.parse(bodyStr);
+      } catch {
+        parsed = {};
+      }
+      receivedPort4000Webhooks.push({
+        headers: req.headers,
+        body: bodyStr,
+        json: parsed,
+      });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+  });
+
+  await new Promise<void>((resolve) =>
+    mockWebhookServer.listen(0, "127.0.0.1", () => resolve()),
+  );
+  const webhookPort = (mockWebhookServer.address() as AddressInfo).port;
+  const webhookUrl = `http://127.0.0.1:${webhookPort}/socket-hook`;
+
+  const testHttpServer = http.createServer();
+  const testIo = new SocketIOServer(testHttpServer);
+
+  const forbiddenClient = await SDKManager.registerClientAsync({
+    clientId: "audit05_forbidden_sock",
+    name: "Audit05ForbiddenSocketClient",
+    rateLimit: 100,
+    storageQuotaMb: 0,
+    allowedIps: "203.0.113.99",
+    expiresAt: null,
+  });
+
+  setupSocketHandlers(testIo, [], serverIndex.writer, {
+    getRuntimeConfig: () => serverIndex.runtimeConfig,
+    verifyClientInDb: async (cid: string, _tok: string, _bypass: boolean, ip: string) => {
+      if (cid === forbiddenClient.clientId && !serverIndex.isClientIpAllowed(ip, "203.0.113.99")) {
+        return {
+          allowed: false,
+          code: "CLIENT_IP_FORBIDDEN",
+          reason: `CLIENT_IP_FORBIDDEN: IP ${ip} is not allowed for ${cid}`,
+        };
+      }
+      return { allowed: true, rateLimit: 100 };
+    },
+    triggerWebhookAlert: serverIndex.triggerWebhookAlert,
+  });
+
+  await new Promise<void>((resolve) =>
+    testHttpServer.listen(0, "127.0.0.1", () => resolve()),
+  );
+  const socketPort = (testHttpServer.address() as AddressInfo).port;
+
+  try {
+    serverIndex.clearWebhookCooldownCacheForTests();
+    serverIndex.applyRuntimeSettingsObject({
+      enableWebhookAlerts: true,
+      webhookUrl,
+      webhookSecret: "port4000_shared_hmac_secret",
+      webhookCooldownSec: 60,
+    });
+
+    // Attempt Socket.IO connection from 127.0.0.1 (not in 203.0.113.99 allowlist)
+    const sock: Socket = ioClient(`http://127.0.0.1:${socketPort}`, {
+      auth: { token: forbiddenClient.token },
+      transports: ["websocket"],
+      reconnection: false,
+      timeout: 2000,
+    });
+
+    const connectErr = await new Promise<Error>((resolve, reject) => {
+      sock.on("connect", () => {
+        sock.disconnect();
+        reject(new Error("Expected Socket.IO handshake rejection for forbidden IP"));
+      });
+      sock.on("connect_error", (err) => {
+        sock.disconnect();
+        resolve(err);
+      });
+    });
+
+    assert.ok(connectErr.message.includes("CLIENT_IP_FORBIDDEN"));
+
+    // Wait briefly for asynchronous webhook alert dispatch
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(receivedPort4000Webhooks.length, 1);
+    assert.equal(
+      receivedPort4000Webhooks[0].headers["x-datastack-event"],
+      "CLIENT_IP_FORBIDDEN",
+    );
+    const expectedSig = buildWebhookSignature(
+      receivedPort4000Webhooks[0].body,
+      "port4000_shared_hmac_secret",
+    );
+    assert.equal(
+      receivedPort4000Webhooks[0].headers["x-datastack-signature"],
+      expectedSig,
+    );
+    assert.equal(
+      receivedPort4000Webhooks[0].json.clientId,
+      forbiddenClient.clientId,
+    );
+
+    // 3. BUG-V2-AUDIT-08: GET /api/health enforces CLIENT_TOKEN_EXPIRED (401) and CLIENT_IP_FORBIDDEN (403)
+    const expiredHealthClient = await SDKManager.registerClientAsync({
+      clientId: "audit08_expired_health",
+      name: "Audit08ExpiredHealthClient",
+      rateLimit: 100,
+      storageQuotaMb: 0,
+      allowedIps: "",
+      expiresAt: "2020-01-01T00:00:00.000Z",
+    });
+
+    const expiredHealthRes = await healthGet(
+      new NextRequest("http://localhost:3000/api/health", {
+        headers: {
+          authorization: `Bearer ${expiredHealthClient.token}`,
+        },
+      }),
+    );
+    assert.equal(expiredHealthRes.status, 401);
+    const expiredHealthBody = await expiredHealthRes.json();
+    assert.equal(expiredHealthBody.code, "CLIENT_TOKEN_EXPIRED");
+
+    const forbiddenHealthRes = await healthGet(
+      new NextRequest("http://localhost:3000/api/health", {
+        headers: {
+          authorization: `Bearer ${forbiddenClient.token}`,
+          "x-real-ip": "198.51.100.44",
+        },
+      }),
+    );
+    assert.equal(forbiddenHealthRes.status, 403);
+    const forbiddenHealthBody = await forbiddenHealthRes.json();
+    assert.equal(forbiddenHealthBody.code, "CLIENT_IP_FORBIDDEN");
+  } finally {
+    serverIndex.applyRuntimeSettingsObject({
+      enableWebhookAlerts: false,
+      webhookUrl: "",
+      webhookSecret: "",
+      webhookCooldownSec: 300,
+    });
+    serverIndex.stopTimers();
+    SDKManager.stopActivityFlushTimerForTests();
+    await DataBufferEngine.shutdown();
+    await new Promise<void>((resolve) => {
+      testIo.close(() => resolve());
+    });
+    await new Promise<void>((resolve) =>
+      mockWebhookServer.close(() => resolve()),
+    );
+    resetAdminStateForTests();
+    if (prevDisableListen === undefined) delete process.env.DATASTACK_DISABLE_LISTEN;
+    else process.env.DATASTACK_DISABLE_LISTEN = prevDisableListen;
+    if (prevDbUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = prevDbUrl;
   }
 });

@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { io, type Socket } from 'socket.io-client';
-import { DiskSpooler } from './spool';
+import { DiskSpooler, type DiskSpoolerOptions } from './spool';
 import {
   DataStackAuthError,
   DataStackConfigError,
@@ -13,6 +13,7 @@ import {
   DataStackQuotaExceededError,
   DataStackRateLimitError,
   DataStackShutdownTimeoutError,
+  type DataStackAuthErrorCode,
   type DataStackConfigOptions,
   type DataStackConnectionState,
   type DataStackEnvelope,
@@ -20,13 +21,66 @@ import {
   type DataStackFileSendResult,
   type DataStackSendResult,
   type DataStackStatusSnapshot,
+  type DataStackTransportMode,
   type ResolvedDataStackConfig,
 } from './types';
 
-export * from './spool';
-export * from './types';
+export {
+  DiskSpooler,
+  DataStackAuthError,
+  DataStackConfigError,
+  DataStackError,
+  DataStackFileError,
+  DataStackPayloadTooLargeError,
+  DataStackQuotaExceededError,
+  DataStackRateLimitError,
+  DataStackShutdownTimeoutError,
+  type DiskSpoolerOptions,
+  type DataStackAuthErrorCode,
+  type DataStackConfigOptions,
+  type DataStackConnectionState,
+  type DataStackEnvelope,
+  type DataStackEventPayload,
+  type DataStackFileSendResult,
+  type DataStackSendResult,
+  type DataStackStatusSnapshot,
+  type DataStackTransportMode,
+  type ResolvedDataStackConfig,
+};
 
 export const SDK_VERSION = '2.2.0';
+
+function classifyAuthRejection(
+  rawCode: string,
+  rawMsg: string
+): { code: DataStackAuthErrorCode; statusCode: number } | null {
+  const code = String(rawCode || '').toUpperCase();
+  const upperMsg = String(rawMsg || '').toUpperCase();
+  const combined = `${code} ${upperMsg}`;
+
+  if (combined.includes('CLIENT_TOKEN_EXPIRED')) {
+    return { code: 'CLIENT_TOKEN_EXPIRED', statusCode: 401 };
+  }
+  if (combined.includes('TOKEN_ROTATED')) {
+    return { code: 'TOKEN_ROTATED', statusCode: 401 };
+  }
+  if (combined.includes('CLIENT_IP_FORBIDDEN')) {
+    return { code: 'CLIENT_IP_FORBIDDEN', statusCode: 403 };
+  }
+  if (combined.includes('CLIENT_REVOKED') || upperMsg.includes('REVOKED')) {
+    return { code: 'CLIENT_REVOKED', statusCode: 403 };
+  }
+  if (
+    code === 'AUTH_FAILED' ||
+    code === 'AUTH_INVALID' ||
+    code === 'AUTH_REQUIRED' ||
+    upperMsg.includes('AUTHENTICATION') ||
+    upperMsg.includes('INVALID TOKEN')
+  ) {
+    return { code: 'AUTH_FAILED', statusCode: 401 };
+  }
+  return null;
+}
 
 /**
  * Matches server `SDKManager.normalizeClientId()` and Python SDK `_normalize_client_id()`.
@@ -124,6 +178,9 @@ export class DataStackClient {
   private transportState: DataStackConnectionState = 'DISCONNECTED';
   private inFlightSet = new Set<Promise<unknown>>();
   private isDrainingSpool = false;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private heartbeatInFlight = false;
+  private heartbeatStopped = false;
   private readonly fetchFn: typeof fetch;
 
   constructor(options: DataStackConfigOptions = {}) {
@@ -204,6 +261,14 @@ export class DataStackClient {
       );
     }
 
+    const rawHeartbeat = Number(
+      options.heartbeatIntervalMs ?? fileCfg.heartbeatIntervalMs ?? 5000
+    );
+    const heartbeatIntervalMs =
+      Number.isFinite(rawHeartbeat) && rawHeartbeat > 0
+        ? Math.max(50, Math.floor(rawHeartbeat))
+        : 0;
+
     this.clientId = normToken || normConfigured;
     this.config = {
       serverUrl,
@@ -213,9 +278,7 @@ export class DataStackClient {
       autoConnect: Boolean(options.autoConnect ?? fileCfg.autoConnect ?? false),
       enableHttpFallback:
         options.enableHttpFallback ?? fileCfg.enableHttpFallback ?? true,
-      heartbeatIntervalMs: Number(
-        options.heartbeatIntervalMs ?? fileCfg.heartbeatIntervalMs ?? 5000
-      ),
+      heartbeatIntervalMs,
       maxRetries,
       batchChunkSize: Math.floor(batchChunkSize),
       offlineSpoolEnabled:
@@ -250,6 +313,125 @@ export class DataStackClient {
     });
   }
 
+  private startHeartbeatMonitor(): void {
+    if (
+      this.heartbeatStopped ||
+      this.config.heartbeatIntervalMs <= 0 ||
+      this.heartbeatTimer !== null
+    ) {
+      return;
+    }
+    const timer = setInterval(() => {
+      void this.runHeartbeatStep();
+    }, this.config.heartbeatIntervalMs);
+    timer.unref?.();
+    this.heartbeatTimer = timer;
+  }
+
+  private stopHeartbeatMonitor(): void {
+    if (this.heartbeatTimer !== null) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  /**
+   * Verifies the active WebSocket handshake with Port 4000 via `ping_verify`.
+   * Throws `DataStackAuthError` immediately on terminal auth rejections.
+   */
+  public async pingVerify(timeoutMs?: number): Promise<boolean> {
+    if (!this.isConnected || !this.socket || !this.socket.connected) {
+      return false;
+    }
+    const waitMs = Math.max(
+      100,
+      Math.min(timeoutMs ?? this.config.requestTimeoutMs, 5000)
+    );
+    return new Promise<boolean>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(false), waitMs);
+      this.socket!.emit(
+        'ping_verify',
+        {},
+        (ack: Record<string, unknown> | undefined) => {
+          clearTimeout(timer);
+          if (!ack || typeof ack !== 'object') {
+            resolve(false);
+            return;
+          }
+          if (ack.success === true) {
+            resolve(ack.status === 'VERIFIED' || ack.status === undefined);
+            return;
+          }
+          const code = String(ack.code || '');
+          const msg = String(ack.error || 'Handshake verification failed');
+          const authErr = classifyAuthRejection(code, msg);
+          if (authErr) {
+            this.heartbeatStopped = true;
+            this.stopHeartbeatMonitor();
+            reject(
+              new DataStackAuthError(msg, authErr.code, authErr.statusCode, ack)
+            );
+            return;
+          }
+          resolve(false);
+        }
+      );
+    });
+  }
+
+  /**
+   * Executes one zero-CPU IDLE / active recovery heartbeat step:
+   * - If WebSocket is already connected (`IDLE_WS`), stops the active recovery timer and returns `true`.
+   * - If disconnected/fallback, attempts WS reconnection + `ping_verify` verification, drains spool,
+   *   and returns to zero-CPU `IDLE_WS` upon recovery.
+   */
+  public async runHeartbeatStep(): Promise<boolean> {
+    if (this.heartbeatStopped || this.heartbeatInFlight) {
+      return false;
+    }
+    if (this.isConnected && this.socket?.connected) {
+      this.transportState = 'IDLE_WS';
+      this.stopHeartbeatMonitor();
+      return true;
+    }
+
+    this.heartbeatInFlight = true;
+    try {
+      const reconnected = await this.connect();
+      if (!reconnected) {
+        return false;
+      }
+      const verified = await this.pingVerify();
+      if (!verified) {
+        if (this.socket) {
+          this.socket.removeAllListeners();
+          this.socket.disconnect();
+          this.socket = null;
+        }
+        this.isConnected = false;
+        this.transportState = this.config.enableHttpFallback
+          ? 'HTTP_FALLBACK'
+          : 'DISCONNECTED';
+        this.startHeartbeatMonitor();
+        return false;
+      }
+      this.transportState = 'IDLE_WS';
+      this.stopHeartbeatMonitor();
+      if (this.spooler.count() > 0) {
+        void this.flushSpool().catch(() => {});
+      }
+      return true;
+    } catch (err) {
+      if (err instanceof DataStackAuthError) {
+        this.heartbeatStopped = true;
+        this.stopHeartbeatMonitor();
+      }
+      return false;
+    } finally {
+      this.heartbeatInFlight = false;
+    }
+  }
+
   /**
    * Establishes a real-time Socket.IO connection to Port 4000 (`serverUrl`).
    */
@@ -259,7 +441,9 @@ export class DataStackClient {
         'Cannot connect: clientToken is required.'
       );
     }
+    this.heartbeatStopped = false;
     if (this.isConnected && this.socket?.connected) {
+      this.stopHeartbeatMonitor();
       return true;
     }
 
@@ -291,6 +475,7 @@ export class DataStackClient {
         this.transportState = this.config.enableHttpFallback
           ? 'HTTP_FALLBACK'
           : 'DISCONNECTED';
+        this.startHeartbeatMonitor();
         resolve(false);
       }, this.config.requestTimeoutMs);
 
@@ -300,6 +485,7 @@ export class DataStackClient {
         clearTimeout(timer);
         this.isConnected = true;
         this.transportState = 'IDLE_WS';
+        this.stopHeartbeatMonitor();
         void this.flushSpool().catch(() => {});
         resolve(true);
       });
@@ -313,43 +499,16 @@ export class DataStackClient {
 
         const msg = String(err?.message || '');
         const code = String(err?.data?.code || '');
-        if (
-          code === 'CLIENT_TOKEN_EXPIRED' ||
-          msg.includes('CLIENT_TOKEN_EXPIRED')
-        ) {
-          reject(
-            new DataStackAuthError(
-              msg || 'Client JWT token has expired.',
-              'CLIENT_TOKEN_EXPIRED',
-              401
-            )
-          );
-          return;
-        }
-        if (
-          code === 'CLIENT_IP_FORBIDDEN' ||
-          msg.includes('CLIENT_IP_FORBIDDEN')
-        ) {
-          reject(
-            new DataStackAuthError(
-              msg || 'Client IP is not permitted by allowlist.',
-              'CLIENT_IP_FORBIDDEN',
-              403
-            )
-          );
-          return;
-        }
-        if (
-          code === 'AUTH_FAILED' ||
-          msg.toLowerCase().includes('authentication') ||
-          msg.toLowerCase().includes('invalid token') ||
-          msg.toLowerCase().includes('revoked')
-        ) {
+        const authErr = classifyAuthRejection(code, msg);
+        if (authErr) {
+          this.heartbeatStopped = true;
+          this.stopHeartbeatMonitor();
           reject(
             new DataStackAuthError(
               msg || 'Socket authentication failed.',
-              'AUTH_FAILED',
-              401
+              authErr.code,
+              authErr.statusCode,
+              err?.data
             )
           );
           return;
@@ -358,6 +517,7 @@ export class DataStackClient {
         this.transportState = this.config.enableHttpFallback
           ? 'HTTP_FALLBACK'
           : 'DISCONNECTED';
+        this.startHeartbeatMonitor();
         resolve(false);
       });
 
@@ -368,11 +528,16 @@ export class DataStackClient {
             ? 'HTTP_FALLBACK'
             : 'DISCONNECTED';
         }
+        if (!this.heartbeatStopped) {
+          this.startHeartbeatMonitor();
+        }
       });
     });
   }
 
   public disconnect(): void {
+    this.heartbeatStopped = true;
+    this.stopHeartbeatMonitor();
     if (this.socket) {
       this.socket.removeAllListeners();
       this.socket.disconnect();
@@ -463,22 +628,28 @@ export class DataStackClient {
           }
           if (ack.success === true) {
             this.transportState = 'IDLE_WS';
+            const isDuplicate =
+              ack.note === 'DUPLICATE_DROPPED' ||
+              ack.note === 'DUPLICATE_EVENT' ||
+              ack.duplicate === true;
             resolve({
               success: true,
               transport: 'websocket',
               eventId: String(ack.eventId || envelope.eventId),
-              accepted: 1,
+              accepted: isDuplicate ? 0 : 1,
+              duplicates: isDuplicate ? 1 : 0,
             });
             return;
           }
           const code = String(ack.code || 'SOCKET_REJECTED');
           const msg = String(ack.error || 'Socket event rejected');
-          if (code === 'CLIENT_TOKEN_EXPIRED' || code === 'AUTH_FAILED' || code === 'CLIENT_REVOKED') {
-            reject(new DataStackAuthError(msg, code as 'CLIENT_TOKEN_EXPIRED' | 'AUTH_FAILED', 401));
-            return;
-          }
-          if (code === 'CLIENT_IP_FORBIDDEN') {
-            reject(new DataStackAuthError(msg, 'CLIENT_IP_FORBIDDEN', 403));
+          const authErr = classifyAuthRejection(code, msg);
+          if (authErr) {
+            this.heartbeatStopped = true;
+            this.stopHeartbeatMonitor();
+            reject(
+              new DataStackAuthError(msg, authErr.code, authErr.statusCode, ack)
+            );
             return;
           }
           if (code === 'STORAGE_QUOTA_EXCEEDED' || code === 'DISK_SPACE_LOW') {
@@ -537,12 +708,16 @@ export class DataStackClient {
     const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     if (res.ok && body.success !== false) {
       this.transportState = 'HTTP_FALLBACK';
+      const isDuplicate =
+        body.note === 'DUPLICATE_DROPPED' ||
+        body.note === 'DUPLICATE_EVENT' ||
+        body.duplicate === true;
       return {
         success: true,
         transport: 'http',
         eventId: String(body.eventId || envelope.eventId),
-        accepted: 1,
-        duplicates: body.duplicate ? 1 : 0,
+        accepted: isDuplicate ? 0 : 1,
+        duplicates: isDuplicate ? 1 : 0,
       };
     }
 
@@ -550,14 +725,19 @@ export class DataStackClient {
     const errMsg = String(body.error || `HTTP ${res.status} error`);
 
     if (res.status === 401) {
-      throw new DataStackAuthError(
-        errMsg,
-        code === 'CLIENT_TOKEN_EXPIRED' ? 'CLIENT_TOKEN_EXPIRED' : 'AUTH_FAILED',
-        401,
-        body
-      );
+      this.heartbeatStopped = true;
+      this.stopHeartbeatMonitor();
+      const authCode: DataStackAuthErrorCode =
+        code === 'CLIENT_TOKEN_EXPIRED'
+          ? 'CLIENT_TOKEN_EXPIRED'
+          : code === 'TOKEN_ROTATED'
+            ? 'TOKEN_ROTATED'
+            : 'AUTH_FAILED';
+      throw new DataStackAuthError(errMsg, authCode, 401, body);
     }
     if (res.status === 403) {
+      this.heartbeatStopped = true;
+      this.stopHeartbeatMonitor();
       throw new DataStackAuthError(
         errMsg,
         code === 'CLIENT_IP_FORBIDDEN' ? 'CLIENT_IP_FORBIDDEN' : 'CLIENT_REVOKED',
@@ -687,14 +867,12 @@ export class DataStackClient {
           );
           this.socket!.emit(
             'batch_sync',
-            {
-              clientId: this.clientId,
-              batch: chunk.map((item) => ({
-                eventId: item.eventId,
-                timestamp: item.timestamp,
-                data: item.data,
-              })),
-            },
+            chunk.map((item) => ({
+              clientId: item.clientId || this.clientId || undefined,
+              eventId: item.eventId,
+              timestamp: item.timestamp,
+              data: item.data,
+            })),
             (ack: Record<string, unknown> | undefined) => {
               clearTimeout(timer);
               if (!ack || typeof ack !== 'object') {
@@ -705,26 +883,35 @@ export class DataStackClient {
                 const rateLimited = Array.isArray(ack.rateLimitedEventIds)
                   ? (ack.rateLimitedEventIds as string[])
                   : [];
+                const duplicates = Number(ack.duplicates ?? 0);
+                const acceptedVal =
+                  ack.processed ??
+                  ack.processedCount ??
+                  ack.accepted ??
+                  Math.max(0, chunk.length - rateLimited.length - duplicates);
                 resolve({
                   success: true,
                   transport: 'websocket',
-                  accepted: Number(
-                    ack.processedCount ??
-                      ack.accepted ??
-                      chunk.length - rateLimited.length
-                  ),
+                  accepted: Number(acceptedVal),
+                  duplicates,
                   rateLimitedEventIds: rateLimited,
                 });
                 return;
               }
               const code = String(ack.code || 'BATCH_REJECTED');
               const msg = String(ack.error || 'Batch rejected');
-              if (code === 'CLIENT_TOKEN_EXPIRED' || code === 'AUTH_FAILED') {
-                reject(new DataStackAuthError(msg, code as 'CLIENT_TOKEN_EXPIRED' | 'AUTH_FAILED', 401));
-                return;
-              }
-              if (code === 'CLIENT_IP_FORBIDDEN') {
-                reject(new DataStackAuthError(msg, 'CLIENT_IP_FORBIDDEN', 403));
+              const authErr = classifyAuthRejection(code, msg);
+              if (authErr) {
+                this.heartbeatStopped = true;
+                this.stopHeartbeatMonitor();
+                reject(
+                  new DataStackAuthError(
+                    msg,
+                    authErr.code,
+                    authErr.statusCode,
+                    ack
+                  )
+                );
                 return;
               }
               if (code === 'STORAGE_QUOTA_EXCEEDED' || code === 'DISK_SPACE_LOW') {
@@ -801,15 +988,17 @@ export class DataStackClient {
 
     if (res.ok && body.success !== false) {
       this.transportState = 'HTTP_FALLBACK';
+      const duplicates = Number(body.duplicates ?? 0);
+      const acceptedVal =
+        body.processed ??
+        body.processedCount ??
+        body.accepted ??
+        Math.max(0, chunk.length - rateLimited.length - duplicates);
       return {
         success: true,
         transport: 'http',
-        accepted: Number(
-          body.accepted ??
-            body.processedCount ??
-            chunk.length - rateLimited.length
-        ),
-        duplicates: Number(body.duplicates ?? 0),
+        accepted: Number(acceptedVal),
+        duplicates,
         rateLimitedEventIds: rateLimited,
       };
     }
@@ -818,14 +1007,19 @@ export class DataStackClient {
     const errMsg = String(body.error || `HTTP ${res.status} batch error`);
 
     if (res.status === 401) {
-      throw new DataStackAuthError(
-        errMsg,
-        code === 'CLIENT_TOKEN_EXPIRED' ? 'CLIENT_TOKEN_EXPIRED' : 'AUTH_FAILED',
-        401,
-        body
-      );
+      this.heartbeatStopped = true;
+      this.stopHeartbeatMonitor();
+      const authCode: DataStackAuthErrorCode =
+        code === 'CLIENT_TOKEN_EXPIRED'
+          ? 'CLIENT_TOKEN_EXPIRED'
+          : code === 'TOKEN_ROTATED'
+            ? 'TOKEN_ROTATED'
+            : 'AUTH_FAILED';
+      throw new DataStackAuthError(errMsg, authCode, 401, body);
     }
     if (res.status === 403) {
+      this.heartbeatStopped = true;
+      this.stopHeartbeatMonitor();
       throw new DataStackAuthError(
         errMsg,
         code === 'CLIENT_IP_FORBIDDEN' ? 'CLIENT_IP_FORBIDDEN' : 'CLIENT_REVOKED',
@@ -864,6 +1058,7 @@ export class DataStackClient {
   ): Promise<DataStackSendResult> {
     let pending = [...chunk];
     let totalAccepted = 0;
+    let totalDuplicates = 0;
     let totalSpooled = 0;
     let lastTransport: 'websocket' | 'http' | 'spool' = 'http';
     let attempt = 0;
@@ -873,15 +1068,18 @@ export class DataStackClient {
         const res = await this.sendBatchChunkInternal(pending);
         lastTransport = res.transport;
         const rateLimitedSet = new Set(res.rateLimitedEventIds || []);
+        const duplicatesNow = res.duplicates || 0;
+        totalDuplicates += duplicatesNow;
 
         if (rateLimitedSet.size === 0) {
-          totalAccepted += res.accepted ?? pending.length;
+          totalAccepted += res.accepted ?? Math.max(0, pending.length - duplicatesNow);
           pending = [];
           break;
         }
 
         const acceptedNow =
-          res.accepted ?? Math.max(0, pending.length - rateLimitedSet.size);
+          res.accepted ??
+          Math.max(0, pending.length - rateLimitedSet.size - duplicatesNow);
         totalAccepted += acceptedNow;
         pending = pending.filter((item) => rateLimitedSet.has(item.eventId));
 
@@ -911,6 +1109,7 @@ export class DataStackClient {
             success: left.success && right.success,
             transport: right.transport,
             accepted: (left.accepted || 0) + (right.accepted || 0),
+            duplicates: (left.duplicates || 0) + (right.duplicates || 0),
             spooled: (left.spooled || 0) + (right.spooled || 0),
           };
         }
@@ -958,6 +1157,7 @@ export class DataStackClient {
       success: pending.length === 0,
       transport: lastTransport,
       accepted: totalAccepted,
+      duplicates: totalDuplicates,
       spooled: totalSpooled,
       unprocessedItems: pending.map((p) => p.data),
     };
@@ -986,6 +1186,7 @@ export class DataStackClient {
       );
 
       let totalAccepted = 0;
+      let totalDuplicates = 0;
       let totalSpooled = 0;
       let lastTransport: 'websocket' | 'http' | 'spool' = 'http';
 
@@ -993,6 +1194,7 @@ export class DataStackClient {
         const slice = envelopes.slice(i, i + chunkSize);
         const res = await this.deliverChunkWithSplitAndRetry(slice, true);
         totalAccepted += res.accepted || 0;
+        totalDuplicates += res.duplicates || 0;
         totalSpooled += res.spooled || 0;
         lastTransport = res.transport;
       }
@@ -1001,6 +1203,7 @@ export class DataStackClient {
         success: true,
         transport: lastTransport,
         accepted: totalAccepted,
+        duplicates: totalDuplicates,
         spooled: totalSpooled,
       };
     })();
@@ -1116,6 +1319,7 @@ export class DataStackClient {
       );
 
       let acceptedRows = 0;
+      let duplicateRows = 0;
       let spooledRows = 0;
       let chunksSent = 0;
       let lastTransport: 'websocket' | 'http' | 'spool' = 'http';
@@ -1124,18 +1328,20 @@ export class DataStackClient {
         const slice = envelopes.slice(i, i + chunkSize);
         const res = await this.deliverChunkWithSplitAndRetry(slice, true);
         acceptedRows += res.accepted || 0;
+        duplicateRows += res.duplicates || 0;
         spooledRows += res.spooled || 0;
         chunksSent += 1;
         lastTransport = res.transport;
       }
 
       return {
-        success: acceptedRows + spooledRows === envelopes.length,
+        success: acceptedRows + duplicateRows + spooledRows === envelopes.length,
         transport: lastTransport,
         filePath: resolvedPath,
         totalRows: envelopes.length,
         accepted: acceptedRows,
         acceptedRows,
+        duplicates: duplicateRows,
         spooled: spooledRows,
         spooledRows,
         chunksSent,
@@ -1237,6 +1443,7 @@ export class DataStackClient {
       spooledCount: this.spooler.count(),
       spooledBytes: this.spooler.sizeBytes(),
       inFlightRequests: this.inFlightSet.size,
+      heartbeatActive: this.heartbeatTimer !== null,
     };
   }
 }

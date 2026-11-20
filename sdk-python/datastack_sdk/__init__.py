@@ -44,6 +44,7 @@ from datastack import (  # noqa: E402, F401
     DataStackFileError,
     DataStackOfflineSpoolError,
     DataStackPayloadTooLargeError,
+    DataStackQuotaExceededError,
     DataStackRateLimitError,
     DiskSpooler,
     HeartbeatMonitor,
@@ -65,6 +66,7 @@ __all__ = [
     "DataStackConnectionError",
     "DataStackRateLimitError",
     "DataStackPayloadTooLargeError",
+    "DataStackQuotaExceededError",
     "DataStackFileError",
     "DataStackOfflineSpoolError",
 ]

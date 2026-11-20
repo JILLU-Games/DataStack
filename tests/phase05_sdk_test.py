@@ -602,6 +602,64 @@ class Phase05PythonSdkTests(unittest.TestCase):
                         f"{py_file.name}:{node.lineno} uses Python 3.9+ PEP 585 generic `{node.value.id}[...]`"
                     )
 
+    def test_v2_audit_phase02_bug09_fatal_auth_codes_expired_and_ip_forbidden(
+        self,
+    ) -> None:
+        self.assertTrue(
+            DataStackClient._is_non_retryable_auth_error(
+                "CLIENT_TOKEN_EXPIRED: Client token has expired"
+            )
+        )
+        self.assertTrue(
+            DataStackClient._is_non_retryable_auth_error(
+                "CLIENT_IP_FORBIDDEN: IP 198.51.100.25 is not permitted"
+            )
+        )
+        self.assertFalse(
+            DataStackClient._is_non_retryable_auth_error("Connection reset by peer")
+        )
+
+        tok = _make_jwt({"clientId": "cli_audit09"})
+        client = DataStack(
+            server_url="http://127.0.0.1:4000",
+            api_url="http://127.0.0.1:3000",
+            token=tok,
+            auto_connect=False,
+            enable_http_fallback=True,
+            offline_spool_enabled=True,
+            request_timeout_sec=0.5,
+        )
+
+        class FakeFailingAuthSocket:
+            def __init__(self, error_msg: str) -> None:
+                self.connected = False
+                self.error_msg = error_msg
+
+            def connect(self, *args: Any, **kwargs: Any) -> None:
+                raise RuntimeError(self.error_msg)
+
+            def disconnect(self) -> None:
+                self.connected = False
+
+        # 1. CLIENT_TOKEN_EXPIRED on WebSocket handshake must immediately raise DataStackAuthError with code="CLIENT_TOKEN_EXPIRED"
+        client.sio = FakeFailingAuthSocket(
+            "CLIENT_TOKEN_EXPIRED: Client token has expired"
+        )
+        with self.assertRaises(DataStackAuthError) as ctx_exp:
+            client._connect_and_verify_websocket(wait_timeout=0.2)
+        self.assertEqual(ctx_exp.exception.code, "CLIENT_TOKEN_EXPIRED")
+
+        # 2. CLIENT_IP_FORBIDDEN on WebSocket handshake must immediately raise DataStackAuthError with code="CLIENT_IP_FORBIDDEN"
+        client.sio = FakeFailingAuthSocket(
+            "CLIENT_IP_FORBIDDEN: IP is not in allowlist"
+        )
+        with self.assertRaises(DataStackAuthError) as ctx_ip:
+            client._connect_and_verify_websocket(wait_timeout=0.2)
+        self.assertEqual(ctx_ip.exception.code, "CLIENT_IP_FORBIDDEN")
+
+        client.disconnect()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+

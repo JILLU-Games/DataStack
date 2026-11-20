@@ -50,6 +50,7 @@ from .exceptions import (
     DataStackFileError,
     DataStackOfflineSpoolError,
     DataStackPayloadTooLargeError,
+    DataStackQuotaExceededError,
     DataStackRateLimitError,
 )
 from .heartbeat import ConnectionState, HeartbeatMonitor
@@ -284,8 +285,36 @@ class DataStackClient:
                 "AUTH_INVALID",
                 "CLIENT_REVOKED",
                 "TOKEN_ROTATED",
+                "CLIENT_TOKEN_EXPIRED",
+                "CLIENT_IP_FORBIDDEN",
             )
         )
+
+    @staticmethod
+    def _extract_auth_error_code(message: str, default_code: str = "AUTH_ERROR") -> str:
+        upper = (message or "").upper()
+        for code in (
+            "CLIENT_TOKEN_EXPIRED",
+            "CLIENT_IP_FORBIDDEN",
+            "CLIENT_REVOKED",
+            "TOKEN_ROTATED",
+            "AUTH_INVALID",
+            "AUTH_REQUIRED",
+        ):
+            if code in upper:
+                return code
+        return default_code
+
+    @staticmethod
+    def _extract_quota_error_code(
+        message: str, default_code: str = "STORAGE_QUOTA_EXCEEDED"
+    ) -> str:
+        upper = (message or "").upper()
+        if "DISK_SPACE_LOW" in upper:
+            return "DISK_SPACE_LOW"
+        if "STORAGE_QUOTA_EXCEEDED" in upper:
+            return "STORAGE_QUOTA_EXCEEDED"
+        return default_code
 
     def _ensure_token_present(self) -> None:
         if not self.token or self.token == "REPLACE_WITH_YOUR_CLIENT_JWT_TOKEN":
@@ -380,7 +409,9 @@ class DataStackClient:
                 self.is_connected = False
                 msg = str(exc)
                 if self._is_non_retryable_auth_error(msg):
-                    raise DataStackAuthError(msg) from exc
+                    raise DataStackAuthError(
+                        msg, code=self._extract_auth_error_code(msg)
+                    ) from exc
                 return False
 
             # Verify handshake & PostgreSQL client status via `ping_verify` while still serialized under RLock
@@ -431,7 +462,13 @@ class DataStackClient:
                 result_holder.get("error") or "Handshake verification failed"
             )
             if self._is_non_retryable_auth_error(err_msg):
-                raise DataStackAuthError(err_msg)
+                raise DataStackAuthError(
+                    err_msg,
+                    code=str(
+                        result_holder.get("code")
+                        or self._extract_auth_error_code(err_msg)
+                    ),
+                )
             return False
 
         return result_holder.get("status") == "VERIFIED"
@@ -599,6 +636,16 @@ class DataStackClient:
         if status_code == 413 or "PAYLOAD_TOO_LARGE" in combined:
             raise DataStackPayloadTooLargeError(err_msg)
 
+        if (
+            status_code == 507
+            or "STORAGE_QUOTA_EXCEEDED" in combined
+            or "DISK_SPACE_LOW" in combined
+        ):
+            raise DataStackQuotaExceededError(
+                err_msg,
+                code=self._extract_quota_error_code(combined),
+            )
+
         if status_code == 429 or "RATE_LIMIT_EXCEEDED" in combined:
             raise DataStackRateLimitError(err_msg)
 
@@ -666,6 +713,14 @@ class DataStackClient:
                 raise DataStackAuthError(err_msg, code=err_code or "AUTH_ERROR")
             if "PAYLOAD_TOO_LARGE" in combined:
                 raise DataStackPayloadTooLargeError(err_msg)
+            if (
+                "STORAGE_QUOTA_EXCEEDED" in combined
+                or "DISK_SPACE_LOW" in combined
+            ):
+                raise DataStackQuotaExceededError(
+                    err_msg,
+                    code=self._extract_quota_error_code(combined),
+                )
             if "RATE_LIMIT_EXCEEDED" in combined:
                 raise DataStackRateLimitError(err_msg)
             raise DataStackError(err_msg, code=err_code or "WS_REJECTED")
@@ -722,7 +777,11 @@ class DataStackClient:
                     ):
                         self._drain_offline_spool()
                     return res
-                except (DataStackAuthError, DataStackPayloadTooLargeError):
+                except (
+                    DataStackAuthError,
+                    DataStackPayloadTooLargeError,
+                    DataStackQuotaExceededError,
+                ):
                     raise
                 except DataStackRateLimitError as rl_err:
                     last_exception = rl_err
@@ -749,7 +808,11 @@ class DataStackClient:
                     ):
                         self._drain_offline_spool()
                     return res
-                except (DataStackAuthError, DataStackPayloadTooLargeError):
+                except (
+                    DataStackAuthError,
+                    DataStackPayloadTooLargeError,
+                    DataStackQuotaExceededError,
+                ):
                     raise
                 except DataStackRateLimitError as rl_err:
                     last_exception = rl_err
@@ -757,10 +820,14 @@ class DataStackClient:
                 except Exception as http_err:
                     last_exception = http_err
 
-        # 3. If rate-limited or payload-rejected after all retries, raise directly
+        # 3. If rate-limited, payload-rejected, or quota-exceeded after retries, raise directly
         if isinstance(
             last_exception,
-            (DataStackRateLimitError, DataStackPayloadTooLargeError),
+            (
+                DataStackRateLimitError,
+                DataStackPayloadTooLargeError,
+                DataStackQuotaExceededError,
+            ),
         ):
             raise last_exception
 

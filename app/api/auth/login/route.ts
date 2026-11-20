@@ -10,6 +10,7 @@ import {
   clearAdminLoginAttempts,
   consumeAdminLoginAttempt,
 } from "@/core/auth/adminUsers";
+import { SettingsManager } from "@/core/adminSettings/settingsManager";
 import { recordAdminAuditLogAsync } from "@/core/auth/auditLog";
 import { extractClientIp } from "@/lib/adminAuth";
 import { NextRequest, NextResponse } from "next/server";
@@ -70,6 +71,17 @@ export async function POST(request: NextRequest) {
     );
   }
   if (!throttleDecision.allowed) {
+    SettingsManager.triggerWebhookAlert({
+      event: "ADMIN_LOGIN_LOCKOUT",
+      severity: "warning",
+      title: "Admin Login Lockout Triggered",
+      message: `Admin sign-in throttled for ${email} from IP ${clientIp} (${throttleDecision.retryAfterSeconds}s lockout).`,
+      details: {
+        email,
+        clientIp,
+        retryAfterSeconds: throttleDecision.retryAfterSeconds,
+      },
+    });
     return NextResponse.json(
       { error: "Too many sign-in attempts. Try again later." },
       {

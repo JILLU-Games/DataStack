@@ -32,7 +32,10 @@ interface AuditLogItem {
 
 const ACTION_FILTER_OPTIONS = [
   { value: 'ALL', label: 'All Governance Actions' },
+  { value: 'ADMIN_SETUP', label: 'ADMIN_SETUP' },
   { value: 'ADMIN_LOGIN', label: 'ADMIN_LOGIN' },
+  { value: 'ADMIN_LOGOUT', label: 'ADMIN_LOGOUT' },
+  { value: 'ADMIN_PROFILE_UPDATED', label: 'ADMIN_PROFILE_UPDATED' },
   { value: 'ADMIN_PASSWORD_UPDATED', label: 'ADMIN_PASSWORD_UPDATED' },
   { value: 'TEAM_MEMBER_CREATED', label: 'TEAM_MEMBER_CREATED' },
   { value: 'TEAM_MEMBER_UPDATED', label: 'TEAM_MEMBER_UPDATED' },
@@ -40,9 +43,11 @@ const ACTION_FILTER_OPTIONS = [
   { value: 'TEAM_MEMBER_DELETED', label: 'TEAM_MEMBER_DELETED' },
   { value: 'CLIENT_CREATED', label: 'CLIENT_CREATED' },
   { value: 'CLIENT_UPDATED', label: 'CLIENT_UPDATED' },
+  { value: 'CLIENT_REVOKED', label: 'CLIENT_REVOKED' },
   { value: 'CLIENT_TOKEN_ROTATED', label: 'CLIENT_TOKEN_ROTATED' },
   { value: 'CLIENT_DELETED', label: 'CLIENT_DELETED' },
   { value: 'SETTINGS_UPDATED', label: 'SETTINGS_UPDATED' },
+  { value: 'STORAGE_FLUSH_TRIGGERED', label: 'STORAGE_FLUSH_TRIGGERED' },
   { value: 'S3_ARCHIVE_TRIGGERED', label: 'S3_ARCHIVE_TRIGGERED' },
   { value: 'WEBHOOK_TEST_TRIGGERED', label: 'WEBHOOK_TEST_TRIGGERED' },
 ];
@@ -90,7 +95,9 @@ export function AuditLogViewer() {
   }, [fetchAuditLogs]);
 
   const uniqueActors = new Set(logs.map((l) => l.actorEmail)).size;
-  const mutationCount = logs.filter((l) => l.action !== 'ADMIN_LOGIN').length;
+  const mutationCount = logs.filter(
+    (l) => l.action !== 'ADMIN_LOGIN' && l.action !== 'ADMIN_LOGOUT',
+  ).length;
 
   return (
     <PageShell

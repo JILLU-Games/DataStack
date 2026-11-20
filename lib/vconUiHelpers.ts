@@ -658,3 +658,164 @@ export function formatSessionExpiryLabel(value: string): string {
     hour12: false,
   });
 }
+
+const SIMULATOR_CLIENT_AUTH_ERROR_CODES = new Set([
+  'CLIENT_TOKEN_EXPIRED',
+  'TOKEN_ROTATED',
+  'AUTH_INVALID',
+  'CLIENT_REVOKED',
+  'CLIENT_IP_FORBIDDEN',
+]);
+
+/**
+ * BUG-11 (ERR-R3-07): Only redirect /vcon/simulator to /vcon/login when HTTP 401
+ * indicates an expired/invalid Admin Console session, NOT a target SDK client rejection
+ * (such as CLIENT_TOKEN_EXPIRED, TOKEN_ROTATED, or AUTH_INVALID).
+ */
+export function shouldRedirectSimulatorUnauthorized(
+  status: number,
+  body: Record<string, unknown> | null | undefined,
+): boolean {
+  if (status !== 401) return false;
+  const code = typeof body?.code === 'string' ? body.code.trim().toUpperCase() : '';
+  if (code && SIMULATOR_CLIENT_AUTH_ERROR_CODES.has(code)) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * BUG-12: Formats an ISO timestamp string into local browser `YYYY-MM-DDTHH:mm`
+ * suitable for `<input type="datetime-local">` without UTC offset drift on save.
+ */
+export function formatDateForLocalInput(iso: string | null | undefined): string {
+  if (!iso || typeof iso !== 'string') return '';
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime())) return '';
+  const pad2 = (n: number) => String(n).padStart(2, '0');
+  const year = parsed.getFullYear();
+  const month = pad2(parsed.getMonth() + 1);
+  const day = pad2(parsed.getDate());
+  const hours = pad2(parsed.getHours());
+  const minutes = pad2(parsed.getMinutes());
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+export type UiClientComputedStatus =
+  | 'revoked'
+  | 'expired'
+  | 'online'
+  | 'pending'
+  | 'offline';
+
+export interface UiClientStatusInput {
+  status: 'active' | 'revoked';
+  expiresAt?: string | null;
+  lastActive?: string;
+}
+
+export function isUiClientExpired(
+  expiresAt: string | null | undefined,
+  nowMs: number = Date.now(),
+): boolean {
+  if (!expiresAt) return false;
+  const parsed = Date.parse(expiresAt);
+  return Number.isFinite(parsed) && nowMs >= parsed;
+}
+
+/**
+ * BUG-14: Classifies a client into one mutually exclusive UI status bucket so
+ * expired credentials are tracked separately from active offline clients.
+ */
+export function classifyUiClientStatus(
+  client: UiClientStatusInput,
+  nowMs: number = Date.now(),
+): UiClientComputedStatus {
+  if (client.status === 'revoked') return 'revoked';
+  if (isUiClientExpired(client.expiresAt, nowMs)) return 'expired';
+  if (!client.lastActive) return 'pending';
+  const lastActiveMs = Date.parse(client.lastActive);
+  if (Number.isFinite(lastActiveMs) && nowMs - lastActiveMs < 60_000) {
+    return 'online';
+  }
+  return 'offline';
+}
+
+export interface UiClientStatusCounts {
+  total: number;
+  active: number;
+  online: number;
+  offline: number;
+  pending: number;
+  expired: number;
+  revoked: number;
+}
+
+export function summarizeUiClientCounts(
+  clients: readonly UiClientStatusInput[],
+  nowMs: number = Date.now(),
+): UiClientStatusCounts {
+  let online = 0;
+  let offline = 0;
+  let pending = 0;
+  let expired = 0;
+  let revoked = 0;
+
+  for (const client of clients) {
+    const bucket = classifyUiClientStatus(client, nowMs);
+    if (bucket === 'online') online += 1;
+    else if (bucket === 'offline') offline += 1;
+    else if (bucket === 'pending') pending += 1;
+    else if (bucket === 'expired') expired += 1;
+    else revoked += 1;
+  }
+
+  return {
+    total: clients.length,
+    active: online + offline + pending,
+    online,
+    offline,
+    pending,
+    expired,
+    revoked,
+  };
+}
+
+export type VconAdminRole = 'owner' | 'admin' | 'operator' | 'viewer';
+
+export interface VconRoleCapabilities {
+  role: VconAdminRole;
+  isOwner: boolean;
+  canAdminSettings: boolean;
+  canOperate: boolean;
+  isReadOnly: boolean;
+}
+
+/**
+ * BUG-16: Central RBAC UI capability mapper aligned 1:1 with server-side
+ * `requireAdminApiSession(req, { minRole })` rules.
+ */
+export function getVconRoleCapabilities(
+  rawRole: string | null | undefined,
+): VconRoleCapabilities {
+  const normalized = String(rawRole || 'viewer').trim().toLowerCase();
+  const role: VconAdminRole =
+    normalized === 'owner'
+      ? 'owner'
+      : normalized === 'admin'
+        ? 'admin'
+        : normalized === 'operator'
+          ? 'operator'
+          : 'viewer';
+
+  const isOwner = role === 'owner';
+  const canOperate = role === 'owner' || role === 'admin' || role === 'operator';
+  return {
+    role,
+    isOwner,
+    canAdminSettings: isOwner,
+    canOperate,
+    isReadOnly: !canOperate,
+  };
+}
+

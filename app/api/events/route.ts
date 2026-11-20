@@ -1,5 +1,4 @@
 import { SettingsManager } from '@/core/adminSettings/settingsManager';
-import { verifyRequestAdminSession } from '@/core/auth/adminUsers';
 import { AuthService } from '@/core/auth/jwt';
 import { DataBufferEngine, REDIS_BUFFER_KEY } from '@/core/data/buffer';
 import { SDKManager } from '@/core/sdk/sdkManager';
@@ -22,7 +21,6 @@ import crypto from 'node:crypto';
 import { extractClientIp, requireAdminApiSession } from '@/lib/adminAuth';
 import type { BufferedBucket, BufferedSummary } from '@/lib/vconUiHelpers';
 
-const SESSION_COOKIE = 'datastack_admin_session';
 const SINGLE_EVENT_ENVELOPE_KEYS = new Set(['eventId', 'timestamp', 'data', 'clientId']);
 const MAX_SINGLE_CLIENT_SCAN_FILES = 10;
 const MAX_ALL_CLIENTS_PER_CLIENT_FILES = 2;
@@ -376,9 +374,8 @@ export async function POST(req: NextRequest) {
   try {
     const settings = await SettingsManager.getSettingsAsync();
 
-    // Verify either Client Bearer JWT or Admin Session Cookie
+    // Verify either Client Bearer JWT or Admin Session Cookie (minRole: operator)
     const authHeader = req.headers.get('authorization');
-    const sessionCookie = req.cookies.get(SESSION_COOKIE)?.value;
 
     let tokenClientId: string | null = null;
     let tokenRateLimit: number | undefined;
@@ -396,17 +393,9 @@ export async function POST(req: NextRequest) {
       tokenClientId = verified.payload.clientId;
       tokenRateLimit = verified.payload.rateLimit;
     } else {
-      const auth = await verifyRequestAdminSession(sessionCookie);
+      const auth = await requireAdminApiSession(req, { minRole: 'operator' });
       if (!auth.valid) {
-        return NextResponse.json(
-          {
-            error:
-              auth.reason === 'UNAUTHORIZED'
-                ? 'Authentication required. Provide a valid Client Bearer JWT or Admin Session.'
-                : 'Admin authentication is temporarily unavailable.',
-          },
-          { status: auth.reason === 'UNAUTHORIZED' ? 401 : 503 },
-        );
+        return auth.response;
       }
     }
 

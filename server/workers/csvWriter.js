@@ -44,8 +44,8 @@ class CsvWriterWorker {
 
   extractDateFromFilename(filename) {
     return String(filename || '')
-      .replace(/\.csv(?:\.gz)?$/, '')
-      .split('-part')[0];
+      .replace(/\.csv(?:\.gz)?$/i, '')
+      .replace(/(?:-(?:part|gz)\d+)+$/i, '');
   }
 
   clearQuotaCaches(clientId) {

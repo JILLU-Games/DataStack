@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { SettingsManager } from '@/core/adminSettings/settingsManager';
+import { recordAdminAuditLogAsync } from '@/core/auth/auditLog';
 import { SDKManager } from '@/core/sdk/sdkManager';
 import { getInternalIngestionHeaders } from '@/core/Security/security';
 import { CSVStorageManager } from '@/core/Storage/csvStorage';
 import { DataBufferEngine } from '@/core/data/buffer';
-import { requireAdminApiSession } from '@/lib/adminAuth';
+import { extractClientIp, requireAdminApiSession } from '@/lib/adminAuth';
 
 export async function GET(req: NextRequest) {
   const auth = await requireAdminApiSession(req);
@@ -42,7 +43,18 @@ export async function GET(req: NextRequest) {
 
     const stats = CSVStorageManager.formatStorageStats(files);
 
-    return NextResponse.json({ stats, files, diskUsage });
+    return NextResponse.json({
+      stats,
+      files,
+      diskUsage: diskUsage ?? {
+        available: false,
+        usedPct: 0,
+        availableBytes: 0,
+        freeBytes: 0,
+        totalBytes: 0,
+        checkedAt: Date.now(),
+      },
+    });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Storage stats failed';
     return NextResponse.json({ error: message }, { status: 500 });
@@ -150,10 +162,24 @@ export async function POST(req: NextRequest) {
     const combinedFiles = Array.from(
       new Set([...localRes.files, ...remoteFiles]),
     );
+    const totalFlushed = localRes.count + remoteCount;
+
+    await recordAdminAuditLogAsync({
+      actorEmail: auth.auth.session.email,
+      actorRole: auth.auth.session.role || 'owner',
+      action: 'STORAGE_FLUSH_TRIGGERED',
+      target: 'storage_buffer',
+      ipAddress: extractClientIp(req),
+      metadata: {
+        flushedCount: totalFlushed,
+        filesUpdated: combinedFiles.length,
+        ingestionFlushed,
+      },
+    });
 
     return NextResponse.json({
       success: true,
-      flushedCount: localRes.count + remoteCount,
+      flushedCount: totalFlushed,
       filesUpdated: combinedFiles,
       ingestionFlushed,
       ...(warning ? { warning } : {}),

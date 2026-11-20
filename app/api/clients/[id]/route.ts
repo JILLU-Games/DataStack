@@ -271,7 +271,7 @@ export async function PATCH(
     await recordAdminAuditLogAsync({
       actorEmail: auth.auth.session.email,
       actorRole: auth.auth.session.role || "owner",
-      action: "CLIENT_UPDATED",
+      action: updates.status === "revoked" ? "CLIENT_REVOKED" : "CLIENT_UPDATED",
       target: updated.clientId,
       ipAddress: extractClientIp(req),
       metadata: updates,

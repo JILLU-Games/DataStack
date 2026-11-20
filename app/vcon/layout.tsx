@@ -46,5 +46,5 @@ export default async function VconLayout({
     );
   }
 
-  return <VconShell>{children}</VconShell>;
+  return <VconShell role={auth.session.role}>{children}</VconShell>;
 }

@@ -15,6 +15,7 @@ from .exceptions import (
     DataStackFileError,
     DataStackOfflineSpoolError,
     DataStackPayloadTooLargeError,
+    DataStackQuotaExceededError,
     DataStackRateLimitError,
 )
 from .heartbeat import ConnectionState, HeartbeatMonitor
@@ -36,6 +37,7 @@ __all__ = [
     "DataStackConnectionError",
     "DataStackRateLimitError",
     "DataStackPayloadTooLargeError",
+    "DataStackQuotaExceededError",
     "DataStackFileError",
     "DataStackOfflineSpoolError",
 ]

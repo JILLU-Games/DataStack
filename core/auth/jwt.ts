@@ -47,10 +47,13 @@ export class AuthService {
 
   /**
    * Generates a signed JWT for client SDK authentication.
+   * When `expiresIn` is null/omitted, no hardcoded JWT `exp` claim is embedded so
+   * database-backed `client_sdks.expires_at` (including "Never expires" or >30d
+   * policies and live expiry extensions) remains the authoritative expiry check.
    */
   public static generateClientToken(
     payload: { clientId: string; name?: string; rateLimit?: number },
-    expiresIn = "30d",
+    expiresIn?: string | number | null,
   ): string {
     if (!this.isConfigured()) {
       throw new Error(
@@ -58,15 +61,19 @@ export class AuthService {
       );
     }
 
-    return jwt.sign(
-      {
-        clientId: payload.clientId,
-        name: payload.name || payload.clientId,
-        rateLimit: payload.rateLimit || 100,
-      },
-      this.secret,
-      { expiresIn: expiresIn as jwt.SignOptions["expiresIn"] },
-    );
+    const tokenBody = {
+      clientId: payload.clientId,
+      name: payload.name || payload.clientId,
+      rateLimit: payload.rateLimit || 100,
+    };
+
+    if (expiresIn !== undefined && expiresIn !== null && expiresIn !== "") {
+      return jwt.sign(tokenBody, this.secret, {
+        expiresIn: expiresIn as jwt.SignOptions["expiresIn"],
+      });
+    }
+
+    return jwt.sign(tokenBody, this.secret);
   }
 
   /**

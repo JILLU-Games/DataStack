@@ -1,4 +1,5 @@
 const crypto = require('node:crypto');
+const net = require('node:net');
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
@@ -202,6 +203,10 @@ const runtimeConfig = {
   compressAfterDays: 0,
   enableS3Backup: false,
   diskPauseThresholdPct: 95,
+  enableWebhookAlerts: false,
+  webhookUrl: '',
+  webhookSecret: '',
+  webhookCooldownSec: 300,
 };
 
 let previousJwtSecret = '';
@@ -338,7 +343,7 @@ function matchesIpv4Cidr(clientIp, cidrPattern) {
 function isClientIpAllowed(clientIp, rawAllowedIps) {
   if (!rawAllowedIps || !String(rawAllowedIps).trim()) return true;
   const entries = String(rawAllowedIps)
-    .split(/[\s,]+/)
+    .split(/[\s,;]+/)
     .map((entry) => entry.trim())
     .filter(Boolean);
   if (entries.length === 0) return true;
@@ -349,15 +354,53 @@ function isClientIpAllowed(clientIp, rawAllowedIps) {
   if (!normalizedClientIp || normalizedClientIp === 'unknown') {
     return false;
   }
+  const clientFamily = net.isIP(normalizedClientIp);
   for (const entry of entries) {
     const normalizedEntry = stripIpv6MappedPrefix(entry);
     if (normalizedEntry.includes('/')) {
-      if (matchesIpv4Cidr(normalizedClientIp, normalizedEntry)) {
-        return true;
-      }
-      const [netAddr, prefixStr] = normalizedEntry.split('/');
-      if (Number(prefixStr) === 128 && normalizedClientIp === stripIpv6MappedPrefix(netAddr)) {
-        return true;
+      const [netAddrRaw, prefixStr] = normalizedEntry.split('/');
+      const netAddr = stripIpv6MappedPrefix(netAddrRaw);
+      const prefix = Number(prefixStr);
+      const ruleFamily = net.isIP(netAddr);
+
+      if (
+        clientFamily === 4 &&
+        ruleFamily === 4 &&
+        Number.isInteger(prefix) &&
+        prefix >= 0 &&
+        prefix <= 32
+      ) {
+        if (prefix === 0) return true;
+        try {
+          const bl = new net.BlockList();
+          bl.addSubnet(netAddr, prefix, 'ipv4');
+          if (bl.check(normalizedClientIp, 'ipv4')) {
+            return true;
+          }
+        } catch {
+          if (matchesIpv4Cidr(normalizedClientIp, `${netAddr}/${prefix}`)) {
+            return true;
+          }
+        }
+      } else if (
+        clientFamily === 6 &&
+        ruleFamily === 6 &&
+        Number.isInteger(prefix) &&
+        prefix >= 0 &&
+        prefix <= 128
+      ) {
+        if (prefix === 0) return true;
+        try {
+          const bl = new net.BlockList();
+          bl.addSubnet(netAddr, prefix, 'ipv6');
+          if (bl.check(normalizedClientIp, 'ipv6')) {
+            return true;
+          }
+        } catch {
+          if (prefix === 128 && normalizedClientIp === netAddr) {
+            return true;
+          }
+        }
       }
     } else {
       if (normalizedClientIp === normalizedEntry) {
@@ -1128,6 +1171,33 @@ function applyRuntimeSettingsObject(settingsObj) {
     }
   }
 
+  if (settingsObj.enableWebhookAlerts !== undefined) {
+    runtimeConfig.enableWebhookAlerts = Boolean(settingsObj.enableWebhookAlerts);
+  }
+
+  if (settingsObj.webhookUrl !== undefined && settingsObj.webhookUrl !== null) {
+    runtimeConfig.webhookUrl = String(settingsObj.webhookUrl).trim();
+  }
+
+  if (settingsObj.webhookSecret !== undefined && settingsObj.webhookSecret !== null) {
+    runtimeConfig.webhookSecret = String(settingsObj.webhookSecret);
+  } else if (
+    settingsObj.webhookSecretEnc !== undefined &&
+    settingsObj.webhookSecretEnc !== null
+  ) {
+    runtimeConfig.webhookSecret = decryptVaultSecret(String(settingsObj.webhookSecretEnc));
+  }
+
+  if (
+    settingsObj.webhookCooldownSec !== undefined &&
+    settingsObj.webhookCooldownSec !== null
+  ) {
+    const cooldown = Number(settingsObj.webhookCooldownSec);
+    if (Number.isFinite(cooldown) && cooldown >= 0) {
+      runtimeConfig.webhookCooldownSec = Math.floor(cooldown);
+    }
+  }
+
   let jwtRotated = false;
   if (settingsObj.jwtSecret !== undefined && settingsObj.jwtSecret !== null) {
     const candidateSecret = String(settingsObj.jwtSecret).trim();
@@ -1147,6 +1217,179 @@ function applyRuntimeSettingsObject(settingsObj) {
   }
 
   return { jwtRotated };
+}
+
+const VAULT_PREFIX = 'v1';
+const DEV_DEFAULT_SESSION_SECRET = 'datastack-admin-session-default-secret-32-chars';
+const webhookCooldownMap = new Map();
+
+function clearWebhookCooldownCacheForTests() {
+  webhookCooldownMap.clear();
+}
+
+function resolveVaultMasterSecret() {
+  const candidate = (process.env.DATASTACK_ADMIN_SESSION_SECRET || '').trim();
+  if (process.env.NODE_ENV === 'production') {
+    return candidate.length >= 32 ? candidate : null;
+  }
+  if (candidate.length > 0) {
+    return candidate.length >= 32 ? candidate : null;
+  }
+  return DEV_DEFAULT_SESSION_SECRET;
+}
+
+function decryptVaultSecret(ciphertext) {
+  if (!ciphertext || typeof ciphertext !== 'string') return '';
+  const trimmed = ciphertext.trim();
+  if (!trimmed) return '';
+  const parts = trimmed.split(':');
+  if (parts.length !== 4 || parts[0] !== VAULT_PREFIX) {
+    console.warn(
+      '[DataStack Vault] Ignoring unrecognized stored webhook secret format on Port 4000.',
+    );
+    return '';
+  }
+  const master = resolveVaultMasterSecret();
+  if (!master) {
+    console.warn(
+      '[DataStack Vault] DATASTACK_ADMIN_SESSION_SECRET (>= 32 chars) unavailable on Port 4000; skipping webhook secret decryption.',
+    );
+    return '';
+  }
+  try {
+    const derived = crypto.hkdfSync(
+      'sha256',
+      Buffer.from(master, 'utf8'),
+      Buffer.from('datastack-vault-salt-v1', 'utf8'),
+      Buffer.from('datastack-aes-256-gcm-v1', 'utf8'),
+      32,
+    );
+    const key = Buffer.from(derived);
+    const iv = Buffer.from(parts[1], 'base64url');
+    const authTag = Buffer.from(parts[2], 'base64url');
+    const encrypted = Buffer.from(parts[3], 'base64url');
+    if (iv.length !== 12 || authTag.length !== 16) {
+      return '';
+    }
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv, {
+      authTagLength: 16,
+    });
+    decipher.setAuthTag(authTag);
+    const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+    return decrypted.toString('utf8');
+  } catch {
+    console.warn(
+      '[DataStack Vault] Failed to decrypt stored webhook secret on Port 4000. Verify DATASTACK_ADMIN_SESSION_SECRET matches Port 3000.',
+    );
+    return '';
+  }
+}
+
+function formatOutboundWebhookBody(_url, payload, timestamp) {
+  const safeTimestamp = timestamp || payload.timestamp || new Date().toISOString();
+  const severity = payload.severity || 'warning';
+  const prefix =
+    severity === 'critical'
+      ? '[CRITICAL]'
+      : severity === 'warning'
+        ? '[WARNING]'
+        : '[INFO]';
+  const title = payload.title || String(payload.event || 'Alert');
+  const clientTag = payload.clientId ? ` (client: ${payload.clientId})` : '';
+  const summaryLine = `${prefix} DataStack ${payload.event}${clientTag} — ${title}: ${payload.message}`;
+
+  return JSON.stringify({
+    instance: 'DataStack',
+    event: payload.event,
+    severity,
+    title,
+    message: payload.message,
+    ...(payload.clientId ? { clientId: payload.clientId } : {}),
+    ...(payload.details ? { details: payload.details } : {}),
+    timestamp: safeTimestamp,
+    // Slack & Discord compatible top-level fields (1:1 parity with Port 3000)
+    text: summaryLine,
+    content: summaryLine,
+  });
+}
+
+async function triggerWebhookAlert(payload, options = {}) {
+  try {
+    const enabled =
+      options.enableWebhookAlerts !== undefined
+        ? Boolean(options.enableWebhookAlerts)
+        : Boolean(runtimeConfig.enableWebhookAlerts);
+    const url = (
+      options.webhookUrl !== undefined
+        ? String(options.webhookUrl)
+        : String(runtimeConfig.webhookUrl || '')
+    ).trim();
+
+    if (!enabled || !url) {
+      return { dispatched: false, reason: 'disabled_or_empty_url' };
+    }
+
+    const cooldownSec = Math.max(
+      0,
+      Number(
+        options.webhookCooldownSec !== undefined
+          ? options.webhookCooldownSec
+          : runtimeConfig.webhookCooldownSec,
+      ) || 0,
+    );
+    const dedupKey = `${payload.event}:${payload.clientId || 'global'}`;
+    const now = Date.now();
+    const lastFired = webhookCooldownMap.get(dedupKey) || 0;
+
+    if (!options.bypassCooldown && cooldownSec > 0 && now - lastFired < cooldownSec * 1000) {
+      return { dispatched: false, reason: 'cooldown_active' };
+    }
+
+    webhookCooldownMap.set(dedupKey, now);
+
+    const timestamp = payload.timestamp || new Date(now).toISOString();
+    const rawBody = formatOutboundWebhookBody(url, payload, timestamp);
+    const secret =
+      options.webhookSecret !== undefined
+        ? String(options.webhookSecret || '')
+        : String(runtimeConfig.webhookSecret || '');
+
+    const headers = {
+      'Content-Type': 'application/json',
+      'User-Agent': 'DataStack-Webhook-Notifier/2.0',
+      'X-DataStack-Event': String(payload.event || ''),
+      'X-DataStack-Timestamp': timestamp,
+    };
+
+    if (secret) {
+      const signature = crypto
+        .createHmac('sha256', secret)
+        .update(rawBody)
+        .digest('hex');
+      headers['X-DataStack-Signature'] = `sha256=${signature}`;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3500);
+    const fetchImpl = options.fetchImpl || global.fetch;
+
+    try {
+      const res = await fetchImpl(url, {
+        method: 'POST',
+        headers,
+        body: rawBody,
+        signal: controller.signal,
+      });
+      return { dispatched: true, status: res.status };
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch (err) {
+    return {
+      dispatched: false,
+      reason: err && err.message ? err.message : 'webhook_dispatch_failed',
+    };
+  }
 }
 
 async function ensureDatabaseSchema() {
@@ -1297,7 +1540,8 @@ async function syncSettingsFromDatabase() {
     const res = await dbPool.query(
       `SELECT max_events_per_sec, max_payload_size_kb, batch_flush_threshold,
               batch_flush_interval_ms, file_rotation_mb, jwt_secret, enable_idempotency,
-              auto_prune_days, compress_after_days, enable_s3_backup, disk_pause_threshold_pct
+              auto_prune_days, compress_after_days, enable_s3_backup, disk_pause_threshold_pct,
+              enable_webhook_alerts, webhook_url, webhook_secret_enc, webhook_cooldown_sec
        FROM admin_settings
        WHERE id = 'default'`,
     );
@@ -1319,6 +1563,10 @@ async function syncSettingsFromDatabase() {
       row.disk_pause_threshold_pct !== undefined && row.disk_pause_threshold_pct !== null
         ? Number(row.disk_pause_threshold_pct)
         : NaN;
+    const parsedWebhookCooldown =
+      row.webhook_cooldown_sec !== undefined && row.webhook_cooldown_sec !== null
+        ? Number(row.webhook_cooldown_sec)
+        : NaN;
 
     applyRuntimeSettingsObject({
       maxEventsPerSec: Number(row.max_events_per_sec) || 100,
@@ -1334,6 +1582,12 @@ async function syncSettingsFromDatabase() {
       compressAfterDays: Number.isFinite(parsedCompress) ? Math.max(0, parsedCompress) : 0,
       enableS3Backup: Boolean(row.enable_s3_backup),
       diskPauseThresholdPct: Number.isFinite(parsedDiskPct) ? parsedDiskPct : 95,
+      enableWebhookAlerts: Boolean(row.enable_webhook_alerts),
+      webhookUrl: row.webhook_url ? String(row.webhook_url).trim() : '',
+      webhookSecretEnc: row.webhook_secret_enc ? String(row.webhook_secret_enc) : '',
+      webhookCooldownSec: Number.isFinite(parsedWebhookCooldown)
+        ? Math.max(0, parsedWebhookCooldown)
+        : 300,
       jwtSecret: row.jwt_secret ? String(row.jwt_secret).trim() : undefined,
     });
     return true;
@@ -1351,6 +1605,7 @@ const socketHandlersApi = setupSocketHandlers(io, bufferQueue, writer, {
   getRedisClient,
   verifyClientInDb,
   recordClientActivity,
+  triggerWebhookAlert,
   onBufferPush: async () => {
     const redis = getRedisClient();
     if (redis) {
@@ -1888,4 +2143,8 @@ module.exports = {
   corsOriginDelegate,
   isClientIpAllowed,
   isClientTokenExpired,
+  triggerWebhookAlert,
+  clearWebhookCooldownCacheForTests,
+  decryptVaultSecret,
+  formatOutboundWebhookBody,
 };

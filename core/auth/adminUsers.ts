@@ -913,7 +913,11 @@ export async function updateAdminAccount({
     currentPassword,
   );
   if (!authCheck.authenticated) {
-    return { ok: false as const, error: "Current password is incorrect." };
+    return {
+      ok: false as const,
+      error: "Current password is incorrect.",
+      code: "INVALID_PASSWORD" as const,
+    };
   }
 
   const cleanEmail = nextEmail.trim().toLowerCase();
@@ -926,6 +930,18 @@ export async function updateAdminAccount({
   if (pool) {
     await ensureAdminTable();
     if (authCheck.memberId === "owner-1") {
+      const teamCollision = await pool.query(
+        `SELECT 1 FROM admin_team_members WHERE LOWER(email) = $1 LIMIT 1`,
+        [cleanEmail],
+      );
+      if (teamCollision.rowCount && teamCollision.rowCount > 0) {
+        return {
+          ok: false as const,
+          error: `An administrator with email '${cleanEmail}' already exists.`,
+          code: "ADMIN_EMAIL_CONFLICT" as const,
+        };
+      }
+
       const updated = await pool.query(
         `UPDATE admin_users
          SET email = $1,
@@ -937,7 +953,11 @@ export async function updateAdminAccount({
         [cleanEmail, salt, passwordHash],
       );
       if (!updated.rowCount || updated.rowCount === 0) {
-        return { ok: false as const, error: "Admin account not found." };
+        return {
+          ok: false as const,
+          error: "Admin account not found.",
+          code: "ACCOUNT_NOT_FOUND" as const,
+        };
       }
       return {
         ok: true as const,
@@ -945,6 +965,30 @@ export async function updateAdminAccount({
         role: "owner" as AdminRole,
         memberId: "owner-1",
         tokenVersion: Number(updated.rows[0].token_version) || 1,
+      };
+    }
+
+    const ownerCollision = await pool.query(
+      `SELECT 1 FROM admin_users WHERE id = 1 AND LOWER(email) = $1 LIMIT 1`,
+      [cleanEmail],
+    );
+    if (ownerCollision.rowCount && ownerCollision.rowCount > 0) {
+      return {
+        ok: false as const,
+        error: `An administrator with email '${cleanEmail}' already exists.`,
+        code: "ADMIN_EMAIL_CONFLICT" as const,
+      };
+    }
+
+    const peerCollision = await pool.query(
+      `SELECT 1 FROM admin_team_members WHERE LOWER(email) = $1 AND id <> $2 LIMIT 1`,
+      [cleanEmail, authCheck.memberId],
+    );
+    if (peerCollision.rowCount && peerCollision.rowCount > 0) {
+      return {
+        ok: false as const,
+        error: `An administrator with email '${cleanEmail}' already exists.`,
+        code: "ADMIN_EMAIL_CONFLICT" as const,
       };
     }
 
@@ -960,7 +1004,11 @@ export async function updateAdminAccount({
       [cleanEmail, salt, passwordHash, authCheck.memberId],
     );
     if (!updatedMember.rowCount || updatedMember.rowCount === 0) {
-      return { ok: false as const, error: "Team account not found." };
+      return {
+        ok: false as const,
+        error: "Team account not found.",
+        code: "ACCOUNT_NOT_FOUND" as const,
+      };
     }
     return {
       ok: true as const,
@@ -972,6 +1020,16 @@ export async function updateAdminAccount({
   }
 
   if (authCheck.memberId === "owner-1") {
+    for (const peer of getInMemoryTeamMap().values()) {
+      if (peer.email.toLowerCase() === cleanEmail) {
+        return {
+          ok: false as const,
+          error: `An administrator with email '${cleanEmail}' already exists.`,
+          code: "ADMIN_EMAIL_CONFLICT" as const,
+        };
+      }
+    }
+
     const existing = await getOrInitInMemoryAdmin();
     const nextVersion = existing.tokenVersion + 1;
     globals.__dataStackInMemoryAdmin = {
@@ -991,10 +1049,32 @@ export async function updateAdminAccount({
     };
   }
 
+  const inMemOwner = await getOrInitInMemoryAdmin();
+  if (inMemOwner.email.toLowerCase() === cleanEmail) {
+    return {
+      ok: false as const,
+      error: `An administrator with email '${cleanEmail}' already exists.`,
+      code: "ADMIN_EMAIL_CONFLICT" as const,
+    };
+  }
+
   const teamMap = getInMemoryTeamMap();
   const member = teamMap.get(authCheck.memberId);
   if (!member) {
-    return { ok: false as const, error: "Team account not found." };
+    return {
+      ok: false as const,
+      error: "Team account not found.",
+      code: "ACCOUNT_NOT_FOUND" as const,
+    };
+  }
+  for (const peer of teamMap.values()) {
+    if (peer.id !== member.id && peer.email.toLowerCase() === cleanEmail) {
+      return {
+        ok: false as const,
+        error: `An administrator with email '${cleanEmail}' already exists.`,
+        code: "ADMIN_EMAIL_CONFLICT" as const,
+      };
+    }
   }
   const nextVersion = member.tokenVersion + 1;
   teamMap.set(member.id, {
@@ -1014,12 +1094,23 @@ export async function updateAdminAccount({
   };
 }
 
-export async function revokeAdminSessions(memberId?: string): Promise<number> {
+export async function revokeAdminSessions(
+  target?: string | { memberId?: string; email?: string },
+): Promise<number> {
+  const explicitMemberId =
+    typeof target === "string"
+      ? target.trim()
+      : target?.memberId?.trim() || "";
+  const explicitEmail =
+    typeof target === "object" && target !== null
+      ? target.email?.trim().toLowerCase() || ""
+      : "";
   const effectiveMemberId =
-    memberId || globals.__dataStackLastVerifiedMemberId || "owner-1";
+    explicitMemberId ||
+    (!explicitEmail ? globals.__dataStackLastVerifiedMemberId || "owner-1" : "");
   const pool = getPool();
 
-  if (effectiveMemberId !== "owner-1" && effectiveMemberId !== "1") {
+  if (effectiveMemberId && effectiveMemberId !== "owner-1" && effectiveMemberId !== "1") {
     if (pool) {
       await ensureAdminTable();
       const updated = await pool.query(
@@ -1041,6 +1132,33 @@ export async function revokeAdminSessions(memberId?: string): Promise<number> {
         member.updatedAt = new Date();
         teamMap.set(member.id, member);
         return member.tokenVersion;
+      }
+    }
+  }
+
+  if (explicitEmail) {
+    if (pool) {
+      await ensureAdminTable();
+      const updatedByEmail = await pool.query(
+        `UPDATE admin_team_members
+         SET token_version = COALESCE(token_version, 1) + 1,
+             updated_at = NOW()
+         WHERE LOWER(email) = $1
+         RETURNING token_version`,
+        [explicitEmail],
+      );
+      if (updatedByEmail.rowCount && updatedByEmail.rowCount > 0) {
+        return Number(updatedByEmail.rows[0].token_version) || 1;
+      }
+    } else {
+      const teamMap = getInMemoryTeamMap();
+      for (const member of teamMap.values()) {
+        if (member.email.toLowerCase() === explicitEmail) {
+          member.tokenVersion += 1;
+          member.updatedAt = new Date();
+          teamMap.set(member.id, member);
+          return member.tokenVersion;
+        }
       }
     }
   }

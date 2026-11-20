@@ -125,9 +125,13 @@ export async function PUT(request: NextRequest) {
     });
 
     if (!result.ok) {
+      const isConflict = result.code === "ADMIN_EMAIL_CONFLICT";
       return NextResponse.json(
-        { error: result.error, code: "INVALID_PASSWORD" },
-        { status: 401 },
+        {
+          error: result.error,
+          code: result.code || "INVALID_PASSWORD",
+        },
+        { status: isConflict ? 409 : 401 },
       );
     }
 

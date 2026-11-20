@@ -3,6 +3,7 @@ import {
   getAdminSessionSecret,
   getSessionCookieOptions,
 } from "@/core/auth/adminSession";
+import { recordAdminAuditLogAsync } from "@/core/auth/auditLog";
 import {
   AdminDatabaseRequiredError,
   clearAdminLoginAttempts,
@@ -127,6 +128,17 @@ export async function POST(request: NextRequest) {
       sessionSecret,
       clientIp,
     ).catch(() => undefined);
+
+    await recordAdminAuditLogAsync({
+      actorEmail: email,
+      actorRole: "owner",
+      action: "ADMIN_SETUP",
+      target: email,
+      ipAddress: clientIp,
+      metadata: {
+        memberId: "owner-1",
+      },
+    });
 
     const token = await createAdminSessionToken(
       email,

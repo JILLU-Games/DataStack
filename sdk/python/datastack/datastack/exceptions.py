@@ -51,6 +51,19 @@ class DataStackPayloadTooLargeError(DataStackError):
         super().__init__(message, code="PAYLOAD_TOO_LARGE", retryable=False)
 
 
+class DataStackQuotaExceededError(DataStackError):
+    """
+    Raised when the server rejects ingestion with HTTP `507` or WebSocket
+    `STORAGE_QUOTA_EXCEEDED` / `DISK_SPACE_LOW`. Non-retryable until quota
+    or disk space is freed.
+    """
+
+    def __init__(
+        self, message: str, code: str = "STORAGE_QUOTA_EXCEEDED"
+    ) -> None:
+        super().__init__(message, code=code, retryable=False)
+
+
 class DataStackConnectionError(DataStackError):
     """Raised when both WebSocket and HTTP fallback are unreachable and offline spooling is disabled."""
 

@@ -2,6 +2,8 @@ import { SettingsManager } from '@/core/adminSettings/settingsManager';
 import { AuthService } from '@/core/auth/jwt';
 import { DataBufferEngine } from '@/core/data/buffer';
 import { SDKManager } from '@/core/sdk/sdkManager';
+import { isClientIpAllowed, isClientTokenExpired } from '@/core/Security/ipAllowlist';
+import { extractClientIp } from '@/lib/adminAuth';
 import { NextRequest, NextResponse } from 'next/server';
 
 export async function GET(req: NextRequest) {
@@ -65,6 +67,27 @@ export async function GET(req: NextRequest) {
             error: 'TOKEN_ROTATED: Client credentials have been rotated. Use the latest token.',
           },
           { status: 401 },
+        );
+      }
+      if (isClientTokenExpired(registeredClient.expiresAt)) {
+        return NextResponse.json(
+          {
+            status: 'error',
+            code: 'CLIENT_TOKEN_EXPIRED',
+            error: `CLIENT_TOKEN_EXPIRED: Client '${clientId}' token has expired (${registeredClient.expiresAt}).`,
+          },
+          { status: 401 },
+        );
+      }
+      const clientIp = extractClientIp(req);
+      if (!isClientIpAllowed(clientIp, registeredClient.allowedIps)) {
+        return NextResponse.json(
+          {
+            status: 'error',
+            code: 'CLIENT_IP_FORBIDDEN',
+            error: `CLIENT_IP_FORBIDDEN: IP '${clientIp}' is not in the allowlist for client '${clientId}'.`,
+          },
+          { status: 403 },
         );
       }
     }

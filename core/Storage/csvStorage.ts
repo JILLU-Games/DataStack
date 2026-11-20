@@ -26,8 +26,10 @@ export interface StorageFileMeta {
 }
 
 export interface DiskUsageSnapshot {
+  available: boolean;
   usedPct: number;
   availableBytes: number;
+  freeBytes: number;
   totalBytes: number;
   checkedAt: number;
 }
@@ -85,7 +87,9 @@ export class CSVStorageManager {
   }
 
   public static extractDateFromFilename(filename: string): string {
-    return filename.replace(/\.csv(?:\.gz)?$/, '').split('-part')[0];
+    return String(filename || '')
+      .replace(/\.csv(?:\.gz)?$/i, '')
+      .replace(/(?:-(?:part|gz)\d+)+$/i, '');
   }
 
   public static clearRowCountCache(): void {
@@ -1073,8 +1077,10 @@ export class CSVStorageManager {
             )
           : 0;
       const snapshot: DiskUsageSnapshot = {
+        available: totalBytes > 0,
         usedPct,
         availableBytes,
+        freeBytes: availableBytes,
         totalBytes,
         checkedAt: now,
       };
@@ -1082,8 +1088,10 @@ export class CSVStorageManager {
       return snapshot;
     } catch {
       const fallback: DiskUsageSnapshot = {
+        available: false,
         usedPct: 0,
         availableBytes: 0,
+        freeBytes: 0,
         totalBytes: 0,
         checkedAt: now,
       };

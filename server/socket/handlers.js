@@ -91,6 +91,38 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
       ? options.getRedisClient
       : () => null;
 
+  const triggerWebhookAlert =
+    typeof options.triggerWebhookAlert === "function"
+      ? options.triggerWebhookAlert
+      : null;
+
+  const WEBHOOK_REJECTION_CODES = new Set([
+    "CLIENT_TOKEN_EXPIRED",
+    "CLIENT_IP_FORBIDDEN",
+    "DISK_SPACE_LOW",
+    "STORAGE_QUOTA_EXCEEDED",
+  ]);
+
+  function dispatchRejectionWebhook(code, reason, clientId, details) {
+    if (!triggerWebhookAlert || !WEBHOOK_REJECTION_CODES.has(code)) return;
+    const severity = code === "DISK_SPACE_LOW" ? "critical" : "warning";
+    try {
+      Promise.resolve(
+        triggerWebhookAlert({
+          event: code,
+          severity,
+          clientId,
+          message:
+            reason ||
+            `${code}: Ingestion request rejected on Port 4000 Socket.IO.`,
+          details: details || { transport: "socketio" },
+        }),
+      ).catch(() => undefined);
+    } catch {
+      // Never block socket handlers on webhook alert dispatch
+    }
+  }
+
   const idempotencyMap = new Map();
   const rateLimitMap = new Map();
   let lastCleanupAt = Date.now();
@@ -376,7 +408,12 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
         clientIp,
       );
       if (!dbCheck.allowed) {
-        return next(new Error(dbCheck.reason || dbCheck.code || "CLIENT_REVOKED"));
+        const errCode = dbCheck.code || "CLIENT_REVOKED";
+        dispatchRejectionWebhook(errCode, dbCheck.reason, normalizedClientId, {
+          transport: "socketio_handshake",
+          clientIp,
+        });
+        return next(new Error(dbCheck.reason || errCode));
       }
 
       socket.data.clientId = normalizedClientId;
@@ -440,10 +477,15 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
           clientIp,
         );
         if (!dbCheck.allowed) {
+          const errCode = dbCheck.code || "CLIENT_REVOKED";
+          dispatchRejectionWebhook(errCode, dbCheck.reason, clientId, {
+            transport: "socketio_sync_data",
+            clientIp,
+          });
           if (callback) {
             callback({
               success: false,
-              code: dbCheck.code || "CLIENT_REVOKED",
+              code: errCode,
               error: dbCheck.reason || "CLIENT_REVOKED",
             });
           }
@@ -459,6 +501,10 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
             config.diskPauseThresholdPct ?? 95,
           );
           if (!admission.allowed) {
+            dispatchRejectionWebhook(admission.code, admission.reason, clientId, {
+              transport: "socketio_sync_data",
+              clientIp,
+            });
             if (callback) {
               callback({
                 success: false,
@@ -559,12 +605,17 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
           clientIp,
         );
         if (!dbCheck.allowed) {
+          const errCode = dbCheck.code || "CLIENT_REVOKED";
+          dispatchRejectionWebhook(errCode, dbCheck.reason, clientId, {
+            transport: "socketio_batch_sync",
+            clientIp,
+          });
           if (callback) {
             callback({
               success: false,
               processed: 0,
               rejected: batch.length,
-              code: dbCheck.code || "CLIENT_REVOKED",
+              code: errCode,
               error: dbCheck.reason || "CLIENT_REVOKED",
             });
           }
@@ -580,6 +631,10 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
             config.diskPauseThresholdPct ?? 95,
           );
           if (!admission.allowed) {
+            dispatchRejectionWebhook(admission.code, admission.reason, clientId, {
+              transport: "socketio_batch_sync",
+              clientIp,
+            });
             if (callback) {
               callback({
                 success: false,
@@ -729,11 +784,16 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
           clientIp,
         );
         if (!dbCheck.allowed) {
+          const errCode = dbCheck.code || "CLIENT_REVOKED";
+          dispatchRejectionWebhook(errCode, dbCheck.reason, clientId, {
+            transport: "socketio_ping_verify",
+            clientIp,
+          });
           if (callback) {
             callback({
               success: false,
               status: "REVOKED",
-              code: dbCheck.code || "CLIENT_REVOKED",
+              code: errCode,
               error: dbCheck.reason || "CLIENT_REVOKED",
             });
           }

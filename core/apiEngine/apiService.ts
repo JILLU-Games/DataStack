@@ -2,6 +2,7 @@ import { SettingsManager } from '../adminSettings/settingsManager';
 import { SDKManager } from '../sdk/sdkManager';
 import { CSVStorageManager } from '../Storage/csvStorage';
 import { DataBufferEngine } from '../data/buffer';
+import { isClientTokenExpired } from '../Security/ipAllowlist';
 import {
   SecurityEngine,
   getInternalIngestionHeaders,
@@ -20,7 +21,13 @@ export class ApiEngine {
         DataBufferEngine.getBufferStatsAsync(),
         SDKManager.listClientsAsync(),
       ]);
-    const activeClients = clients.filter((c) => c.status === 'active').length;
+    const nowMs = Date.now();
+    const expiredClients = clients.filter(
+      (c) => c.status === 'active' && isClientTokenExpired(c.expiresAt, nowMs),
+    ).length;
+    const activeClients = clients.filter(
+      (c) => c.status === 'active' && !isClientTokenExpired(c.expiresAt, nowMs),
+    ).length;
     let activeSockets = 0;
     let ingestionLocalBufferSize = 0;
     let ingestionRedisBufferSize = 0;
@@ -129,6 +136,7 @@ export class ApiEngine {
       activeSockets,
       totalClients: clients.length,
       activeClients,
+      expiredClients,
       bufferStats,
       storageStats,
       diskUsage,

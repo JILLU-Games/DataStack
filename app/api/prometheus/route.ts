@@ -2,6 +2,7 @@ import { SettingsManager } from "@/core/adminSettings/settingsManager";
 import { verifyRequestAdminSession } from "@/core/auth/adminUsers";
 import { DataBufferEngine } from "@/core/data/buffer";
 import { SDKManager } from "@/core/sdk/sdkManager";
+import { isClientTokenExpired } from "@/core/Security/ipAllowlist";
 import { getInternalIngestionHeaders } from "@/core/Security/security";
 import { CSVStorageManager } from "@/core/Storage/csvStorage";
 import { ADMIN_SESSION_COOKIE } from "@/lib/adminAuth";
@@ -116,13 +117,17 @@ export async function GET(req: NextRequest) {
         ? bufferStats.redisBufferSize
         : remoteBufferSize);
 
+    const nowMs = Date.now();
     let activeClientsCount = 0;
+    let expiredClientsCount = 0;
     let revokedClientsCount = 0;
     let totalEventsCounter = 0;
     for (const c of clients) {
       totalEventsCounter += Math.max(0, Number(c.totalEvents) || 0);
       if (c.status === "revoked") {
         revokedClientsCount += 1;
+      } else if (isClientTokenExpired(c.expiresAt, nowMs)) {
+        expiredClientsCount += 1;
       } else {
         activeClientsCount += 1;
       }
@@ -165,6 +170,7 @@ export async function GET(req: NextRequest) {
       "# HELP datastack_clients_total Number of registered SDK clients partitioned by status.",
       "# TYPE datastack_clients_total gauge",
       `datastack_clients_total{status="active"} ${activeClientsCount}`,
+      `datastack_clients_total{status="expired"} ${expiredClientsCount}`,
       `datastack_clients_total{status="revoked"} ${revokedClientsCount}`,
       "# HELP datastack_client_events_total Cumulative ingested events per registered client.",
       "# TYPE datastack_client_events_total counter",

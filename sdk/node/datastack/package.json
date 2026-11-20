@@ -2,18 +2,23 @@
   "name": "@datastack/sdk",
   "version": "2.2.0",
   "description": "Official DataStack Node.js & TypeScript Client SDK — Real-time Socket.IO telemetry streaming with automatic HTTP fallback, deterministic file ingestion, and offline disk spooling.",
-  "main": "./index.ts",
-  "types": "./index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./index.ts",
-      "default": "./index.ts"
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
     }
   },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
   "files": [
+    "dist",
     "index.ts",
     "types.ts",
     "spool.ts",
+    "tsconfig.json",
     "README.md"
   ],
   "engines": {

@@ -540,11 +540,14 @@ export class SDKManager {
     const allowedIps = typeof data.allowedIps === "string" ? data.allowedIps.trim() : "";
     const expiresAt = data.expiresAt ? String(data.expiresAt) : null;
 
-    const token = AuthService.generateClientToken({
-      clientId: safeClientId,
-      name: data.name.trim(),
-      rateLimit,
-    });
+    const token = AuthService.generateClientToken(
+      {
+        clientId: safeClientId,
+        name: data.name.trim(),
+        rateLimit,
+      },
+      null,
+    );
 
     const newClient: ClientSDK = {
       clientId: safeClientId,
@@ -637,11 +640,14 @@ export class SDKManager {
     const allowedIps = typeof data.allowedIps === "string" ? data.allowedIps.trim() : "";
     const expiresAt = data.expiresAt ? String(data.expiresAt) : null;
 
-    const token = AuthService.generateClientToken({
-      clientId: safeClientId,
-      name: data.name.trim(),
-      rateLimit,
-    });
+    const token = AuthService.generateClientToken(
+      {
+        clientId: safeClientId,
+        name: data.name.trim(),
+        rateLimit,
+      },
+      null,
+    );
 
     const newClient: ClientSDK = {
       clientId: safeClientId,
@@ -674,11 +680,14 @@ export class SDKManager {
     const updated: ClientSDK = {
       ...client,
       secret: this.generateClientSecret(normalizedId),
-      token: AuthService.generateClientToken({
-        clientId: client.clientId,
-        name: client.name,
-        rateLimit: client.rateLimit,
-      }),
+      token: AuthService.generateClientToken(
+        {
+          clientId: client.clientId,
+          name: client.name,
+          rateLimit: client.rateLimit,
+        },
+        null,
+      ),
     };
 
     getClientsMap().set(normalizedId, updated);
@@ -724,11 +733,14 @@ export class SDKManager {
     const updated: ClientSDK = {
       ...existing,
       secret: this.generateClientSecret(normalizedId),
-      token: AuthService.generateClientToken({
-        clientId: existing.clientId,
-        name: existing.name,
-        rateLimit: existing.rateLimit,
-      }),
+      token: AuthService.generateClientToken(
+        {
+          clientId: existing.clientId,
+          name: existing.name,
+          rateLimit: existing.rateLimit,
+        },
+        null,
+      ),
     };
 
     await this.persistClientCredentials(updated);
@@ -1170,11 +1182,14 @@ export class SDKManager {
   public static resignAllClientTokens(): void {
     const map = getClientsMap();
     for (const [clientId, client] of map.entries()) {
-      client.token = AuthService.generateClientToken({
-        clientId: client.clientId,
-        name: client.name,
-        rateLimit: client.rateLimit,
-      });
+      client.token = AuthService.generateClientToken(
+        {
+          clientId: client.clientId,
+          name: client.name,
+          rateLimit: client.rateLimit,
+        },
+        null,
+      );
       map.set(clientId, client);
       void this.persistClientCredentials(client).catch((err) => {
         console.error("[DataStack SDK] Background re-sign DB persist failed:", err);
@@ -1188,11 +1203,14 @@ export class SDKManager {
     for (const client of clients) {
       const updated: ClientSDK = {
         ...client,
-        token: AuthService.generateClientToken({
-          clientId: client.clientId,
-          name: client.name,
-          rateLimit: client.rateLimit,
-        }),
+        token: AuthService.generateClientToken(
+          {
+            clientId: client.clientId,
+            name: client.name,
+            rateLimit: client.rateLimit,
+          },
+          null,
+        ),
       };
       await this.persistClientCredentials(updated);
       map.set(updated.clientId, updated);

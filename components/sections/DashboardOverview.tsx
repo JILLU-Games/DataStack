@@ -1,6 +1,7 @@
 'use client';
 
 import { PageShell } from '@/components/layout/PageShell';
+import { useVconRole } from '@/components/layout/VconShell';
 import { Button } from '@/components/ui/Button';
 import { ClientList, type ClientListItem } from '@/components/ui/ClientList';
 import { Panel } from '@/components/ui/Panel';
@@ -21,6 +22,8 @@ import {
   countMatchingBufferedEvents,
   extractContentDispositionFilename,
   formatEventTimeLabel,
+  getVconRoleCapabilities,
+  isUiClientExpired,
   type BufferedSummary,
 } from '@/lib/vconUiHelpers';
 import Link from 'next/link';
@@ -36,6 +39,7 @@ type EventItem = {
 type DashboardMetrics = {
   activeSockets?: number;
   activeClients: number;
+  expiredClients?: number;
   totalClients: number;
   bufferStats: {
     currentBufferSize: number;
@@ -65,6 +69,8 @@ type StorageFile = {
 
 export const DashboardOverview: React.FC = () => {
   const { error, info } = useToast();
+  const currentRole = useVconRole();
+  const { canOperate } = getVconRoleCapabilities(currentRole);
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(() =>
     getCached<DashboardMetrics | null>('vcon:metrics', null)
   );
@@ -179,7 +185,13 @@ export const DashboardOverview: React.FC = () => {
   const eventsToday = storedRecordsToday + bufferedTodayCount;
   const activeClients =
     metrics?.activeClients ??
-    clients.filter((client) => client.status === 'active').length;
+    clients.filter(
+      (client) =>
+        client.status === 'active' &&
+        !isUiClientExpired(
+          (client as ClientListItem & { expiresAt?: string | null }).expiresAt,
+        ),
+    ).length;
   const totalClients = metrics?.totalClients ?? clients.length;
   const activeSockets = metrics?.activeSockets ?? 0;
   const bridgeStatus = metrics?.runtime?.ingestionBridgeStatus;
@@ -263,11 +275,13 @@ export const DashboardOverview: React.FC = () => {
           >
             Export
           </Button>
-          <Link href="/vcon/clients">
-            <Button size="xs" variant="primary" icon="Plus">
-              New client
-            </Button>
-          </Link>
+          {canOperate && (
+            <Link href="/vcon/clients">
+              <Button size="xs" variant="primary" icon="Plus">
+                New client
+              </Button>
+            </Link>
+          )}
         </>
       }
     >

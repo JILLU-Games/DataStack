@@ -96,6 +96,7 @@ export interface DataStackStatusSnapshot {
   spooledCount: number;
   spooledBytes: number;
   inFlightRequests: number;
+  heartbeatActive?: boolean;
 }
 
 /**
@@ -127,14 +128,17 @@ export class DataStackConfigError extends DataStackError {
   }
 }
 
+export type DataStackAuthErrorCode =
+  | 'AUTH_FAILED'
+  | 'CLIENT_TOKEN_EXPIRED'
+  | 'CLIENT_IP_FORBIDDEN'
+  | 'CLIENT_REVOKED'
+  | 'TOKEN_ROTATED';
+
 export class DataStackAuthError extends DataStackError {
   constructor(
     message: string,
-    code:
-      | 'AUTH_FAILED'
-      | 'CLIENT_TOKEN_EXPIRED'
-      | 'CLIENT_IP_FORBIDDEN'
-      | 'CLIENT_REVOKED' = 'AUTH_FAILED',
+    code: DataStackAuthErrorCode = 'AUTH_FAILED',
     statusCode = 401,
     details?: Record<string, unknown>
   ) {

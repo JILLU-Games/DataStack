@@ -725,3 +725,93 @@ test("V2-Phase-01 [Quotas V2-E04 & V2-E05]: HTTP POST /api/events + Port 4000 So
     resetAdminStateForTests();
   }
 });
+
+test("V2-Audit-Phase-03 [BUG-V2-AUDIT-01, BUG-V2-AUDIT-07, BUG-V2-AUDIT-10]: DiskUsageSnapshot available/freeBytes schema parity, /vcon/clients expiration counter alignment & CSV.GZ partition badges", async () => {
+  const prevStorageDir = process.env.DATASTACK_STORAGE_DIR;
+  const origBaseStorageDir = CSVStorageManager.baseStorageDir;
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "datastack-v2-p3-"));
+
+  process.env.DATASTACK_STORAGE_DIR = tmpDir;
+  CSVStorageManager.baseStorageDir = tmpDir;
+  CSVStorageManager.clearQuotaCaches();
+
+  try {
+    const cookie = await makeAdminCookie();
+
+    // 1. BUG-V2-AUDIT-01: CSVStorageManager.getDiskUsageAsync() & GET /api/storage return available: true and freeBytes === availableBytes
+    CSVStorageManager.setStatfsOverrideForTests(async () => ({
+      blocks: 2000,
+      bavail: 1500, // 25% used, 75% free
+      bsize: 4096,
+    }));
+
+    const snapshot = await CSVStorageManager.getDiskUsageAsync(true);
+    assert.equal(snapshot.available, true);
+    assert.equal(snapshot.usedPct, 25);
+    assert.equal(snapshot.totalBytes, 2000 * 4096);
+    assert.equal(snapshot.availableBytes, 1500 * 4096);
+    assert.equal(snapshot.freeBytes, snapshot.availableBytes);
+
+    const storageRes = await storageGet(
+      new NextRequest("http://localhost:3000/api/storage", { headers: { cookie } }),
+    );
+    assert.equal(storageRes.status, 200);
+    const storageBody = await storageRes.json();
+    assert.equal(storageBody.diskUsage.available, true);
+    assert.equal(storageBody.diskUsage.freeBytes, 1500 * 4096);
+    assert.equal(storageBody.diskUsage.availableBytes, 1500 * 4096);
+    assert.equal(storageBody.diskUsage.usedPct, 25);
+
+    // Also verify statfs failure fallback sets available: false and freeBytes: 0
+    CSVStorageManager.setStatfsOverrideForTests(async () => {
+      throw new Error("Simulated statfs failure");
+    });
+    const fallbackSnapshot = await CSVStorageManager.getDiskUsageAsync(true);
+    assert.equal(fallbackSnapshot.available, false);
+    assert.equal(fallbackSnapshot.freeBytes, 0);
+    assert.equal(fallbackSnapshot.availableBytes, 0);
+
+    // 2. BUG-V2-AUDIT-07: app/vcon/clients/page.tsx defines isClientExpired and excludes expired tokens from onlineCount, pendingCount, and online/pending filter tabs
+    const clientsPageSrc = await fs.readFile(
+      path.join(process.cwd(), "app/vcon/clients/page.tsx"),
+      "utf8",
+    );
+    assert.match(clientsPageSrc, /function isClientExpired\(/);
+    assert.match(
+      clientsPageSrc,
+      /const expired = !revoked && isClientExpired\(client\.expiresAt,\s*now\)/,
+    );
+    assert.match(
+      clientsPageSrc,
+      /!isClientExpired\(client\.expiresAt,\s*now\)/,
+    );
+    assert.match(
+      clientsPageSrc,
+      /const pending =\s*client\.status === 'active' && !expired && !client\.lastActive/,
+    );
+
+    // 3. BUG-V2-AUDIT-10: ExportWorkspace.tsx and app/vcon/storage/page.tsx render CSV.GZ badge for compressed .csv.gz partitions
+    const exportWorkspaceSrc = await fs.readFile(
+      path.join(process.cwd(), "components/sections/ExportWorkspace.tsx"),
+      "utf8",
+    );
+    assert.match(exportWorkspaceSrc, /CSV\.GZ/);
+    assert.match(exportWorkspaceSrc, /endsWith\(['"]\.csv\.gz['"]\)/);
+
+    const storagePageSrc = await fs.readFile(
+      path.join(process.cwd(), "app/vcon/storage/page.tsx"),
+      "utf8",
+    );
+    assert.match(storagePageSrc, /CSV\.GZ/);
+    assert.match(storagePageSrc, /endsWith\(['"]\.csv\.gz['"]\)/);
+  } finally {
+    CSVStorageManager.setStatfsOverrideForTests(null);
+    CSVStorageManager.clearQuotaCaches();
+    CSVStorageManager.baseStorageDir = origBaseStorageDir;
+    if (prevStorageDir === undefined) delete process.env.DATASTACK_STORAGE_DIR;
+    else process.env.DATASTACK_STORAGE_DIR = prevStorageDir;
+    await fs.rm(tmpDir, { recursive: true, force: true });
+    resetAdminStateForTests();
+  }
+});
+

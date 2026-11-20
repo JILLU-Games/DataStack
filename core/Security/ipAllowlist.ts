@@ -5,7 +5,17 @@ import net from "node:net";
  */
 
 export function stripIpv6MappedPrefix(ip: string): string {
-  const trimmed = String(ip || "").trim();
+  let trimmed = String(ip || "").trim();
+  if (!trimmed) return "";
+  if (trimmed.startsWith("[") && trimmed.includes("]")) {
+    trimmed = trimmed.slice(1, trimmed.indexOf("]"));
+  } else if (/^\d{1,3}(?:\.\d{1,3}){3}:\d+$/.test(trimmed)) {
+    trimmed = trimmed.slice(0, trimmed.lastIndexOf(":"));
+  }
+  const pctIndex = trimmed.indexOf("%");
+  if (pctIndex !== -1) {
+    trimmed = trimmed.slice(0, pctIndex);
+  }
   if (trimmed.toLowerCase().startsWith("::ffff:")) {
     const candidate = trimmed.slice(7);
     if (net.isIPv4(candidate)) {
@@ -142,6 +152,7 @@ export function isClientIpAllowed(
     return entries.includes("*");
   }
 
+  const clientFamily = net.isIP(cleanClientIp);
   const clientIpv4Int = ipv4ToUint32(cleanClientIp);
   const isLoopbackClient =
     cleanClientIp === "127.0.0.1" || cleanClientIp.toLowerCase() === "::1";
@@ -153,13 +164,47 @@ export function isClientIpAllowed(
       const [ruleIpRaw, prefixRaw] = rule.split("/");
       const ruleIp = stripIpv6MappedPrefix(ruleIpRaw);
       const prefix = Number(prefixRaw);
-      const ruleIpv4Int = ipv4ToUint32(ruleIp);
+      const ruleFamily = net.isIP(ruleIp);
 
-      if (clientIpv4Int !== null && ruleIpv4Int !== null && prefix >= 0 && prefix <= 32) {
+      if (
+        clientFamily === 4 &&
+        ruleFamily === 4 &&
+        Number.isInteger(prefix) &&
+        prefix >= 0 &&
+        prefix <= 32
+      ) {
         if (prefix === 0) return true;
-        const mask = prefix === 32 ? 0xffffffff : (~((1 << (32 - prefix)) - 1)) >>> 0;
-        if ((clientIpv4Int & mask) >>> 0 === (ruleIpv4Int & mask) >>> 0) {
-          return true;
+        try {
+          const bl = new net.BlockList();
+          bl.addSubnet(ruleIp, prefix, "ipv4");
+          if (bl.check(cleanClientIp, "ipv4")) {
+            return true;
+          }
+        } catch {
+          const ruleIpv4Int = ipv4ToUint32(ruleIp);
+          if (clientIpv4Int !== null && ruleIpv4Int !== null) {
+            const mask = prefix === 32 ? 0xffffffff : (~((1 << (32 - prefix)) - 1)) >>> 0;
+            if ((clientIpv4Int & mask) >>> 0 === (ruleIpv4Int & mask) >>> 0) {
+              return true;
+            }
+          }
+        }
+      } else if (
+        clientFamily === 6 &&
+        ruleFamily === 6 &&
+        Number.isInteger(prefix) &&
+        prefix >= 0 &&
+        prefix <= 128
+      ) {
+        if (prefix === 0) return true;
+        try {
+          const bl = new net.BlockList();
+          bl.addSubnet(ruleIp, prefix, "ipv6");
+          if (bl.check(cleanClientIp, "ipv6")) {
+            return true;
+          }
+        } catch {
+          // ignore malformed IPv6 subnet
         }
       }
       continue;

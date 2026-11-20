@@ -92,11 +92,32 @@ type SettingsGlobals = typeof globalThis & {
   __dataStackLastSettingsBridgeSync?: SettingsBridgeSyncStatus;
   __dataStackLastPruneMeta?: { days: number; ranAtMs: number };
   __dataStackLastCompressMeta?: { days: number; ranAtMs: number };
+  __dataStackMaintenanceTimer?: ReturnType<typeof setInterval>;
+  __dataStackMaintenanceIntervalMs?: number;
+  __dataStackMaintenanceRunning?: boolean;
+  __dataStackArchivePruneInFlight?: boolean;
+  __dataStackCompressInFlight?: boolean;
 };
 
 const PRUNE_COOLDOWN_MS = 60 * 60 * 1000;
 const COMPRESS_COOLDOWN_MS = 60 * 60 * 1000;
+const DEFAULT_MAINTENANCE_INTERVAL_MS = 15 * 60 * 1000;
 const globals = globalThis as SettingsGlobals;
+
+function resolveMaintenanceIntervalMs(overrideMs?: number): number {
+  if (
+    typeof overrideMs === "number" &&
+    Number.isFinite(overrideMs) &&
+    overrideMs >= 20
+  ) {
+    return Math.floor(overrideMs);
+  }
+  const envVal = Number(process.env.DATASTACK_MAINTENANCE_INTERVAL_MS);
+  if (Number.isFinite(envVal) && envVal >= 1000) {
+    return Math.floor(envVal);
+  }
+  return DEFAULT_MAINTENANCE_INTERVAL_MS;
+}
 
 function getDefaultSettings(): AdminSettings {
   return {
@@ -257,10 +278,167 @@ export class SettingsManager {
     );
   }
 
+  public static isMaintenanceSchedulerActive(): boolean {
+    return Boolean(globals.__dataStackMaintenanceTimer);
+  }
+
+  public static ensureMaintenanceScheduler(intervalMs?: number): boolean {
+    const effectiveIntervalMs = resolveMaintenanceIntervalMs(intervalMs);
+    if (globals.__dataStackMaintenanceTimer) {
+      if (
+        intervalMs === undefined ||
+        globals.__dataStackMaintenanceIntervalMs === effectiveIntervalMs
+      ) {
+        return false;
+      }
+      clearInterval(globals.__dataStackMaintenanceTimer);
+      delete globals.__dataStackMaintenanceTimer;
+    }
+
+    const timer = setInterval(() => {
+      void this.runScheduledMaintenanceTick().catch((err) => {
+        console.warn(
+          "[DataStack Storage] Periodic maintenance tick failed:",
+          err,
+        );
+      });
+    }, effectiveIntervalMs);
+    timer.unref?.();
+    globals.__dataStackMaintenanceTimer = timer;
+    globals.__dataStackMaintenanceIntervalMs = effectiveIntervalMs;
+    return true;
+  }
+
+  public static stopMaintenanceScheduler(): void {
+    if (globals.__dataStackMaintenanceTimer) {
+      clearInterval(globals.__dataStackMaintenanceTimer);
+      delete globals.__dataStackMaintenanceTimer;
+    }
+    delete globals.__dataStackMaintenanceIntervalMs;
+    globals.__dataStackMaintenanceRunning = false;
+  }
+
+  public static stopMaintenanceSchedulerForTests(): void {
+    this.stopMaintenanceScheduler();
+    globals.__dataStackArchivePruneInFlight = false;
+    globals.__dataStackCompressInFlight = false;
+  }
+
+  public static async runScheduledMaintenanceTick(options?: {
+    forceCompress?: boolean;
+    forcePrune?: boolean;
+    skipDbSync?: boolean;
+  }): Promise<{
+    ran: boolean;
+    skippedReason?: string;
+    compressed: boolean;
+    archivedOrPruned: boolean;
+  }> {
+    if (globals.__dataStackMaintenanceRunning) {
+      return {
+        ran: false,
+        skippedReason: "ALREADY_RUNNING",
+        compressed: false,
+        archivedOrPruned: false,
+      };
+    }
+
+    globals.__dataStackMaintenanceRunning = true;
+    try {
+      const hasConfiguredDb = Boolean(process.env.DATABASE_URL?.trim());
+      if (hasConfiguredDb && !options?.skipDbSync) {
+        await this.syncFromDatabase(true);
+      }
+
+      const dbReadyForMaintenance =
+        !hasConfiguredDb || globals.__dataStackSettingsHydrated === true;
+      if (!dbReadyForMaintenance) {
+        return {
+          ran: false,
+          skippedReason: "DB_UNHYDRATED",
+          compressed: false,
+          archivedOrPruned: false,
+        };
+      }
+
+      const settings = getSettingsState();
+      const now = Date.now();
+      let compressed = false;
+      let archivedOrPruned = false;
+
+      if (
+        settings.compressAfterDays > 0 &&
+        !globals.__dataStackCompressInFlight
+      ) {
+        const prevComp = globals.__dataStackLastCompressMeta;
+        const shouldCompress =
+          Boolean(options?.forceCompress) ||
+          !prevComp ||
+          prevComp.days !== settings.compressAfterDays ||
+          now - prevComp.ranAtMs >= COMPRESS_COOLDOWN_MS;
+        if (shouldCompress) {
+          globals.__dataStackLastCompressMeta = {
+            days: settings.compressAfterDays,
+            ranAtMs: now,
+          };
+          globals.__dataStackCompressInFlight = true;
+          try {
+            await CSVStorageManager.compressOldPartitionsAsync(
+              settings.compressAfterDays,
+            );
+            compressed = true;
+          } catch (err) {
+            console.warn(
+              "[DataStack Storage] Scheduled partition compression failed:",
+              err,
+            );
+          } finally {
+            globals.__dataStackCompressInFlight = false;
+          }
+        }
+      }
+
+      if (
+        settings.autoPruneDays > 0 &&
+        !globals.__dataStackArchivePruneInFlight
+      ) {
+        const prevPrune = globals.__dataStackLastPruneMeta;
+        const shouldPrune =
+          Boolean(options?.forcePrune) ||
+          !prevPrune ||
+          prevPrune.days !== settings.autoPruneDays ||
+          now - prevPrune.ranAtMs >= PRUNE_COOLDOWN_MS;
+        if (shouldPrune) {
+          globals.__dataStackLastPruneMeta = {
+            days: settings.autoPruneDays,
+            ranAtMs: now,
+          };
+          globals.__dataStackArchivePruneInFlight = true;
+          try {
+            await this.executeArchiveAndPrune(settings);
+            archivedOrPruned = true;
+          } catch (err) {
+            console.warn(
+              "[DataStack Storage] Scheduled partition prune/archive failed:",
+              err,
+            );
+          } finally {
+            globals.__dataStackArchivePruneInFlight = false;
+          }
+        }
+      }
+
+      return { ran: true, compressed, archivedOrPruned };
+    } finally {
+      globals.__dataStackMaintenanceRunning = false;
+    }
+  }
+
   private static applyRuntimeSettings(
     settings: AdminSettings,
     forcePrune = false,
     forceCompress = false,
+    skipBackgroundMaintenance = false,
   ) {
     SecurityEngine.maxEventsPerSec = settings.maxEventsPerSec;
     SecurityEngine.enableIdempotency = settings.enableIdempotency;
@@ -271,11 +449,19 @@ export class SettingsManager {
       AuthService.setSecret(settings.jwtSecret);
     }
     CSVStorageManager.maxFileSizeBytes = settings.fileRotationMb * 1024 * 1024;
+    this.ensureMaintenanceScheduler();
+    if (skipBackgroundMaintenance) {
+      return;
+    }
     const hasConfiguredDb = Boolean(process.env.DATABASE_URL?.trim());
     const dbReadyForMaintenance =
       !hasConfiguredDb || globals.__dataStackSettingsHydrated === true;
 
-    if (settings.compressAfterDays > 0 && dbReadyForMaintenance) {
+    if (
+      settings.compressAfterDays > 0 &&
+      dbReadyForMaintenance &&
+      !globals.__dataStackCompressInFlight
+    ) {
       const prevComp = globals.__dataStackLastCompressMeta;
       const now = Date.now();
       const shouldCompress =
@@ -288,18 +474,27 @@ export class SettingsManager {
           days: settings.compressAfterDays,
           ranAtMs: now,
         };
+        globals.__dataStackCompressInFlight = true;
         void CSVStorageManager.compressOldPartitionsAsync(
           settings.compressAfterDays,
-        ).catch((err) => {
-          console.warn(
-            "[DataStack Storage] Background partition compression failed:",
-            err,
-          );
-        });
+        )
+          .catch((err) => {
+            console.warn(
+              "[DataStack Storage] Background partition compression failed:",
+              err,
+            );
+          })
+          .finally(() => {
+            globals.__dataStackCompressInFlight = false;
+          });
       }
     }
 
-    if (settings.autoPruneDays > 0 && dbReadyForMaintenance) {
+    if (
+      settings.autoPruneDays > 0 &&
+      dbReadyForMaintenance &&
+      !globals.__dataStackArchivePruneInFlight
+    ) {
       const prev = globals.__dataStackLastPruneMeta;
       const now = Date.now();
       const shouldPrune =
@@ -312,17 +507,24 @@ export class SettingsManager {
           days: settings.autoPruneDays,
           ranAtMs: now,
         };
-        void this.executeArchiveAndPrune(settings).catch((err) => {
-          console.warn(
-            "[DataStack Storage] Background async partition prune/archive failed:",
-            err,
-          );
-        });
+        globals.__dataStackArchivePruneInFlight = true;
+        void this.executeArchiveAndPrune(settings)
+          .catch((err) => {
+            console.warn(
+              "[DataStack Storage] Background async partition prune/archive failed:",
+              err,
+            );
+          })
+          .finally(() => {
+            globals.__dataStackArchivePruneInFlight = false;
+          });
       }
     }
   }
 
-  private static async syncFromDatabase(): Promise<AdminSettings | null> {
+  private static async syncFromDatabase(
+    skipBackgroundMaintenance = false,
+  ): Promise<AdminSettings | null> {
     const pool = DatabaseEngine.getPool();
     if (!pool) return null;
 
@@ -414,7 +616,12 @@ export class SettingsManager {
         };
         globals.__dataStackAdminSettings = loaded;
         globals.__dataStackSettingsHydrated = true;
-        this.applyRuntimeSettings(loaded);
+        this.applyRuntimeSettings(
+          loaded,
+          false,
+          false,
+          skipBackgroundMaintenance,
+        );
         return loaded;
       }
 
@@ -625,6 +832,19 @@ export class SettingsManager {
       process.env.INGESTION_INTERNAL_URL || "http://127.0.0.1:4000"
     ).replace(/\/$/, "");
 
+    let decryptedWebhookSecret = "";
+    if (settings.webhookSecretEnc) {
+      try {
+        decryptedWebhookSecret = decryptSecret(settings.webhookSecretEnc);
+      } catch (vaultErr: unknown) {
+        console.warn(
+          "[DataStack Bridge] Stored webhook secret could not be decrypted during Port 4000 settings sync; continuing with empty webhook secret:",
+          vaultErr instanceof Error ? vaultErr.message : vaultErr,
+        );
+        decryptedWebhookSecret = "";
+      }
+    }
+
     try {
       const res = await fetch(`${ingestionBaseUrl}/internal/settings-sync`, {
         method: "POST",
@@ -645,6 +865,7 @@ export class SettingsManager {
           diskPauseThresholdPct: settings.diskPauseThresholdPct,
           enableWebhookAlerts: settings.enableWebhookAlerts,
           webhookUrl: settings.webhookUrl,
+          webhookSecret: decryptedWebhookSecret,
           webhookCooldownSec: settings.webhookCooldownSec,
           ...(jwtSecretChanged ? { jwtSecret: settings.jwtSecret } : {}),
         }),

@@ -31,6 +31,7 @@ interface StorageFile {
   sizeBytes: number;
   linesCount: number;
   modifiedAt: string;
+  compressed?: boolean;
 }
 
 type ExportFormat = 'csv' | 'json' | 'ndjson';
@@ -487,13 +488,17 @@ export function ExportWorkspace() {
               No files
             </p>
           ) : (
-            sortedRecentFiles.map((file) => (
+            sortedRecentFiles.map((file) => {
+              const isCompressed = Boolean(
+                file.compressed || file.filename.toLowerCase().endsWith('.csv.gz')
+              );
+              return (
               <div
                 key={`${file.clientId}/${file.filename}`}
                 className="flex items-center gap-2 px-3 py-2 transition-colors hover:bg-[var(--surface-2)]"
               >
                 <span className="shrink-0 border border-[var(--border-strong)] px-1 py-0.5 font-mono text-[9px] uppercase tracking-wider text-[var(--text-muted)]">
-                  CSV
+                  {isCompressed ? 'CSV.GZ' : 'CSV'}
                 </span>
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-mono text-[11.5px] text-[var(--text)]">
@@ -516,7 +521,8 @@ export function ExportWorkspace() {
                   onClick={() => downloadFile(file)}
                 />
               </div>
-            ))
+              );
+            })
           )}
         </Panel>
       </div>

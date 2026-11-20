@@ -1,6 +1,7 @@
 'use client';
 
 import { PageShell } from '@/components/layout/PageShell';
+import { useVconRole } from '@/components/layout/VconShell';
 import { Button } from '@/components/ui/Button';
 import { FormSwitch } from '@/components/ui/Form';
 import { Input } from '@/components/ui/Input';
@@ -22,6 +23,7 @@ import {
   DEFAULT_S3_SETTINGS,
   describeSettingsBridgeSync,
   type EditableSettings,
+  getVconRoleCapabilities,
   mapBridgeStatusToSocketUiState,
   normalizeAlertingSettings,
   normalizeEditableSettings,
@@ -56,11 +58,12 @@ interface PublicSettings
 }
 
 interface DiskUsageSummary {
-  available: boolean;
+  available?: boolean;
   usedPct: number;
-  freeBytes: number;
+  freeBytes?: number;
+  availableBytes?: number;
   totalBytes: number;
-  checkedAt?: string;
+  checkedAt?: string | number;
 }
 
 const TABS = [
@@ -90,6 +93,8 @@ function formatGiB(bytes: number): string {
 }
 
 export function SettingsWorkspace() {
+  const currentRole = useVconRole();
+  const { canAdminSettings, canOperate } = getVconRoleCapabilities(currentRole);
   const { success, warning, error } = useToast();
   const [savedSettings, setSavedSettings] = useState<EditableSettings>(() =>
     normalizeEditableSettings(
@@ -333,7 +338,20 @@ export function SettingsWorkspace() {
           )
         );
         if (storageData.diskUsage && typeof storageData.diskUsage === 'object') {
-          setDiskUsage(storageData.diskUsage as DiskUsageSummary);
+          const rawDisk = storageData.diskUsage as DiskUsageSummary;
+          const totalBytes = Number(rawDisk.totalBytes) || 0;
+          const freeBytes = Number(rawDisk.freeBytes ?? rawDisk.availableBytes) || 0;
+          setDiskUsage({
+            ...rawDisk,
+            available:
+              rawDisk.available !== undefined
+                ? Boolean(rawDisk.available)
+                : totalBytes > 0,
+            usedPct: Number(rawDisk.usedPct) || 0,
+            freeBytes,
+            availableBytes: freeBytes,
+            totalBytes,
+          });
         }
         if (metricsData) {
           setActiveSockets(Number(metricsData.activeSockets) || 0);
@@ -535,6 +553,7 @@ export function SettingsWorkspace() {
   };
 
   const handleTestWebhookAlert = async () => {
+    if (!canAdminSettings) return;
     setTestingWebhook(true);
     setWebhookTestStatus(null);
     try {
@@ -574,6 +593,7 @@ export function SettingsWorkspace() {
   };
 
   const handleTestS3Connection = async () => {
+    if (!canAdminSettings) return;
     setTestingS3(true);
     setS3ActionStatus(null);
     try {
@@ -617,6 +637,7 @@ export function SettingsWorkspace() {
   };
 
   const handleArchiveNow = async () => {
+    if (!canOperate) return;
     if (s3ConfigDirty) {
       warning('Unsaved S3 settings', 'Save your S3 credentials before archiving.');
       return;
@@ -657,6 +678,7 @@ export function SettingsWorkspace() {
 
   const handleFormSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (!canAdminSettings) return;
     const validation = validateEditableSettingsDraft(
       numericDrafts,
       enableIdempotency
@@ -787,6 +809,15 @@ export function SettingsWorkspace() {
         ]}
       />
 
+      {!canAdminSettings && (
+        <div
+          role="status"
+          className="border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-[12px] text-[var(--text-muted)]"
+        >
+          Read-only configuration ({currentRole}) — only owners can modify platform settings, credentials, or run credential diagnostics.
+        </div>
+      )}
+
       <div className="w-full">
         <SettingsTabs
           items={TABS}
@@ -827,6 +858,7 @@ export function SettingsWorkspace() {
                       type="number"
                       min={SETTINGS_LIMITS.maxEventsPerSec.min}
                       max={SETTINGS_LIMITS.maxEventsPerSec.max}
+                      disabled={!canAdminSettings}
                       value={numericDrafts.maxEventsPerSec}
                       error={fieldErrors.maxEventsPerSec}
                       onChange={(event) =>
@@ -838,6 +870,7 @@ export function SettingsWorkspace() {
                     <FormSwitch
                       label="Deduplicate events"
                       checked={enableIdempotency}
+                      disabled={!canAdminSettings}
                       onChange={setEnableIdempotency}
                     />
                   </SettingsField>
@@ -916,6 +949,7 @@ export function SettingsWorkspace() {
                       type="number"
                       min={SETTINGS_LIMITS.batchFlushThreshold.min}
                       max={SETTINGS_LIMITS.batchFlushThreshold.max}
+                      disabled={!canAdminSettings}
                       value={numericDrafts.batchFlushThreshold}
                       error={fieldErrors.batchFlushThreshold}
                       onChange={(event) =>
@@ -930,6 +964,7 @@ export function SettingsWorkspace() {
                       min={SETTINGS_LIMITS.batchFlushIntervalMs.min}
                       max={SETTINGS_LIMITS.batchFlushIntervalMs.max}
                       suffix="ms"
+                      disabled={!canAdminSettings}
                       value={numericDrafts.batchFlushIntervalMs}
                       error={fieldErrors.batchFlushIntervalMs}
                       onChange={(event) =>
@@ -963,7 +998,7 @@ export function SettingsWorkspace() {
                         </span>
                         {diskUsage?.available && (
                           <span className="text-[10.5px] text-[var(--text-muted)]">
-                            {formatGiB(diskUsage.freeBytes)} free /{' '}
+                            {formatGiB(diskUsage.freeBytes ?? diskUsage.availableBytes ?? 0)} free /{' '}
                             {formatGiB(diskUsage.totalBytes)}
                           </span>
                         )}
@@ -995,6 +1030,7 @@ export function SettingsWorkspace() {
                       min={SETTINGS_LIMITS.fileRotationMb.min}
                       max={SETTINGS_LIMITS.fileRotationMb.max}
                       suffix="MB"
+                      disabled={!canAdminSettings}
                       value={numericDrafts.fileRotationMb}
                       error={fieldErrors.fileRotationMb}
                       onChange={(event) =>
@@ -1010,6 +1046,7 @@ export function SettingsWorkspace() {
                       min={SETTINGS_LIMITS.autoPruneDays.min}
                       max={SETTINGS_LIMITS.autoPruneDays.max}
                       suffix="days"
+                      disabled={!canAdminSettings}
                       value={numericDrafts.autoPruneDays}
                       error={fieldErrors.autoPruneDays}
                       onChange={(event) =>
@@ -1025,6 +1062,7 @@ export function SettingsWorkspace() {
                       min={SETTINGS_LIMITS.compressAfterDays.min}
                       max={SETTINGS_LIMITS.compressAfterDays.max}
                       suffix="days"
+                      disabled={!canAdminSettings}
                       value={numericDrafts.compressAfterDays}
                       error={fieldErrors.compressAfterDays}
                       onChange={(event) =>
@@ -1040,6 +1078,7 @@ export function SettingsWorkspace() {
                       min={SETTINGS_LIMITS.diskPauseThresholdPct.min}
                       max={SETTINGS_LIMITS.diskPauseThresholdPct.max}
                       suffix="%"
+                      disabled={!canAdminSettings}
                       value={numericDrafts.diskPauseThresholdPct}
                       error={fieldErrors.diskPauseThresholdPct}
                       onChange={(event) =>
@@ -1055,6 +1094,7 @@ export function SettingsWorkspace() {
                     <FormSwitch
                       label="Enable off-site S3 / R2 backup"
                       checked={s3Draft.enableS3Backup}
+                      disabled={!canAdminSettings}
                       onChange={(checked) =>
                         setS3Draft((prev) => ({ ...prev, enableS3Backup: checked }))
                       }
@@ -1064,6 +1104,7 @@ export function SettingsWorkspace() {
                     <Input
                       compact
                       placeholder="https://<account>.r2.cloudflarestorage.com"
+                      disabled={!canAdminSettings}
                       value={s3Draft.s3Endpoint}
                       onChange={(event) =>
                         setS3Draft((prev) => ({
@@ -1078,6 +1119,7 @@ export function SettingsWorkspace() {
                     <Input
                       compact
                       placeholder="auto"
+                      disabled={!canAdminSettings}
                       value={s3Draft.s3Region}
                       onChange={(event) =>
                         setS3Draft((prev) => ({
@@ -1092,6 +1134,7 @@ export function SettingsWorkspace() {
                     <Input
                       compact
                       placeholder="my-datastack-archive"
+                      disabled={!canAdminSettings}
                       value={s3Draft.s3Bucket}
                       onChange={(event) =>
                         setS3Draft((prev) => ({
@@ -1106,6 +1149,7 @@ export function SettingsWorkspace() {
                     <Input
                       compact
                       placeholder="datastack/"
+                      disabled={!canAdminSettings}
                       value={s3Draft.s3Prefix}
                       onChange={(event) =>
                         setS3Draft((prev) => ({
@@ -1120,6 +1164,7 @@ export function SettingsWorkspace() {
                     <Input
                       compact
                       placeholder="AKIA... / R2 Access Key ID"
+                      disabled={!canAdminSettings}
                       value={s3Draft.s3AccessKeyId}
                       onChange={(event) =>
                         setS3Draft((prev) => ({
@@ -1136,6 +1181,7 @@ export function SettingsWorkspace() {
                         compact
                         type="password"
                         autoComplete="new-password"
+                        disabled={!canAdminSettings}
                         value={s3SecretAccessKey}
                         onChange={(event) => {
                           setS3SecretAccessKey(event.target.value);
@@ -1155,6 +1201,7 @@ export function SettingsWorkspace() {
                           type="button"
                           size="xs"
                           variant={clearS3SecretKey ? 'danger' : 'ghost'}
+                          disabled={!canAdminSettings}
                           onClick={() => {
                             setClearS3SecretKey((prev) => !prev);
                             setS3SecretAccessKey('');
@@ -1174,7 +1221,7 @@ export function SettingsWorkspace() {
                           variant="secondary"
                           icon="Plug"
                           loading={testingS3}
-                          disabled={testingS3 || archivingNow}
+                          disabled={!canAdminSettings || testingS3 || archivingNow}
                           onClick={() => void handleTestS3Connection()}
                         >
                           Test S3 Connection
@@ -1185,7 +1232,7 @@ export function SettingsWorkspace() {
                           variant="secondary"
                           icon="UploadCloud"
                           loading={archivingNow}
-                          disabled={testingS3 || archivingNow || s3ConfigDirty}
+                          disabled={!canOperate || testingS3 || archivingNow || s3ConfigDirty}
                           onClick={() => void handleArchiveNow()}
                         >
                           Archive Now
@@ -1233,6 +1280,7 @@ export function SettingsWorkspace() {
                       compact
                       type="password"
                       autoComplete="new-password"
+                      disabled={!canAdminSettings}
                       value={jwtSecret}
                       error={jwtError}
                       onChange={(event) => {
@@ -1252,6 +1300,7 @@ export function SettingsWorkspace() {
                       min={SETTINGS_LIMITS.maxPayloadSizeKb.min}
                       max={SETTINGS_LIMITS.maxPayloadSizeKb.max}
                       suffix="KB"
+                      disabled={!canAdminSettings}
                       value={numericDrafts.maxPayloadSizeKb}
                       error={fieldErrors.maxPayloadSizeKb}
                       onChange={(event) =>
@@ -1267,6 +1316,7 @@ export function SettingsWorkspace() {
                     <FormSwitch
                       label="Enable webhook alerts (Slack / Discord / JSON)"
                       checked={alertingDraft.enableWebhookAlerts}
+                      disabled={!canAdminSettings}
                       onChange={(checked) =>
                         setAlertingDraft((prev) => ({
                           ...prev,
@@ -1279,6 +1329,7 @@ export function SettingsWorkspace() {
                     <Input
                       compact
                       placeholder="https://hooks.slack.com/services/..."
+                      disabled={!canAdminSettings}
                       value={alertingDraft.webhookUrl}
                       onChange={(event) =>
                         setAlertingDraft((prev) => ({
@@ -1295,6 +1346,7 @@ export function SettingsWorkspace() {
                         compact
                         type="password"
                         autoComplete="new-password"
+                        disabled={!canAdminSettings}
                         value={webhookSecret}
                         onChange={(event) => {
                           setWebhookSecret(event.target.value);
@@ -1314,6 +1366,7 @@ export function SettingsWorkspace() {
                           type="button"
                           size="xs"
                           variant={clearWebhookSecret ? 'danger' : 'ghost'}
+                          disabled={!canAdminSettings}
                           onClick={() => {
                             setClearWebhookSecret((prev) => !prev);
                             setWebhookSecret('');
@@ -1331,6 +1384,7 @@ export function SettingsWorkspace() {
                       min={SETTINGS_LIMITS.webhookCooldownSec.min}
                       max={SETTINGS_LIMITS.webhookCooldownSec.max}
                       suffix="sec"
+                      disabled={!canAdminSettings}
                       value={numericDrafts.webhookCooldownSec}
                       error={fieldErrors.webhookCooldownSec}
                       onChange={(event) =>
@@ -1348,7 +1402,7 @@ export function SettingsWorkspace() {
                           variant="secondary"
                           icon="Bell"
                           loading={testingWebhook}
-                          disabled={testingWebhook}
+                          disabled={!canAdminSettings || testingWebhook}
                           onClick={() => void handleTestWebhookAlert()}
                         >
                           Send Test Alert
@@ -1375,6 +1429,7 @@ export function SettingsWorkspace() {
                     <FormSwitch
                       label="Enable /api/prometheus scrape endpoint"
                       checked={alertingDraft.enablePrometheusMetrics}
+                      disabled={!canAdminSettings}
                       onChange={(checked) =>
                         setAlertingDraft((prev) => ({
                           ...prev,
@@ -1397,6 +1452,7 @@ export function SettingsWorkspace() {
                         compact
                         type="password"
                         autoComplete="new-password"
+                        disabled={!canAdminSettings}
                         value={prometheusMetricsToken}
                         onChange={(event) => {
                           setPrometheusMetricsToken(event.target.value);
@@ -1416,6 +1472,7 @@ export function SettingsWorkspace() {
                           type="button"
                           size="xs"
                           variant={clearPrometheusToken ? 'danger' : 'ghost'}
+                          disabled={!canAdminSettings}
                           onClick={() => {
                             setClearPrometheusToken((prev) => !prev);
                             setPrometheusMetricsToken('');
@@ -1435,11 +1492,21 @@ export function SettingsWorkspace() {
                 <>
                   <span
                     className={`h-1.5 w-1.5 ${
-                      isDirty ? 'bg-[var(--warning)]' : 'bg-[var(--accent)]'
+                      !canAdminSettings
+                        ? 'bg-[var(--text-faint)]'
+                        : isDirty
+                          ? 'bg-[var(--warning)]'
+                          : 'bg-[var(--accent)]'
                     }`}
                   />
                   <span>
-                    {loading ? 'Loading' : isDirty ? 'Unsaved changes' : 'Saved'}
+                    {loading
+                      ? 'Loading'
+                      : !canAdminSettings
+                        ? `Read-only (${currentRole})`
+                        : isDirty
+                          ? 'Unsaved changes'
+                          : 'Saved'}
                   </span>
                 </>
               }
@@ -1447,7 +1514,7 @@ export function SettingsWorkspace() {
               <Button
                 type="button"
                 size="xs"
-                disabled={!isDirty || saving}
+                disabled={!canAdminSettings || !isDirty || saving}
                 onClick={discardChanges}
               >
                 Discard
@@ -1458,7 +1525,7 @@ export function SettingsWorkspace() {
                 size="xs"
                 icon="Save"
                 loading={saving}
-                disabled={loading || !isDirty}
+                disabled={!canAdminSettings || loading || !isDirty}
               >
                 Save
               </Button>
