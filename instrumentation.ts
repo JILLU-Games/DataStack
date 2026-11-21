@@ -5,6 +5,17 @@ export async function register(): Promise<void> {
     }
 
     try {
+      const {
+        installRuntimeLogHook,
+        syncStandaloneBuildArtifactsToLogsDir,
+      } = await import("@/core/logs/runtimeLogCapture");
+      installRuntimeLogHook("web");
+      syncStandaloneBuildArtifactsToLogsDir();
+    } catch {
+      // Non-fatal if runtime log hook cannot initialize
+    }
+
+    try {
       const { SettingsManager } = await import(
         "@/core/adminSettings/settingsManager"
       );

@@ -357,7 +357,7 @@ test("R4-Phase-01 [AUDIT-01 / ERR-R4-01]: API routes (/api/settings, /api/settin
   }
 });
 
-test("R4-Phase-01 [AUDIT-03 / ERR-R4-02]: Port 4000 ensureDatabaseSchema creates all 7 tables including admin_team_members and admin_audit_logs", async () => {
+test("R4-Phase-01 [AUDIT-03 / ERR-R4-02]: Port 4000 ensureDatabaseSchema creates all 8 tables including admin_team_members, admin_audit_logs, and mcp_settings", async () => {
   const executedSql: string[] = [];
   const mockPool = {
     async query(sql: string) {
@@ -375,7 +375,7 @@ test("R4-Phase-01 [AUDIT-03 / ERR-R4-02]: Port 4000 ensureDatabaseSchema creates
     assert.equal(synced, true);
 
     const createStatements = executedSql.filter((s) => /CREATE TABLE IF NOT EXISTS/i.test(s));
-    assert.equal(createStatements.length, 7, "Port 4000 must create all 7 tables");
+    assert.equal(createStatements.length, 8, "Port 4000 must create all 8 tables");
     const joined = createStatements.join("\n");
     for (const tableName of [
       "client_sdks",
@@ -385,6 +385,7 @@ test("R4-Phase-01 [AUDIT-03 / ERR-R4-02]: Port 4000 ensureDatabaseSchema creates
       "admin_login_attempts",
       "admin_team_members",
       "admin_audit_logs",
+      "mcp_settings",
     ]) {
       assert.ok(
         joined.includes(tableName),

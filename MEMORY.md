@@ -1,7 +1,7 @@
 # MEMORY.md — DataStack Cross-IDE Persistent Project Memory
 
 > **Last Synchronized**: 2026-11-21  
-> **Status**: **`R4` Production Hardening (`BASELINE-2026-11-20-R4`: `4 / 4` Phases Complete — All `R4-Phase-01`..`04` Complete & Verified (`AUDIT-01`–`20`, `19 / 19` actionable findings resolved)).**  
+> **Status**: **`R5-MCP` (`BASELINE-2026-11-21-R5-MCP`: `1 / 3` Phases Complete — `R5-Phase-01` Complete & Verified; `R4` `4/4` & `PREPUSH-FIX-01` `5/5` Preserved).**  
 > **Scope Rule**: Maintain this file accurately across VS Code, Google Antigravity, Cursor, and any other IDE after every modification, feature update, or bug fix (see `.ai-rules` and `AGENTS.md`).
 
 ---
@@ -423,6 +423,15 @@ All planned hardening & deployment phases (**Phase-01 through Phase-07**) are **
           - **`DEPLOY-BUG-02`**: Hardened `docker/coolify-nginx.conf` and `nginx/default.conf` with `ngx_http_realip_module` (`set_real_ip_from` loopback/RFC1918/Docker bridges + IPv6 ULA, `real_ip_header X-Forwarded-For`, `real_ip_recursive on`) so `proxy_set_header X-Real-IP $remote_addr` preserves real external client IPs behind Coolify Traefik without permitting untrusted public IP spoofing.
           - **`DEPLOY-BUG-03` & `DEPLOY-BUG-04`**: Added `ARG INGESTION_INTERNAL_URL=http://ingestion:4000` + `ENV INGESTION_INTERNAL_URL` in `docker/Dockerfile.web` `builder` stage for standalone Next.js rewrites, and forwarded optional `DATASTACK_ALLOW_PRIVATE_URLS`, `DATASTACK_MAX_BATCH_ITEMS`, `DATASTACK_RECENT_LIMIT`, `DATASTACK_MAINTENANCE_INTERVAL_MS`, and `DATASTACK_PROXY_MODE` env vars in `docker/docker-compose.yml`.
           - **`DEPLOY-BUG-05`**: Updated `sdk/node/datastack/index.ts` (`emitSocketSingle` and `sendBatchChunkInternal`) to call `this.disconnect()` on terminal `DataStackAuthError` rejections (`TOKEN_ROTATED`, `CLIENT_REVOKED`, etc.) and recompiled `sdk/node/datastack/dist/*` so subsequent `client.connect()` performs a fresh handshake (`tests/r3-phase03-sdk-parity.test.ts` `5/5` PASS).
+      - **`R5-MCP` Planning, Foundation & Server Track (`BASELINE-2026-11-21-R5-MCP`)**:
+        - Froze post-`R4` / post-`PREPUSH-FIX-01` codebase and documented the full 8-item raw-source-verified MCP forensic audit (`MCP-AUDIT-01`–`MCP-AUDIT-08`), Scope Locks, A–Z 3-phase roadmap (`R5-Phase-01`–`03`), Phase Execution Log, `ERR-R5-01`–`09` error contracts, and Actual Status Ledger across `/notes/`.
+        - **`R5-Phase-01` Complete & Verified (`2026-11-21`)** (`MCP-AUDIT-02` Complete; `MCP-AUDIT-03/04/05/07` Foundation; `ERR-R5-01` & `ERR-R5-02`):
+          - Added 8th PostgreSQL table `mcp_settings` identically in `core/Database/database.ts` and `server/index.js` (`ensureDatabaseSchema()`).
+          - Created TS (`core/logs/runtimeLogCapture.ts`) and CJS (`server/runtimeLogCapture.js`) bounded rotating runtime/build log writers & readers (`.runtime-logs/{web,ingestion}.log`, max 2MB + `.1` backup, secret redaction for Bearer/`dsmcp_`/JWT/JSON keys, graceful `LOG_CAPTURE_UNAVAILABLE` fallback), wired into `instrumentation.ts`, `server/index.js`, `scripts/start-all.js`, and `scripts/dev-all.js` (`DATASTACK_LOG_CAPTURED_BY_RUNNER=1` prevents duplicate tee writes).
+          - Created `scripts/capture-build-log.js` (`package.json` `"build"`) and updated `docker/Dockerfile.web` so standalone Next.js builds emit `.next/standalone/build.log`, `.next/standalone/build-meta.json`, and `.runtime-logs/last-build*`.
+          - Created `core/mcp/mcpSettings.ts` (`McpSettingsManager` with default `enabled: false`, `17` permission definitions across 4 categories, `dsmcp_` token generation + SHA-256 digest + AES-256-GCM vault encryption, IP CIDR validation, SSRF-guarded `coolifyUrl`, PG/RAM roundtrip, and `POST /internal/mcp-sync` notifier) and added `MCP_*` action types + secret redactions in `core/auth/auditLog.ts`.
+          - Added `middleware.ts` internal secret pass + timing-safe `/api/internal/mcp` bridge (`app/api/internal/mcp/route.ts`) supporting metrics, runtime/build logs, audit queries, client CRUD, safe settings updates, CSV+buffer data queries, storage stats/flush, and S3 archive.
+          - **Verified**: `5/5` `tests/r5-phase01-mcp-foundation-logs.test.ts` + `78/78` regression checks across 8 suites (`83/83` PASS), `compile_applet` (`npm run build` -> `.next/standalone/build.log` + `build-meta.json` generated), `lint_applet` (`eslint .` -> `0` errors), and `npm ci --include=dev --dry-run` / `--omit=dev --dry-run` clean. Ready for `Proceed to R5-Phase-02`.
 
 ---
 

@@ -22,6 +22,10 @@ export type AuditActionType =
   | "WEBHOOK_TEST_TRIGGERED"
   | "FILES_MANAGER_MUTATION"
   | "DATA_EXPORT_DOWNLOADED"
+  | "MCP_SETTINGS_UPDATED"
+  | "MCP_TOKEN_ROTATED"
+  | "MCP_TOOL_CALLED"
+  | "MCP_TOOL_DENIED"
   | string;
 
 export interface AuditLogEntry {
@@ -98,6 +102,13 @@ function sanitizeMetadata(
     "webhookSecretEnc",
     "prometheusMetricsToken",
     "prometheusMetricsTokenEnc",
+    "mcpToken",
+    "mcpBearerToken",
+    "issuedToken",
+    "tokenHash",
+    "tokenEnc",
+    "coolifyToken",
+    "coolifyTokenEnc",
   ]);
   const clean: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(metadata)) {

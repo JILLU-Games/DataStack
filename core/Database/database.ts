@@ -109,6 +109,21 @@ export const CORE_SCHEMA_TABLE_DDLS = [
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `,
+  `
+    CREATE TABLE IF NOT EXISTS mcp_settings (
+      id TEXT PRIMARY KEY DEFAULT 'default',
+      enabled BOOLEAN NOT NULL DEFAULT false,
+      token_hash TEXT NOT NULL DEFAULT '',
+      token_enc TEXT NOT NULL DEFAULT '',
+      token_preview TEXT NOT NULL DEFAULT '',
+      allowed_ips TEXT NOT NULL DEFAULT '',
+      permissions_json TEXT NOT NULL DEFAULT '{}',
+      coolify_url TEXT NOT NULL DEFAULT '',
+      coolify_token_enc TEXT NOT NULL DEFAULT '',
+      coolify_app_uuid TEXT NOT NULL DEFAULT '',
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `,
 ] as const;
 
 export const CORE_SCHEMA_ALTER_DDLS = [

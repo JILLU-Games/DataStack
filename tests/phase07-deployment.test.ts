@@ -444,17 +444,17 @@ test("DEPLOY-BUG-02, 03 & 04: Port 4000 memoizes schema DDLs, hydrates rotated J
     assert.equal(failedSync, false);
     assert.equal(ddlCount, 1);
 
-    // 2. Recovery runs 10 DDLs once (7 CREATE TABLE + 3 ALTER TABLE) and hydrates rotated jwt_secret; repeated calls do zero extra DDLs
+    // 2. Recovery runs 11 DDLs once (8 CREATE TABLE + 3 ALTER TABLE) and hydrates rotated jwt_secret; repeated calls do zero extra DDLs
     failDdl = false;
     ddlCount = 0;
     assert.equal(await ingestionServer.syncSettingsFromDatabase(), true);
-    assert.equal(ddlCount, 10);
+    assert.equal(ddlCount, 11);
     assert.equal(selectCount, 1);
     assert.equal(ingestionServer.runtimeConfig.jwtSecret, rotatedSecret);
 
     assert.equal(await ingestionServer.syncSettingsFromDatabase(), true);
     assert.equal(await ingestionServer.syncSettingsFromDatabase(), true);
-    assert.equal(ddlCount, 10, "Repeated 3s sync ticks must NOT re-run CREATE/ALTER DDL statements");
+    assert.equal(ddlCount, 11, "Repeated 3s sync ticks must NOT re-run CREATE/ALTER DDL statements");
     assert.equal(selectCount, 3);
 
     // 3. Graceful shutdown flushes buffered events, quits Redis, and closes PostgreSQL pool cleanly

@@ -14,6 +14,7 @@ const {
   syncInMemoryAdminSessionState,
   clearInMemoryAdminSessionStateForTests,
 } = require('./filesManager');
+const { installRuntimeLogHook } = require('./runtimeLogCapture');
 
 function parseAllowedCorsOrigins(raw = process.env.DATASTACK_CORS_ORIGINS) {
   if (typeof raw !== 'string') return null;
@@ -1736,6 +1737,21 @@ async function ensureDatabaseSchema() {
         )
       `);
       await pool.query(`
+        CREATE TABLE IF NOT EXISTS mcp_settings (
+          id TEXT PRIMARY KEY DEFAULT 'default',
+          enabled BOOLEAN NOT NULL DEFAULT false,
+          token_hash TEXT NOT NULL DEFAULT '',
+          token_enc TEXT NOT NULL DEFAULT '',
+          token_preview TEXT NOT NULL DEFAULT '',
+          allowed_ips TEXT NOT NULL DEFAULT '',
+          permissions_json TEXT NOT NULL DEFAULT '{}',
+          coolify_url TEXT NOT NULL DEFAULT '',
+          coolify_token_enc TEXT NOT NULL DEFAULT '',
+          coolify_app_uuid TEXT NOT NULL DEFAULT '',
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await pool.query(`
         ALTER TABLE client_sdks
           ADD COLUMN IF NOT EXISTS rate_limit INTEGER NOT NULL DEFAULT 100,
           ADD COLUMN IF NOT EXISTS storage_quota_mb INTEGER NOT NULL DEFAULT 0,
@@ -2393,6 +2409,9 @@ async function gracefulShutdown(signal, options = {}) {
 }
 
 async function startIngestionServer() {
+  if (process.env.DATASTACK_DISABLE_LISTEN !== '1') {
+    installRuntimeLogHook('ingestion');
+  }
   if (dbPool) {
     await Promise.race([
       syncSettingsFromDatabase().catch(() => false),

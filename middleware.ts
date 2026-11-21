@@ -7,12 +7,15 @@ import { NextRequest, NextResponse } from "next/server";
 const SESSION_COOKIE = "datastack_admin_session";
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
-function isProtectedApi(pathname: string, method: string) {
+function isProtectedApi(pathname: string, method: string, hasInternalSecretHeader: boolean) {
   if (pathname === "/api/auth/login") return false;
   if (pathname === "/api/auth/setup" && method === "POST") return false;
   if (pathname === "/api/events" && method === "POST") return false;
   if (pathname === "/api/health" && method === "GET") return false;
   if (pathname === "/api/prometheus" && method === "GET") return false;
+  if (pathname === "/api/internal/mcp" && method === "POST" && hasInternalSecretHeader) {
+    return false;
+  }
   return pathname.startsWith("/api/");
 }
 
@@ -62,14 +65,26 @@ export async function middleware(request: NextRequest) {
     (pathname === "/vcon" || pathname.startsWith("/vcon/")) &&
     !isLoginPage &&
     !isSetupPage;
-  const isAdminApi = isProtectedApi(pathname, request.method);
+  const hasInternalSecretHeader = Boolean(
+    request.headers.get("x-datastack-internal-secret")?.trim(),
+  );
+  const isAdminApi = isProtectedApi(
+    pathname,
+    request.method,
+    hasInternalSecretHeader,
+  );
   const hasBearerAuth = Boolean(
     request.headers.get("authorization")?.toLowerCase().startsWith("bearer "),
   );
   const isStateChangingApi =
     pathname.startsWith("/api/") &&
     !SAFE_METHODS.has(request.method.toUpperCase()) &&
-    !(pathname === "/api/events" && hasBearerAuth);
+    !(pathname === "/api/events" && hasBearerAuth) &&
+    !(
+      pathname === "/api/internal/mcp" &&
+      request.method.toUpperCase() === "POST" &&
+      hasInternalSecretHeader
+    );
 
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-datastack-pathname", pathname);

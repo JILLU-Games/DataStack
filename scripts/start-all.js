@@ -7,27 +7,51 @@
 
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { appendRuntimeLogLine } = require('../server/runtimeLogCapture');
 
 const webPort = String(process.env.PORT || '3000');
 const nextBin = require.resolve('next/dist/bin/next');
 const serverEntry = path.resolve(__dirname, '..', 'server', 'index.js');
 const GRACEFUL_SHUTDOWN_TIMEOUT_MS = 7000;
 
+const childEnv = {
+  ...process.env,
+  DATASTACK_LOG_CAPTURED_BY_RUNNER: '1',
+};
+
 const webProc = spawn(
   process.execPath,
   [nextBin, 'start', '-p', webPort, '-H', '0.0.0.0'],
   {
-    stdio: 'inherit',
+    stdio: ['inherit', 'pipe', 'pipe'],
     shell: false,
-    env: { ...process.env },
+    env: childEnv,
   },
 );
 
 const serverProc = spawn(process.execPath, [serverEntry], {
-  stdio: 'inherit',
+  stdio: ['inherit', 'pipe', 'pipe'],
   shell: false,
-  env: { ...process.env },
+  env: childEnv,
 });
+
+function wireStreamCapture(proc, serviceName) {
+  if (proc.stdout) {
+    proc.stdout.on('data', (chunk) => {
+      process.stdout.write(chunk);
+      appendRuntimeLogLine(serviceName, 'stdout', chunk.toString('utf8'));
+    });
+  }
+  if (proc.stderr) {
+    proc.stderr.on('data', (chunk) => {
+      process.stderr.write(chunk);
+      appendRuntimeLogLine(serviceName, 'stderr', chunk.toString('utf8'));
+    });
+  }
+}
+
+wireStreamCapture(webProc, 'web');
+wireStreamCapture(serverProc, 'ingestion');
 
 let shuttingDown = false;
 let exitedChildren = 0;
