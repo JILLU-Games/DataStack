@@ -1,0 +1,38 @@
+name: DataStack Python SDK CI
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.gitea/workflows/datastack-python-ci.yml'
+  workflow_dispatch:
+
+jobs:
+  python-sdk-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          github-server-url: https://dev.ivib.cc
+      - name: Isolated Python 3.12 environment
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python --version
+          $venv = Join-Path $env:RUNNER_TEMP 'datastack-python-ci'
+          python -m venv $venv
+          if ($LASTEXITCODE -ne 0) { throw 'Python virtual environment failed' }
+          $py = Join-Path $venv 'Scripts\python.exe'
+          & $py -m pip install -e ./sdk/python/datastack -e ./sdk-python
+          if ($LASTEXITCODE -ne 0) { throw 'Python SDK dependency install failed' }
+          Write-Output 'PYTHON_CI_DEPS_READY'
+      - name: Python SDK full regression
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $py = Join-Path $env:RUNNER_TEMP 'datastack-python-ci\Scripts\python.exe'
+          & $py -m compileall -q ./sdk/python/datastack ./sdk-python
+          if ($LASTEXITCODE -ne 0) { throw 'Python SDK compile failed' }
+          & $py -m unittest discover -s tests -p '*_test.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Python SDK regression failed' }
+          Write-Output 'DATASTACK_PYTHON_REGRESSION_PASS'
