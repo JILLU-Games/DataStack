@@ -9,7 +9,7 @@ export const LandingAbout: React.FC = () => (
       <p className="text-[13px] text-[var(--text-muted)]">Start with the SDK guide and make the workspace your own.</p>
     </div>
     <Link href="/#sdk" className={buttonClassNames({ variant: 'primary', size: 'sm' })}>
-      View Python SDK
+      View Client SDKs
     </Link>
   </section>
 );

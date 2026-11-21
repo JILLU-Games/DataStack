@@ -19,7 +19,7 @@ console.log('\x1b[36m%s\x1b[0m', `  - Port ${webPort}: Next.js 15 Web & Admin Co
 console.log('\x1b[36m%s\x1b[0m', '  - Port 4000: Ingestion & Socket.IO Streaming Engine');
 console.log('\x1b[36m%s\x1b[0m', '=======================================================\n');
 
-const nextProc = spawn(process.execPath, [nextBin, 'dev', '-p', webPort], {
+const nextProc = spawn(process.execPath, [nextBin, 'dev', '-p', webPort, '-H', '0.0.0.0'], {
   stdio: 'inherit',
   shell: false,
   env: { ...process.env },

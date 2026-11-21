@@ -50,6 +50,8 @@ const ACTION_FILTER_OPTIONS = [
   { value: 'STORAGE_FLUSH_TRIGGERED', label: 'STORAGE_FLUSH_TRIGGERED' },
   { value: 'S3_ARCHIVE_TRIGGERED', label: 'S3_ARCHIVE_TRIGGERED' },
   { value: 'WEBHOOK_TEST_TRIGGERED', label: 'WEBHOOK_TEST_TRIGGERED' },
+  { value: 'FILES_MANAGER_MUTATION', label: 'FILES_MANAGER_MUTATION' },
+  { value: 'DATA_EXPORT_DOWNLOADED', label: 'DATA_EXPORT_DOWNLOADED' },
 ];
 
 export function AuditLogViewer() {

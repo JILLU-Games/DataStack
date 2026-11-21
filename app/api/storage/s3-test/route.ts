@@ -71,6 +71,10 @@ export async function POST(req: NextRequest) {
 
     const result = await testS3Connection(config);
     if (!result.ok) {
+      const isClientError =
+        result.code === "S3_INVALID_CONFIG" ||
+        result.code === "SSRF_BLOCKED_HOST" ||
+        result.code === "INVALID_URL";
       return NextResponse.json(
         {
           success: false,
@@ -78,7 +82,7 @@ export async function POST(req: NextRequest) {
           error: result.error || "S3 connectivity check failed.",
           ...(result.status !== undefined ? { s3Status: result.status } : {}),
         },
-        { status: result.code === "S3_INVALID_CONFIG" ? 400 : 502 },
+        { status: isClientError ? 400 : 502 },
       );
     }
 

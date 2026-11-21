@@ -27,10 +27,10 @@ interface AdminProfileData {
   sessionExpiresAt: string;
 }
 
-const DEFAULT_PROFILE: AdminProfileData = {
-  email: 'admin@datastack.dev',
-  role: 'Owner',
-  storageMode: 'In-Memory',
+const EMPTY_PROFILE: AdminProfileData = {
+  email: '',
+  role: '',
+  storageMode: '',
   createdAt: '',
   sessionExpiresAt: '',
 };
@@ -38,10 +38,10 @@ const DEFAULT_PROFILE: AdminProfileData = {
 export function ProfileWorkspace() {
   const { success, error } = useToast();
   const [profile, setProfile] = useState<AdminProfileData>(() =>
-    getCached<AdminProfileData>('vcon:profile', DEFAULT_PROFILE)
+    getCached<AdminProfileData>('vcon:profile', EMPTY_PROFILE)
   );
   const [email, setEmail] = useState(
-    () => getCached<AdminProfileData>('vcon:profile', DEFAULT_PROFILE).email
+    () => getCached<AdminProfileData>('vcon:profile', EMPTY_PROFILE).email
   );
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -183,12 +183,26 @@ export function ProfileWorkspace() {
     >
       <StatStrip
         items={[
-          { label: 'Administrator', value: profile.email },
-          { label: 'Role', value: profile.role, dot: 'ok' },
-          { label: 'Auth Store', value: profile.storageMode },
+          {
+            label: 'Administrator',
+            value: profile.email || (loading ? 'Loading...' : '—'),
+          },
+          {
+            label: 'Role',
+            value: profile.role || (loading ? 'Loading...' : '—'),
+            dot: profile.role ? 'ok' : undefined,
+          },
+          {
+            label: 'Auth Store',
+            value: profile.storageMode || (loading ? 'Loading...' : '—'),
+          },
           {
             label: 'Session Expires',
-            value: formatSessionExpiryLabel(profile.sessionExpiresAt),
+            value: profile.sessionExpiresAt
+              ? formatSessionExpiryLabel(profile.sessionExpiresAt)
+              : loading
+                ? 'Loading...'
+                : 'Active',
           },
         ]}
       />
@@ -200,6 +214,7 @@ export function ProfileWorkspace() {
               <Input
                 compact
                 type="email"
+                placeholder={loading ? 'Loading account email...' : 'admin@company.com'}
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
                 required
@@ -208,7 +223,7 @@ export function ProfileWorkspace() {
             <SettingsField label="Access role">
               <Input
                 compact
-                value={profile.role}
+                value={profile.role || (loading ? 'Loading...' : '—')}
                 readOnly
                 className="border-[var(--border)] bg-[var(--surface-2)] text-[var(--text-muted)]"
               />

@@ -146,6 +146,9 @@ test("V2-Phase-01 [S3 SigV4]: buildS3ObjectKey, normalizeS3EndpointUrl, testS3Co
   const addr = mockS3.address() as AddressInfo;
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "datastack-v2-s3-"));
 
+  const prevAllowPrivate = process.env.DATASTACK_ALLOW_PRIVATE_URLS;
+  process.env.DATASTACK_ALLOW_PRIVATE_URLS = "true";
+
   try {
     const samplePath = path.join(tmpDir, "2026-10-01.csv.gz");
     const gzData = zlib.gzipSync(
@@ -189,6 +192,8 @@ test("V2-Phase-01 [S3 SigV4]: buildS3ObjectKey, normalizeS3EndpointUrl, testS3Co
     assert.equal(uploadErr.code, "S3_ARCHIVE_FAILED");
     assert.match(uploadErr.error || "", /HTTP 500/);
   } finally {
+    if (prevAllowPrivate === undefined) delete process.env.DATASTACK_ALLOW_PRIVATE_URLS;
+    else process.env.DATASTACK_ALLOW_PRIVATE_URLS = prevAllowPrivate;
     await new Promise<void>((resolve) => mockS3.close(() => resolve()));
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
@@ -228,6 +233,9 @@ test("V2-Phase-01 [Compression, Export, S3 Safe Prune V2-E02, Corrupt Gzip V2-E0
 
   await new Promise<void>((resolve) => mockS3.listen(0, "127.0.0.1", resolve));
   const s3Addr = mockS3.address() as AddressInfo;
+
+  const prevAllowPrivate = process.env.DATASTACK_ALLOW_PRIVATE_URLS;
+  process.env.DATASTACK_ALLOW_PRIVATE_URLS = "true";
 
   try {
     const cookie = await makeAdminCookie();
@@ -412,7 +420,7 @@ test("V2-Phase-01 [Compression, Export, S3 Safe Prune V2-E02, Corrupt Gzip V2-E0
     assert.deepEqual(uploadedKeys, [`/prod-vault/archive-test/v2_alpha/${oldDate}.csv.gz`]);
     await fs.stat(gzMeta.filePath);
 
-    // 10. V2-E03: Corrupt .csv.gz cleanly surfaces error in /api/data instead of crashing
+    // 10. V2-E03 upgraded to ERR-R4-07: Corrupt .csv.gz is isolated per-file (returns 200 with corruptPartitions warning instead of crashing all clients)
     await fs.writeFile(
       path.join(tmpDir, "v2_alpha", "2024-01-01.csv.gz"),
       Buffer.from("not-valid-gzip-bytes"),
@@ -423,10 +431,16 @@ test("V2-Phase-01 [Compression, Export, S3 Safe Prune V2-E02, Corrupt Gzip V2-E0
         { headers: { cookie } },
       ),
     );
-    assert.equal(corruptDataRes.status, 500);
+    assert.equal(corruptDataRes.status, 200);
     const corruptJson = await corruptDataRes.json();
-    assert.match(corruptJson.error || "", /Corrupt|\.gz/i);
+    assert.equal(corruptJson.warnings, 1);
+    assert.ok(Array.isArray(corruptJson.corruptPartitions));
+    assert.equal(corruptJson.corruptPartitions.length, 1);
+    assert.equal(corruptJson.corruptPartitions[0].code, "CORRUPT_GZIP_PARTITION");
+    assert.match(corruptJson.corruptPartitions[0].error || "", /Corrupt|\.gz/i);
   } finally {
+    if (prevAllowPrivate === undefined) delete process.env.DATASTACK_ALLOW_PRIVATE_URLS;
+    else process.env.DATASTACK_ALLOW_PRIVATE_URLS = prevAllowPrivate;
     await new Promise<void>((resolve) => mockS3.close(() => resolve()));
     await DataBufferEngine.shutdown();
     CSVStorageManager.baseStorageDir = origBaseStorageDir;

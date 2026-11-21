@@ -153,6 +153,8 @@ self.addEventListener('fetch', (event) => {
   if (
     url.pathname.startsWith('/socket.io/') ||
     url.pathname.startsWith('/api/') ||
+    url.pathname === '/vcon/files-engine' ||
+    url.pathname.startsWith('/vcon/files-engine/') ||
     url.pathname.startsWith('/_next/webpack-hmr')
   ) {
     return;

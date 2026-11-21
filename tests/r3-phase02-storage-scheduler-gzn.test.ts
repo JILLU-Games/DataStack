@@ -227,6 +227,9 @@ test("R3-Phase-02 BUG-05: Singleton periodic scheduler automatically archives ex
   const addr = mockS3.address();
   assert.ok(addr && typeof addr === "object");
 
+  const prevAllowPrivate = process.env.DATASTACK_ALLOW_PRIVATE_URLS;
+  process.env.DATASTACK_ALLOW_PRIVATE_URLS = "true";
+
   try {
     // Configure S3 backup + autoPruneDays (cooldown will be reset so scheduled timer runs)
     await SettingsManager.updateSettingsAsync({
@@ -340,6 +343,8 @@ test("R3-Phase-02 BUG-05: Singleton periodic scheduler automatically archives ex
     assert.equal(unhydratedResult.ran, false);
     assert.equal(unhydratedResult.skippedReason, "DB_UNHYDRATED");
   } finally {
+    if (prevAllowPrivate === undefined) delete process.env.DATASTACK_ALLOW_PRIVATE_URLS;
+    else process.env.DATASTACK_ALLOW_PRIVATE_URLS = prevAllowPrivate;
     SettingsManager.stopMaintenanceSchedulerForTests();
     await new Promise<void>((resolve) => mockS3.close(() => resolve()));
     fs.rmSync(tmpDir, { recursive: true, force: true });

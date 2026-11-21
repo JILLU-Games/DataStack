@@ -25,6 +25,21 @@ const SINGLE_EVENT_ENVELOPE_KEYS = new Set(['eventId', 'timestamp', 'data', 'cli
 const MAX_SINGLE_CLIENT_SCAN_FILES = 10;
 const MAX_ALL_CLIENTS_PER_CLIENT_FILES = 2;
 const MAX_ALL_CLIENTS_TOTAL_SCAN_FILES = 50;
+const DEFAULT_MAX_BATCH_ITEMS = 1000;
+const MIN_BATCH_ITEMS = 1;
+const MAX_BATCH_ITEMS_CEILING = 10000;
+
+function resolveMaxBatchItems(): number {
+  const raw = process.env.DATASTACK_MAX_BATCH_ITEMS;
+  if (raw === undefined || raw.trim() === '') {
+    return DEFAULT_MAX_BATCH_ITEMS;
+  }
+  const parsed = Math.floor(Number(raw));
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_MAX_BATCH_ITEMS;
+  }
+  return Math.min(MAX_BATCH_ITEMS_CEILING, Math.max(MIN_BATCH_ITEMS, parsed));
+}
 
 function generateFallbackEventId(): string {
   return `evt_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
@@ -513,6 +528,36 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // Detect if this is a batch array or direct file-records ingestion request
+    const batchItems: unknown[] | null = Array.isArray(body)
+      ? body
+      : Array.isArray(bodyObj.batch)
+        ? (bodyObj.batch as unknown[])
+        : Array.isArray(bodyObj.records)
+          ? (bodyObj.records as unknown[])
+          : bodyObj.data === undefined && Array.isArray(bodyObj.events)
+            ? (bodyObj.events as unknown[])
+            : null;
+
+    if (batchItems !== null) {
+      const maxBatchItems = resolveMaxBatchItems();
+      if (batchItems.length > maxBatchItems) {
+        return NextResponse.json(
+          {
+            success: false,
+            accepted: 0,
+            processed: 0,
+            rejected: batchItems.length,
+            duplicates: 0,
+            code: 'BATCH_LIMIT_EXCEEDED',
+            error: `BATCH_LIMIT_EXCEEDED: Batch size (${batchItems.length}) exceeds maximum allowed ${maxBatchItems} items per request.`,
+            maxBatchItems,
+          },
+          { status: 400 },
+        );
+      }
+    }
+
     const storageAdmission = await CSVStorageManager.checkStorageAdmissionAsync(
       clientId,
       registeredClient.storageQuotaMb,
@@ -550,18 +595,8 @@ export async function POST(req: NextRequest) {
       settings.maxEventsPerSec ||
       100;
 
-    // Detect if this is a batch array or direct file-records ingestion request
-    const batchItems: unknown[] | null = Array.isArray(body)
-      ? body
-      : Array.isArray(bodyObj.batch)
-        ? (bodyObj.batch as unknown[])
-        : Array.isArray(bodyObj.records)
-          ? (bodyObj.records as unknown[])
-          : bodyObj.data === undefined && Array.isArray(bodyObj.events)
-            ? (bodyObj.events as unknown[])
-            : null;
-
     if (batchItems !== null) {
+
       let processed = 0;
       let rejected = 0;
       let duplicates = 0;

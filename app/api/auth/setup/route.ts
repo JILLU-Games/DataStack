@@ -145,6 +145,8 @@ export async function POST(request: NextRequest) {
       sessionSecret,
       Date.now() + SESSION_SECONDS * 1000,
       1,
+      "owner",
+      "owner-1",
     );
     const response = NextResponse.json({ success: true });
     response.cookies.set(

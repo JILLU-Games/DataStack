@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { Readable } from "node:stream";
+import { validateOutboundUrlAsync } from "@/core/Security/ssrfGuard";
 
 export interface S3ArchiveConfig {
   endpoint: string;
@@ -17,12 +19,38 @@ export interface S3OperationResult {
   bucket?: string;
   key?: string;
   etag?: string;
-  code?: "S3_INVALID_CONFIG" | "S3_CONNECTION_FAILED" | "S3_ARCHIVE_FAILED";
+  code?:
+    | "S3_INVALID_CONFIG"
+    | "S3_CONNECTION_FAILED"
+    | "S3_ARCHIVE_FAILED"
+    | "SSRF_BLOCKED_HOST"
+    | "INVALID_URL";
   error?: string;
 }
 
 function sha256Hex(data: Buffer | string): string {
   return crypto.createHash("sha256").update(data).digest("hex");
+}
+
+async function computeFileSha256AndSize(
+  filePath: string,
+): Promise<{ sha256Hex: string; sizeBytes: number }> {
+  const stat = await fs.promises.stat(filePath);
+  const hash = crypto.createHash("sha256");
+  const readStream = fs.createReadStream(filePath, { highWaterMark: 64 * 1024 });
+  try {
+    for await (const chunk of readStream) {
+      hash.update(chunk as Buffer | string);
+    }
+    return {
+      sha256Hex: hash.digest("hex"),
+      sizeBytes: stat.size,
+    };
+  } finally {
+    if (!readStream.destroyed) {
+      readStream.destroy();
+    }
+  }
 }
 
 function hmacSha256(key: Buffer | string, data: string): Buffer {
@@ -204,6 +232,16 @@ export async function testS3Connection(
       config.endpoint,
       config.region,
     );
+    const ssrfCheck = await validateOutboundUrlAsync(url.toString(), {
+      fieldName: "S3 Endpoint URL",
+    });
+    if (!ssrfCheck.allowed) {
+      return {
+        ok: false,
+        code: ssrfCheck.code || "SSRF_BLOCKED_HOST",
+        error: ssrfCheck.error || "S3 Endpoint URL is blocked.",
+      };
+    }
     const signed = signS3Request({
       method: "GET",
       endpointUrl: url,
@@ -219,8 +257,20 @@ export async function testS3Connection(
       method: "GET",
       headers: signed.headers,
       cache: "no-store",
+      redirect: "manual",
       signal: AbortSignal.timeout(8000),
     });
+
+    if (response.status >= 300 && response.status < 400) {
+      return {
+        ok: false,
+        status: response.status,
+        endpoint: url.origin,
+        bucket: config.bucket.trim(),
+        code: "SSRF_BLOCKED_HOST",
+        error: `S3 endpoint returned an unsupported HTTP ${response.status} redirect.`,
+      };
+    }
 
     if (!response.ok) {
       const bodyPreview = await response.text().catch(() => "");
@@ -272,8 +322,19 @@ export async function uploadFileToS3(
       config.endpoint,
       config.region,
     );
-    const bodyBuffer = await fs.promises.readFile(localFilePath);
-    const payloadHashHex = sha256Hex(bodyBuffer);
+    const ssrfCheck = await validateOutboundUrlAsync(url.toString(), {
+      fieldName: "S3 Endpoint URL",
+    });
+    if (!ssrfCheck.allowed) {
+      return {
+        ok: false,
+        code: ssrfCheck.code || "SSRF_BLOCKED_HOST",
+        error: ssrfCheck.error || "S3 Endpoint URL is blocked.",
+        key: objectKey,
+      };
+    }
+    const { sha256Hex: payloadHashHex, sizeBytes } =
+      await computeFileSha256AndSize(localFilePath);
     const contentType = localFilePath.endsWith(".gz")
       ? "application/gzip"
       : "text/csv; charset=utf-8";
@@ -290,16 +351,41 @@ export async function uploadFileToS3(
       contentType,
     });
 
-    const response = await fetch(signed.targetUrl, {
-      method: "PUT",
-      headers: {
-        ...signed.headers,
-        "content-length": String(bodyBuffer.byteLength),
-      },
-      body: new Uint8Array(bodyBuffer),
-      cache: "no-store",
-      signal: AbortSignal.timeout(30000),
+    const uploadStream = fs.createReadStream(localFilePath, {
+      highWaterMark: 64 * 1024,
     });
+    let response: Response;
+    try {
+      const requestInit: RequestInit & { duplex: "half" } = {
+        method: "PUT",
+        headers: {
+          ...signed.headers,
+          "content-length": String(sizeBytes),
+        },
+        body: Readable.toWeb(uploadStream) as unknown as BodyInit,
+        duplex: "half",
+        cache: "no-store",
+        redirect: "manual",
+        signal: AbortSignal.timeout(30000),
+      };
+      response = await fetch(signed.targetUrl, requestInit);
+    } finally {
+      if (!uploadStream.destroyed) {
+        uploadStream.destroy();
+      }
+    }
+
+    if (response.status >= 300 && response.status < 400) {
+      return {
+        ok: false,
+        status: response.status,
+        endpoint: url.origin,
+        bucket: config.bucket.trim(),
+        key: objectKey,
+        code: "SSRF_BLOCKED_HOST",
+        error: `S3 upload returned an unsupported HTTP ${response.status} redirect.`,
+      };
+    }
 
     if (!response.ok) {
       const bodyPreview = await response.text().catch(() => "");

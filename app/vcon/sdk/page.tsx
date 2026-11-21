@@ -1,6 +1,7 @@
 'use client';
 
 import { PageShell } from '@/components/layout/PageShell';
+import { useVconRole } from '@/components/layout/VconShell';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { CodeBlock } from '@/components/ui/CodeBlock';
@@ -9,7 +10,10 @@ import { Panel } from '@/components/ui/Panel';
 import { StatStrip } from '@/components/ui/StatStrip';
 import { useToast } from '@/components/ui/Toast';
 import { getCached, setCached } from '@/lib/vconCache';
-import { resolvePublicEndpoints } from '@/lib/vconUiHelpers';
+import {
+  getVconRoleCapabilities,
+  resolvePublicEndpoints,
+} from '@/lib/vconUiHelpers';
 import { useEffect, useState } from 'react';
 
 interface SdkClientItem {
@@ -24,6 +28,8 @@ type SdkLanguageTab = 'python' | 'node' | 'curl';
 
 export default function SdkGuidePage() {
   const { success, error } = useToast();
+  const shellRole = useVconRole();
+  const { canOperate } = getVconRoleCapabilities(shellRole);
   const [activeTab, setActiveTab] = useState<SdkLanguageTab>('python');
   const [clients, setClients] = useState<SdkClientItem[]>(() =>
     getCached<SdkClientItem[]>('vcon:clients', [])
@@ -83,8 +89,9 @@ export default function SdkGuidePage() {
   }, []);
 
   useEffect(() => {
-    if (!selectedClientId) {
+    if (!selectedClientId || !canOperate) {
       setSelectedClientToken('');
+      setLoadingToken(false);
       return;
     }
 
@@ -121,7 +128,7 @@ export default function SdkGuidePage() {
     return () => {
       cancelled = true;
     };
-  }, [selectedClientId]);
+  }, [selectedClientId, canOperate]);
 
   const activeClient =
     clients.find((c) => c.clientId === selectedClientId) || clients[0];
@@ -452,6 +459,22 @@ curl -X POST "${apiUrl}/api/events" \\
             <code className="font-mono text-[var(--text-muted)]">await client.shutdown()</code>.
           </p>
         </Card>
+      )}
+
+      {!canOperate && (
+        <div
+          role="status"
+          data-testid="sdk-viewer-rbac-banner"
+          className="mb-3 border border-[var(--warning)]/40 bg-[var(--warning)]/10 px-3 py-2 text-[11.5px] text-[var(--text)]"
+        >
+          Read-only <span className="font-mono uppercase">{shellRole}</span> session:
+          Operator or Owner role required to reveal live client JWT tokens. Snippets below
+          safely use placeholder{' '}
+          <code className="font-mono text-[var(--accent)]">
+            YOUR_SIGNED_CLIENT_JWT_TOKEN
+          </code>
+          .
+        </div>
       )}
 
       <Panel

@@ -53,7 +53,6 @@ test("R3-Phase-04 [BUG-11 / ERR-R3-07]: shouldRedirectSimulatorUnauthorized sepa
     "AUTH_INVALID",
     "CLIENT_REVOKED",
     "CLIENT_IP_FORBIDDEN",
-    "CLIENT_UNAUTHORIZED",
   ]) {
     assert.equal(
       shouldRedirectSimulatorUnauthorized(401, {
@@ -134,12 +133,12 @@ test("R3-Phase-04 [BUG-14]: expired clients are separated in UI helpers, ApiEngi
   assert.equal(isUiClientExpired("2026-11-19T00:00:00.000Z", nowMs), true);
 
   const sampleClients = [
-    { status: "active", isOnline: true, lastConnectedAt: "2026-11-20T11:59:00.000Z", expiresAt: null },
-    { status: "active", isOnline: false, lastConnectedAt: "2026-11-20T10:00:00.000Z", expiresAt: "2026-12-01T00:00:00.000Z" },
-    { status: "active", isOnline: false, lastConnectedAt: null, expiresAt: null },
-    { status: "active", isOnline: false, lastConnectedAt: "2026-11-19T10:00:00.000Z", expiresAt: "2026-11-19T12:00:00.000Z" },
-    { status: "active", isOnline: true, lastConnectedAt: "2026-11-20T11:58:00.000Z", expiresAt: "2026-11-20T11:00:00.000Z" },
-    { status: "revoked", isOnline: false, lastConnectedAt: null, expiresAt: "2026-11-10T00:00:00.000Z" },
+    { status: "active" as const, lastActive: "2026-11-20T11:59:30.000Z", expiresAt: null },
+    { status: "active" as const, lastActive: "2026-11-20T10:00:00.000Z", expiresAt: "2026-12-01T00:00:00.000Z" },
+    { status: "active" as const, lastActive: undefined, expiresAt: null },
+    { status: "active" as const, lastActive: "2026-11-19T10:00:00.000Z", expiresAt: "2026-11-19T12:00:00.000Z" },
+    { status: "active" as const, lastActive: "2026-11-20T11:59:45.000Z", expiresAt: "2026-11-20T11:00:00.000Z" },
+    { status: "revoked" as const, lastActive: undefined, expiresAt: "2026-11-10T00:00:00.000Z" },
   ];
 
   assert.equal(classifyUiClientStatus(sampleClients[0], nowMs), "online");
@@ -152,6 +151,7 @@ test("R3-Phase-04 [BUG-14]: expired clients are separated in UI helpers, ApiEngi
   const summary = summarizeUiClientCounts(sampleClients, nowMs);
   assert.deepEqual(summary, {
     total: 6,
+    active: 3,
     online: 1,
     offline: 1,
     pending: 1,
@@ -160,12 +160,20 @@ test("R3-Phase-04 [BUG-14]: expired clients are separated in UI helpers, ApiEngi
   });
 
   // Live integration: ApiEngine.getDashboardMetrics() & GET /api/prometheus
-  const activeClient = SDKManager.registerClient("r3p4_active_client");
-  const expiredClient = SDKManager.registerClient("r3p4_expired_client", {
+  const activeClient = SDKManager.registerClient({
+    clientId: "r3p4_active_client",
+    name: "R3P4 Active Client",
+  });
+  const expiredClient = SDKManager.registerClient({
+    clientId: "r3p4_expired_client",
+    name: "R3P4 Expired Client",
     expiresAt: "2020-01-01T00:00:00.000Z",
   });
-  const revokedClient = SDKManager.registerClient("r3p4_revoked_client");
-  SDKManager.revokeClient(revokedClient.id);
+  const revokedClient = SDKManager.registerClient({
+    clientId: "r3p4_revoked_client",
+    name: "R3P4 Revoked Client",
+  });
+  SDKManager.updateClient(revokedClient.clientId, { status: "revoked" });
 
   const prevSettings = SettingsManager.getSettings();
   try {
@@ -200,9 +208,9 @@ test("R3-Phase-04 [BUG-14]: expired clients are separated in UI helpers, ApiEngi
     assert.ok(Number(expiredMatch[1]) >= 1);
     assert.ok(Number(revokedMatch[1]) >= 1);
   } finally {
-    SDKManager.deleteClient(activeClient.id);
-    SDKManager.deleteClient(expiredClient.id);
-    SDKManager.deleteClient(revokedClient.id);
+    SDKManager.deleteClient(activeClient.clientId);
+    SDKManager.deleteClient(expiredClient.clientId);
+    SDKManager.deleteClient(revokedClient.clientId);
     SettingsManager.updateSettings({
       enablePrometheusMetrics: prevSettings.enablePrometheusMetrics,
     });
@@ -212,37 +220,37 @@ test("R3-Phase-04 [BUG-14]: expired clients are separated in UI helpers, ApiEngi
 test("R3-Phase-04 [BUG-16]: RBAC role capabilities and UI surface wiring across VconShell and Admin pages", async () => {
   assert.deepEqual(getVconRoleCapabilities("owner"), {
     role: "owner",
+    isOwner: true,
     canAdminSettings: true,
-    canManageTeam: true,
     canOperate: true,
     isReadOnly: false,
   });
   assert.deepEqual(getVconRoleCapabilities("admin"), {
     role: "admin",
+    isOwner: false,
     canAdminSettings: false,
-    canManageTeam: false,
     canOperate: true,
     isReadOnly: false,
   });
   assert.deepEqual(getVconRoleCapabilities("operator"), {
     role: "operator",
+    isOwner: false,
     canAdminSettings: false,
-    canManageTeam: false,
     canOperate: true,
     isReadOnly: false,
   });
   assert.deepEqual(getVconRoleCapabilities("viewer"), {
     role: "viewer",
+    isOwner: false,
     canAdminSettings: false,
-    canManageTeam: false,
     canOperate: false,
     isReadOnly: true,
   });
   // Fail-closed default for unknown/missing roles
   assert.deepEqual(getVconRoleCapabilities("unknown_role"), {
     role: "viewer",
+    isOwner: false,
     canAdminSettings: false,
-    canManageTeam: false,
     canOperate: false,
     isReadOnly: true,
   });

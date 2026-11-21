@@ -5,6 +5,7 @@ import {
   decryptSecret,
   SecretVaultError,
 } from "@/core/Security/secretVault";
+import { validateOutboundUrlSync } from "@/core/Security/ssrfGuard";
 import { extractClientIp, requireAdminApiSession } from "@/lib/adminAuth";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -57,17 +58,20 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    try {
-      const parsedUrl = new URL(webhookUrl);
-      if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
-        throw new Error("Webhook URL must use http:// or https://.");
-      }
-    } catch {
+    const urlCheck = validateOutboundUrlSync(webhookUrl, {
+      fieldName: "Webhook URL",
+    });
+    if (!urlCheck.allowed) {
       return NextResponse.json(
         {
           success: false,
-          code: "VALIDATION_ERROR",
-          error: "Webhook URL must be a valid http:// or https:// endpoint.",
+          code:
+            urlCheck.code === "SSRF_BLOCKED_HOST"
+              ? "SSRF_BLOCKED_HOST"
+              : "VALIDATION_ERROR",
+          error:
+            urlCheck.error ||
+            "Webhook URL must be a valid http:// or https:// endpoint.",
         },
         { status: 400 },
       );
@@ -105,14 +109,15 @@ export async function POST(req: NextRequest) {
     });
 
     if (!result.ok) {
+      const isSsrfBlocked = result.code === "SSRF_BLOCKED_HOST";
       return NextResponse.json(
         {
           success: false,
-          code: "WEBHOOK_DELIVERY_FAILED",
+          code: isSsrfBlocked ? "SSRF_BLOCKED_HOST" : "WEBHOOK_DELIVERY_FAILED",
           error: result.error || "Webhook target failed to accept test alert.",
           status: result.status,
         },
-        { status: 502 },
+        { status: isSsrfBlocked ? 400 : 502 },
       );
     }
 

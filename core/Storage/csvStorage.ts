@@ -386,6 +386,14 @@ export class CSVStorageManager {
       if (!gunzip.destroyed) {
         gunzip.destroy(err);
       }
+      if (!fileStream.destroyed) {
+        fileStream.destroy();
+      }
+    });
+    gunzip.on('error', () => {
+      if (!fileStream.destroyed) {
+        fileStream.destroy();
+      }
     });
     gunzip.on('close', () => {
       if (!fileStream.destroyed) {
@@ -396,16 +404,21 @@ export class CSVStorageManager {
     return gunzip;
   }
 
-  private static async countCsvDataRowsStreamAsync(
+  public static async countCsvDataRowsStreamAsync(
     filePath: string,
   ): Promise<number> {
     const counter = this.createChunkRowCounter();
-    return new Promise<number>((resolve, reject) => {
-      const stream = this.openPartitionTextStream(filePath);
-      stream.on('data', (chunk) => counter.pushChunk(chunk));
-      stream.on('end', () => resolve(counter.finish()));
-      stream.on('error', (err) => reject(err));
-    });
+    const stream = this.openPartitionTextStream(filePath);
+    try {
+      for await (const chunk of stream) {
+        counter.pushChunk(chunk as Buffer | string);
+      }
+      return counter.finish();
+    } finally {
+      if (!stream.destroyed) {
+        stream.destroy();
+      }
+    }
   }
 
   /**

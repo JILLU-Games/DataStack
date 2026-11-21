@@ -1,4 +1,5 @@
 import { SettingsManager } from "@/core/adminSettings/settingsManager";
+import { recordAdminAuditLogAsync } from "@/core/auth/auditLog";
 import { DataBufferEngine } from "@/core/data/buffer";
 import { SDKManager } from "@/core/sdk/sdkManager";
 import { getInternalIngestionHeaders } from "@/core/Security/security";
@@ -6,7 +7,7 @@ import {
   CSVStorageManager,
   type StorageFileMeta,
 } from "@/core/Storage/csvStorage";
-import { requireAdminApiSession } from "@/lib/adminAuth";
+import { extractClientIp, requireAdminApiSession } from "@/lib/adminAuth";
 import { parse } from "csv-parse";
 import { NextRequest, NextResponse } from "next/server";
 import { createReadStream } from "node:fs";
@@ -296,6 +297,24 @@ export async function GET(request: NextRequest) {
             : file.compressed && includeHeader
               ? "application/gzip"
               : "text/csv; charset=utf-8";
+
+      await recordAdminAuditLogAsync({
+        actorEmail: auth.auth.session.email,
+        actorRole: auth.auth.session.role || "owner",
+        action: "DATA_EXPORT_DOWNLOADED",
+        target: file.clientId,
+        ipAddress: extractClientIp(request),
+        metadata: {
+          mode: "single_file",
+          clientId: file.clientId,
+          filename: file.filename,
+          downloadName,
+          format,
+          includeHeader,
+          fileCount: 1,
+        },
+      });
+
       return new NextResponse(bodyStream, {
         status: 200,
         headers: {
@@ -313,6 +332,25 @@ export async function GET(request: NextRequest) {
     const safeClientId = sanitizedClientId === "all" ? "all" : sanitizedClientId;
     const baseName =
       clientId === "all" ? "datastack_export" : `${safeClientId}_export`;
+    const downloadName = `${baseName}_${datePart}.${format}`;
+
+    await recordAdminAuditLogAsync({
+      actorEmail: auth.auth.session.email,
+      actorRole: auth.auth.session.role || "owner",
+      action: "DATA_EXPORT_DOWNLOADED",
+      target: clientId,
+      ipAddress: extractClientIp(request),
+      metadata: {
+        mode: "filtered_range",
+        clientId,
+        from: from || null,
+        to: to || null,
+        format,
+        includeHeader,
+        fileCount: files.length,
+        filename: downloadName,
+      },
+    });
 
     return new NextResponse(makeExportStream(files, format, includeHeader), {
       status: 200,
@@ -323,7 +361,7 @@ export async function GET(request: NextRequest) {
             : format === "ndjson"
               ? "application/x-ndjson; charset=utf-8"
               : "text/csv; charset=utf-8",
-        "Content-Disposition": `attachment; filename="${baseName}_${datePart}.${format}"`,
+        "Content-Disposition": `attachment; filename="${downloadName}"`,
         "Cache-Control": "no-store",
       },
     });

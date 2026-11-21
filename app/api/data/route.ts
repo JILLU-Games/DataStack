@@ -17,6 +17,13 @@ interface DataEvent {
   status: "stored" | "buffered";
 }
 
+interface CorruptPartitionWarning {
+  clientId: string;
+  filename: string;
+  code: "CORRUPT_GZIP_PARTITION";
+  error: string;
+}
+
 function parseTimestampMs(raw: string): number {
   const trimmed = String(raw || "").trim();
   if (/^\d+(\.\d+)?$/.test(trimmed)) {
@@ -62,6 +69,7 @@ export async function GET(request: NextRequest) {
     const offset = (page - 1) * pageSize;
     const selectedRows: DataEvent[] = [];
     const eventIds = new Set<string>();
+    const corruptPartitions: CorruptPartitionWarning[] = [];
     let total = 0;
 
     const addIfMatching = (event: DataEvent) => {
@@ -185,7 +193,12 @@ export async function GET(request: NextRequest) {
           console.warn(`[API /data] Failed reading partition ${filePath}:`, err);
           if (filename.endsWith(".csv.gz")) {
             const detail = err instanceof Error ? err.message : String(err);
-            throw new Error(`Corrupt .csv.gz partition (${filename}): ${detail}`);
+            corruptPartitions.push({
+              clientId: storedClientId,
+              filename,
+              code: "CORRUPT_GZIP_PARTITION",
+              error: `Corrupt .csv.gz partition (${filename}): ${detail}`,
+            });
           }
         } finally {
           if (!parser.destroyed) parser.destroy();
@@ -249,6 +262,8 @@ export async function GET(request: NextRequest) {
       page,
       pageSize,
       pageCount: Math.max(1, Math.ceil(total / pageSize)),
+      corruptPartitions,
+      warnings: corruptPartitions.length,
     });
   } catch (error) {
     const message =

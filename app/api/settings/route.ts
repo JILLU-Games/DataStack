@@ -4,6 +4,10 @@ import {
 } from "@/core/adminSettings/settingsManager";
 import { recordAdminAuditLogAsync } from "@/core/auth/auditLog";
 import { SecretVaultError } from "@/core/Security/secretVault";
+import {
+  SSRFBlockedError,
+  validateOutboundUrlSync,
+} from "@/core/Security/ssrfGuard";
 import { extractClientIp, requireAdminApiSession } from "@/lib/adminAuth";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -209,16 +213,20 @@ export async function POST(req: NextRequest) {
       if (body.s3Endpoint !== undefined) {
         const ep = parseOptionalString(body.s3Endpoint, "s3Endpoint", 512);
         if (ep) {
-          let parsedEp: URL;
-          try {
-            parsedEp = new URL(
-              /^https?:\/\//i.test(ep) ? ep : `https://${ep}`,
+          const normalizedEp = /^https?:\/\//i.test(ep) ? ep : `https://${ep}`;
+          const check = validateOutboundUrlSync(normalizedEp, {
+            fieldName: "s3Endpoint",
+          });
+          if (!check.allowed) {
+            if (check.code === "SSRF_BLOCKED_HOST") {
+              throw new SSRFBlockedError(
+                check.error || "s3Endpoint target host is blocked.",
+                check.hostname || "",
+              );
+            }
+            throw new Error(
+              check.error || "s3Endpoint must be a valid http(s) URL.",
             );
-          } catch {
-            throw new Error("s3Endpoint must be a valid http(s) URL.");
-          }
-          if (parsedEp.protocol !== "http:" && parsedEp.protocol !== "https:") {
-            throw new Error("s3Endpoint must use http:// or https://.");
           }
         }
         validated.s3Endpoint = ep;
@@ -270,14 +278,19 @@ export async function POST(req: NextRequest) {
       if (body.webhookUrl !== undefined) {
         const wh = parseOptionalString(body.webhookUrl, "webhookUrl", 1024);
         if (wh) {
-          let parsedWh: URL;
-          try {
-            parsedWh = new URL(wh);
-          } catch {
-            throw new Error("webhookUrl must be a valid http(s) URL.");
-          }
-          if (parsedWh.protocol !== "http:" && parsedWh.protocol !== "https:") {
-            throw new Error("webhookUrl must use http:// or https://.");
+          const check = validateOutboundUrlSync(wh, {
+            fieldName: "webhookUrl",
+          });
+          if (!check.allowed) {
+            if (check.code === "SSRF_BLOCKED_HOST") {
+              throw new SSRFBlockedError(
+                check.error || "webhookUrl target host is blocked.",
+                check.hostname || "",
+              );
+            }
+            throw new Error(
+              check.error || "webhookUrl must be a valid http(s) URL.",
+            );
           }
         }
         validated.webhookUrl = wh;
@@ -334,6 +347,15 @@ export async function POST(req: NextRequest) {
         validated.jwtSecret = body.jwtSecret.trim();
       }
     } catch (validationErr: unknown) {
+      if (validationErr instanceof SSRFBlockedError) {
+        return NextResponse.json(
+          {
+            error: validationErr.message,
+            code: validationErr.code,
+          },
+          { status: 400 },
+        );
+      }
       return NextResponse.json(
         {
           error:

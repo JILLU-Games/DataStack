@@ -1,5 +1,6 @@
 'use client';
 
+import { useVconRole } from '@/components/layout/VconShell';
 import { Button } from '@/components/ui/Button';
 import { Icon } from '@/components/ui/Icon';
 import { cn } from '@/lib/utils';
@@ -18,6 +19,14 @@ interface CachedProfile {
   role?: string;
 }
 
+function formatShellRoleLabel(role?: string | null): string {
+  const clean = String(role || 'viewer').trim().toLowerCase();
+  if (clean === 'owner') return 'Owner';
+  if (clean === 'admin') return 'Admin';
+  if (clean === 'operator') return 'Operator';
+  return 'Viewer';
+}
+
 const NAVIGATION_SECTIONS = [
   {
     group: 'Main',
@@ -27,12 +36,13 @@ const NAVIGATION_SECTIONS = [
       { name: 'Clients', href: '/vcon/clients', icon: 'Key' },
       { name: 'Export', href: '/vcon/export', icon: 'Download' },
       { name: 'Storage', href: '/vcon/storage', icon: 'HardDrive' },
+      { name: 'Files Manager', href: '/vcon/files', icon: 'FolderOpen' },
     ],
   },
   {
     group: 'System',
     items: [
-      { name: 'Python SDK', href: '/vcon/sdk', icon: 'FileCode2' },
+      { name: 'Client SDKs', href: '/vcon/sdk', icon: 'FileCode2' },
       { name: 'Simulator', href: '/vcon/simulator', icon: 'Play' },
       { name: 'Team & RBAC', href: '/vcon/team', icon: 'Users' },
       { name: 'Audit Log', href: '/vcon/audit', icon: 'FileText' },
@@ -47,13 +57,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onClose,
 }) => {
   const pathname = usePathname();
+  const shellRole = useVconRole();
+  const initialRoleLabel = formatShellRoleLabel(shellRole);
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [adminEmail, setAdminEmail] = useState<string>(
     () => getCached<CachedProfile>('vcon:profile', {}).email || 'Admin'
   );
   const [adminRole, setAdminRole] = useState<string>(
-    () => getCached<CachedProfile>('vcon:profile', {}).role || 'Owner'
+    () => getCached<CachedProfile>('vcon:profile', {}).role || initialRoleLabel
   );
 
   useEffect(() => {
@@ -96,17 +108,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
           setCached('vcon:profile', data.profile);
           setCached('vcon:profile-loaded', true);
           setAdminEmail(data.profile.email);
-          setAdminRole(data.profile.role || 'Owner');
+          setAdminRole(data.profile.role || initialRoleLabel);
         }
       })
       .catch(() => {
-        // Keep cached or default identity label if offline
+        // Keep cached or shell role identity label if offline
       });
 
     return () => {
       window.removeEventListener('datastack:profile-updated', handleProfileUpdated);
     };
-  }, [pathname]);
+  }, [pathname, initialRoleLabel]);
 
   const toggleTheme = () => {
     const nextTheme = theme === 'dark' ? 'light' : 'dark';

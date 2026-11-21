@@ -20,6 +20,8 @@ export type AuditActionType =
   | "STORAGE_FLUSH_TRIGGERED"
   | "S3_ARCHIVE_TRIGGERED"
   | "WEBHOOK_TEST_TRIGGERED"
+  | "FILES_MANAGER_MUTATION"
+  | "DATA_EXPORT_DOWNLOADED"
   | string;
 
 export interface AuditLogEntry {
@@ -49,10 +51,19 @@ export interface ListAuditLogsQuery {
   search?: string;
 }
 
+export interface AuditLogListResult {
+  logs: AuditLogEntry[];
+  storageMode: "postgresql" | "memory";
+  degraded: boolean;
+  code?: "AUDIT_STORAGE_DEGRADED";
+  warning?: string;
+}
+
 const MAX_IN_MEMORY_AUDIT_LOGS = 1000;
 
 type AuditLogGlobals = typeof globalThis & {
   __dataStackAuditLogs?: AuditLogEntry[];
+  __dataStackAuditLastWriteError?: string;
 };
 
 const globals = globalThis as AuditLogGlobals;
@@ -149,8 +160,13 @@ export async function recordAdminAuditLogAsync(
           entry.createdAt,
         ],
       );
-    } catch {
-      // Never block or crash administrative actions if audit table write experiences transient DB failure
+      globals.__dataStackAuditLastWriteError = undefined;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      globals.__dataStackAuditLastWriteError = msg;
+      console.warn(
+        `[DataStack Audit] PostgreSQL audit insert failed for action=${entry.action} (buffered in memory only): ${msg}`,
+      );
     }
   }
 
@@ -161,9 +177,9 @@ export function recordAdminAuditLog(input: RecordAuditLogInput): void {
   void recordAdminAuditLogAsync(input);
 }
 
-export async function listAdminAuditLogsAsync(
+export async function listAdminAuditLogsWithStatusAsync(
   query: ListAuditLogsQuery = {},
-): Promise<AuditLogEntry[]> {
+): Promise<AuditLogListResult> {
   const rawLimit =
     typeof query.limit === "number" && Number.isFinite(query.limit)
       ? Math.floor(query.limit)
@@ -174,6 +190,7 @@ export async function listAdminAuditLogsAsync(
   const searchFilter = query.search?.trim().toLowerCase() || "";
 
   const pool = DatabaseEngine.getPool();
+  let dbReadError: string | null = null;
   if (pool) {
     try {
       await DatabaseEngine.ensureSchema();
@@ -227,7 +244,7 @@ export async function listAdminAuditLogsAsync(
         params,
       );
 
-      return result.rows.map((row) => {
+      const logs = result.rows.map((row) => {
         let parsedMeta: Record<string, unknown> = {};
         try {
           const parsed = JSON.parse(row.metadata_json || "{}");
@@ -251,12 +268,28 @@ export async function listAdminAuditLogsAsync(
               : new Date(row.created_at).toISOString(),
         };
       });
-    } catch {
-      // Fallback to in-memory log buffer if PostgreSQL query fails
+
+      const writeErr = globals.__dataStackAuditLastWriteError;
+      return {
+        logs,
+        storageMode: "postgresql",
+        degraded: Boolean(writeErr),
+        ...(writeErr
+          ? {
+              code: "AUDIT_STORAGE_DEGRADED" as const,
+              warning: `Recent audit log insert failed in PostgreSQL: ${writeErr}`,
+            }
+          : {}),
+      };
+    } catch (err: unknown) {
+      dbReadError = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[DataStack Audit] PostgreSQL audit query failed (serving ephemeral in-memory fallback): ${dbReadError}`,
+      );
     }
   }
 
-  return getInMemoryAuditLogs()
+  const fallbackLogs = getInMemoryAuditLogs()
     .filter((entry) => {
       if (
         actionFilter &&
@@ -278,8 +311,32 @@ export async function listAdminAuditLogsAsync(
       return true;
     })
     .slice(0, limit);
+
+  if (dbReadError) {
+    return {
+      logs: fallbackLogs,
+      storageMode: "memory",
+      degraded: true,
+      code: "AUDIT_STORAGE_DEGRADED",
+      warning: `PostgreSQL audit query failed (${dbReadError}); serving ephemeral in-memory logs.`,
+    };
+  }
+
+  return {
+    logs: fallbackLogs,
+    storageMode: "memory",
+    degraded: false,
+  };
+}
+
+export async function listAdminAuditLogsAsync(
+  query: ListAuditLogsQuery = {},
+): Promise<AuditLogEntry[]> {
+  const result = await listAdminAuditLogsWithStatusAsync(query);
+  return result.logs;
 }
 
 export function clearAuditLogsForTests(): void {
   globals.__dataStackAuditLogs = [];
+  globals.__dataStackAuditLastWriteError = undefined;
 }

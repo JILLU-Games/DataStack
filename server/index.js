@@ -1,4 +1,5 @@
 const crypto = require('node:crypto');
+const dnsPromises = require('node:dns/promises');
 const net = require('node:net');
 const express = require('express');
 const http = require('http');
@@ -8,6 +9,11 @@ const { Pool } = require('pg');
 const Redis = require('ioredis');
 const { setupSocketHandlers, normalizeClientId } = require('./socket/handlers');
 const { CsvWriterWorker } = require('./workers/csvWriter');
+const {
+  mountFilesManager,
+  syncInMemoryAdminSessionState,
+  clearInMemoryAdminSessionStateForTests,
+} = require('./filesManager');
 
 function parseAllowedCorsOrigins(raw = process.env.DATASTACK_CORS_ORIGINS) {
   if (typeof raw !== 'string') return null;
@@ -36,7 +42,14 @@ function corsOriginDelegate(origin, callback) {
 const PORT = Number(process.env.PORT_SOCKET) || 4000;
 const app = express();
 app.use(cors({ origin: corsOriginDelegate }));
-app.use(express.json({ limit: '10mb' }));
+const jsonBodyParser = express.json({ limit: '10mb' });
+app.use((req, res, next) => {
+  if (req.path === '/vcon/files-engine' || req.path.startsWith('/vcon/files-engine/')) {
+    return next();
+  }
+  return jsonBodyParser(req, res, next);
+});
+let filesManagerHandle = null;
 
 const REDIS_BUFFER_KEY = 'datastack:buffer:events';
 const REDIS_RECENT_KEY = 'datastack:recent:events';
@@ -1313,6 +1326,204 @@ function formatOutboundWebhookBody(_url, payload, timestamp) {
   });
 }
 
+const WEBHOOK_ALWAYS_BLOCKED_HOSTNAMES = new Set([
+  'metadata.google.internal',
+  'metadata.goog',
+  'metadata',
+  'instance-data',
+  'instance-data.ec2.internal',
+]);
+
+const WEBHOOK_PRIVATE_HOSTNAMES = new Set([
+  'localhost',
+  'localhost.localdomain',
+  'ip6-localhost',
+  'ip6-loopback',
+]);
+
+const WEBHOOK_ALWAYS_BLOCKED_IPS = (() => {
+  const list = new net.BlockList();
+  list.addSubnet('0.0.0.0', 8, 'ipv4');
+  list.addSubnet('169.254.0.0', 16, 'ipv4');
+  list.addSubnet('224.0.0.0', 4, 'ipv4');
+  list.addSubnet('240.0.0.0', 4, 'ipv4');
+  list.addAddress('::', 'ipv6');
+  list.addSubnet('fe80::', 10, 'ipv6');
+  list.addSubnet('ff00::', 8, 'ipv6');
+  return list;
+})();
+
+const WEBHOOK_PRIVATE_IPS = (() => {
+  const list = new net.BlockList();
+  list.addSubnet('127.0.0.0', 8, 'ipv4');
+  list.addSubnet('10.0.0.0', 8, 'ipv4');
+  list.addSubnet('172.16.0.0', 12, 'ipv4');
+  list.addSubnet('192.168.0.0', 16, 'ipv4');
+  list.addSubnet('100.64.0.0', 10, 'ipv4');
+  list.addSubnet('198.18.0.0', 15, 'ipv4');
+  list.addAddress('::1', 'ipv6');
+  list.addSubnet('fc00::', 7, 'ipv6');
+  return list;
+})();
+
+function isPrivateWebhookUrlAllowed(env = process.env) {
+  const raw = String(env.DATASTACK_ALLOW_PRIVATE_URLS || '')
+    .trim()
+    .toLowerCase();
+  return raw === 'true' || raw === '1' || raw === 'yes';
+}
+
+function normalizeWebhookIp(rawHost) {
+  let clean = String(rawHost || '').trim().toLowerCase();
+  if (clean.startsWith('[') && clean.endsWith(']')) {
+    clean = clean.slice(1, -1);
+  }
+  const zoneIdx = clean.indexOf('%');
+  if (zoneIdx >= 0) clean = clean.slice(0, zoneIdx);
+  clean = clean.replace(/\.+$/, '');
+  if (!clean) return null;
+
+  if (clean.startsWith('::ffff:')) {
+    const mapped = clean.slice('::ffff:'.length);
+    if (net.isIP(mapped) === 4) {
+      return { ip: mapped, family: 4 };
+    }
+    const hexParts = mapped.split(':');
+    if (hexParts.length === 2) {
+      const hi = Number.parseInt(hexParts[0], 16);
+      const lo = Number.parseInt(hexParts[1], 16);
+      if (
+        Number.isInteger(hi) &&
+        Number.isInteger(lo) &&
+        hi >= 0 &&
+        hi <= 0xffff &&
+        lo >= 0 &&
+        lo <= 0xffff
+      ) {
+        const ipv4 = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+        if (net.isIP(ipv4) === 4) {
+          return { ip: ipv4, family: 4 };
+        }
+      }
+    }
+  }
+
+  const family = net.isIP(clean);
+  if (family === 4 || family === 6) {
+    return { ip: clean, family };
+  }
+  return null;
+}
+
+function checkWebhookIpAllowed(rawIp, allowPrivate) {
+  const parsed = normalizeWebhookIp(rawIp);
+  if (!parsed) return { allowed: false, reason: 'Invalid IP address' };
+  const ipType = parsed.family === 4 ? 'ipv4' : 'ipv6';
+  if (WEBHOOK_ALWAYS_BLOCKED_IPS.check(parsed.ip, ipType)) {
+    return {
+      allowed: false,
+      reason: `Address '${parsed.ip}' is in a restricted link-local/metadata/reserved range`,
+    };
+  }
+  if (!allowPrivate && WEBHOOK_PRIVATE_IPS.check(parsed.ip, ipType)) {
+    return {
+      allowed: false,
+      reason: `Address '${parsed.ip}' is a private or loopback network address`,
+    };
+  }
+  return { allowed: true };
+}
+
+async function validateOutboundWebhookUrlAsync(rawUrl, options = {}) {
+  const allowPrivate =
+    options.allowPrivate !== undefined
+      ? Boolean(options.allowPrivate)
+      : isPrivateWebhookUrlAllowed(options.env || process.env);
+
+  let parsed;
+  try {
+    parsed = new URL(String(rawUrl || '').trim());
+  } catch {
+    return { allowed: false, code: 'INVALID_URL', error: 'Webhook URL is not a valid URL.' };
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return {
+      allowed: false,
+      code: 'SSRF_BLOCKED_HOST',
+      error: 'Webhook URL must use http:// or https://.',
+    };
+  }
+  if (parsed.username || parsed.password) {
+    return {
+      allowed: false,
+      code: 'SSRF_BLOCKED_HOST',
+      error: 'Webhook URL must not embed credentials.',
+    };
+  }
+
+  let host = String(parsed.hostname || '').trim().toLowerCase();
+  if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
+  host = host.replace(/\.+$/, '');
+  if (!host) {
+    return { allowed: false, code: 'INVALID_URL', error: 'Webhook URL hostname is empty.' };
+  }
+
+  if (WEBHOOK_ALWAYS_BLOCKED_HOSTNAMES.has(host)) {
+    return {
+      allowed: false,
+      code: 'SSRF_BLOCKED_HOST',
+      error: `Webhook target '${host}' is blocked (cloud metadata/internal endpoint).`,
+    };
+  }
+
+  const literalIp = normalizeWebhookIp(host);
+  if (literalIp) {
+    const ipCheck = checkWebhookIpAllowed(host, allowPrivate);
+    if (!ipCheck.allowed) {
+      return { allowed: false, code: 'SSRF_BLOCKED_HOST', error: ipCheck.reason };
+    }
+    return { allowed: true, url: parsed.toString() };
+  }
+
+  if (!allowPrivate) {
+    if (
+      WEBHOOK_PRIVATE_HOSTNAMES.has(host) ||
+      host.endsWith('.localhost') ||
+      host.endsWith('.local') ||
+      host.endsWith('.internal') ||
+      !host.includes('.')
+    ) {
+      return {
+        allowed: false,
+        code: 'SSRF_BLOCKED_HOST',
+        error: `Webhook target '${host}' is a private/internal hostname.`,
+      };
+    }
+  }
+
+  try {
+    const lookupFn =
+      options.dnsLookup ||
+      ((h) => dnsPromises.lookup(h, { all: true, verbatim: true }));
+    const records = await lookupFn(host);
+    for (const rec of records) {
+      const check = checkWebhookIpAllowed(rec.address, allowPrivate);
+      if (!check.allowed) {
+        return {
+          allowed: false,
+          code: 'SSRF_BLOCKED_HOST',
+          error: `Webhook hostname '${host}' resolved to blocked address: ${check.reason}`,
+        };
+      }
+    }
+  } catch {
+    // Let fetch handle unresolved DNS names cleanly
+  }
+
+  return { allowed: true, url: parsed.toString() };
+}
+
 async function triggerWebhookAlert(payload, options = {}) {
   try {
     const enabled =
@@ -1327,6 +1538,19 @@ async function triggerWebhookAlert(payload, options = {}) {
 
     if (!enabled || !url) {
       return { dispatched: false, reason: 'disabled_or_empty_url' };
+    }
+
+    const ssrfCheck = await validateOutboundWebhookUrlAsync(url, {
+      allowPrivate: options.allowPrivate,
+      dnsLookup: options.dnsLookup,
+    });
+    if (!ssrfCheck.allowed) {
+      return {
+        dispatched: false,
+        code: ssrfCheck.code || 'SSRF_BLOCKED_HOST',
+        reason: ssrfCheck.code || 'SSRF_BLOCKED_HOST',
+        error: ssrfCheck.error,
+      };
     }
 
     const cooldownSec = Math.max(
@@ -1374,12 +1598,22 @@ async function triggerWebhookAlert(payload, options = {}) {
     const fetchImpl = options.fetchImpl || global.fetch;
 
     try {
-      const res = await fetchImpl(url, {
+      const res = await fetchImpl(ssrfCheck.url, {
         method: 'POST',
         headers,
         body: rawBody,
+        redirect: 'manual',
         signal: controller.signal,
       });
+      if (res.status >= 300 && res.status < 400) {
+        return {
+          dispatched: false,
+          code: 'SSRF_BLOCKED_HOST',
+          reason: 'SSRF_BLOCKED_HOST',
+          status: res.status,
+          error: `Webhook endpoint attempted an unsupported HTTP ${res.status} redirect.`,
+        };
+      }
       return { dispatched: true, status: res.status };
     } finally {
       clearTimeout(timeout);
@@ -1473,6 +1707,32 @@ async function ensureDatabaseSchema() {
           failed_attempts INTEGER NOT NULL,
           blocked_until TIMESTAMPTZ,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS admin_team_members (
+          id TEXT PRIMARY KEY,
+          email TEXT NOT NULL UNIQUE,
+          role TEXT NOT NULL DEFAULT 'viewer',
+          status TEXT NOT NULL DEFAULT 'active',
+          password_salt BYTEA NOT NULL,
+          password_hash BYTEA NOT NULL,
+          token_version INTEGER NOT NULL DEFAULT 1,
+          invited_by TEXT NOT NULL DEFAULT 'owner',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS admin_audit_logs (
+          id TEXT PRIMARY KEY,
+          actor_email TEXT NOT NULL,
+          actor_role TEXT NOT NULL,
+          action TEXT NOT NULL,
+          target TEXT NOT NULL,
+          ip_address TEXT NOT NULL DEFAULT '',
+          metadata_json TEXT NOT NULL DEFAULT '{}',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
       `);
       await pool.query(`
@@ -1822,7 +2082,7 @@ app.get('/internal/recent', async (req, res) => {
 });
 
 // Internal endpoint triggered by Next.js SDKManager when a client is deleted, revoked, rotated, or synced
-app.post('/internal/client-sync', (req, res) => {
+app.post('/internal/client-sync', async (req, res) => {
   const action = req.body && req.body.action ? String(req.body.action) : '';
 
   if (action === 'bulk_sync' && Array.isArray(req.body.clients)) {
@@ -1942,23 +2202,81 @@ app.post('/internal/client-sync', (req, res) => {
         });
       }
     } else if (action === 'updated') {
+      const prevClient = inMemoryClientRegistry.get(normalizedId);
+      const nextStatus =
+        clientPayload && clientPayload.status === 'revoked' ? 'revoked' : 'active';
+      const nextToken = clientPayload ? String(clientPayload.token || '') : '';
+      const nextAllowedIps =
+        clientPayload && typeof clientPayload.allowedIps === 'string'
+          ? clientPayload.allowedIps.trim()
+          : '';
+      const nextExpiresAt =
+        clientPayload && clientPayload.expiresAt
+          ? String(clientPayload.expiresAt)
+          : null;
+
       if (clientPayload) {
         inMemoryClientRegistry.set(normalizedId, {
           clientId: normalizedId,
           name: String(clientPayload.name || normalizedId),
-          status: clientPayload.status === 'revoked' ? 'revoked' : 'active',
-          token: String(clientPayload.token || ''),
+          status: nextStatus,
+          token: nextToken,
           rateLimit: Math.max(1, Number(clientPayload.rateLimit) || 100),
           storageQuotaMb: Math.max(0, Math.floor(Number(clientPayload.storageQuotaMb) || 0)),
-          allowedIps: typeof clientPayload.allowedIps === 'string' ? clientPayload.allowedIps : '',
-          expiresAt: clientPayload.expiresAt ? String(clientPayload.expiresAt) : null,
+          allowedIps: nextAllowedIps,
+          expiresAt: nextExpiresAt,
         });
       }
-      io.to(`client:${normalizedId}`).disconnectSockets(true);
+
+      const tokenExpired = Boolean(
+        nextExpiresAt && isClientTokenExpired(nextExpiresAt),
+      );
+      const shouldDisconnectRoom =
+        !clientPayload ||
+        nextStatus === 'revoked' ||
+        tokenExpired ||
+        Boolean(
+          prevClient &&
+            (prevClient.status !== nextStatus ||
+              (nextToken && prevClient.token !== nextToken) ||
+              (prevClient.allowedIps || '').trim() !== nextAllowedIps ||
+              (prevClient.expiresAt || null) !== nextExpiresAt),
+        );
+
+      let disconnected = false;
+      if (shouldDisconnectRoom) {
+        io.to(`client:${normalizedId}`).disconnectSockets(true);
+        disconnected = true;
+      } else if (!prevClient) {
+        const liveSockets = await io.in(`client:${normalizedId}`).fetchSockets();
+        for (const sock of liveSockets) {
+          const sockToken =
+            sock.data && sock.data.token ? String(sock.data.token) : '';
+          const sockIp =
+            sock.data && sock.data.clientIp ? String(sock.data.clientIp) : '';
+          const tokenMismatch = Boolean(
+            nextToken && sockToken && sockToken !== nextToken,
+          );
+          const ipForbidden = Boolean(
+            nextAllowedIps && (!sockIp || !isClientIpAllowed(sockIp, nextAllowedIps)),
+          );
+          if (tokenMismatch || ipForbidden) {
+            sock.disconnect(true);
+            disconnected = true;
+          }
+        }
+      }
+
+      return res.json({ success: true, disconnected });
     }
   }
 
   res.json({ success: true });
+});
+
+app.post('/internal/admin-session-sync', requireInternalAuth, (req, res) => {
+  const synced = syncInMemoryAdminSessionState(req.body || {});
+  res.json({ success: true, synced });
 });
 
 function stopTimers() {
@@ -2016,6 +2334,10 @@ async function gracefulShutdown(signal, options = {}) {
     stopTimers();
 
     // Close Socket.IO & HTTP listeners before final flush so late traffic cannot enter after drain starts
+    if (filesManagerHandle && typeof filesManagerHandle.close === 'function') {
+      await Promise.race([filesManagerHandle.close().catch(() => undefined), sleepMs(2000)]);
+      filesManagerHandle = null;
+    }
     await closeServerGracefully();
 
     try {
@@ -2097,6 +2419,16 @@ async function startIngestionServer() {
 
   if (isShuttingDown) return;
 
+  if (!filesManagerHandle) {
+    filesManagerHandle = await mountFilesManager({
+      app,
+      server,
+      rootDir: writer.baseDir,
+      getDbPool: () => dbPool,
+      corsOriginDelegate,
+    });
+  }
+
   await new Promise((resolve) => {
     server.listen(PORT, () => {
       console.log(
@@ -2144,7 +2476,12 @@ module.exports = {
   isClientIpAllowed,
   isClientTokenExpired,
   triggerWebhookAlert,
+  validateOutboundWebhookUrlAsync,
   clearWebhookCooldownCacheForTests,
   decryptVaultSecret,
   formatOutboundWebhookBody,
+  mountFilesManager,
+  syncInMemoryAdminSessionState,
+  clearInMemoryAdminSessionStateForTests,
+  getFilesManagerHandle: () => filesManagerHandle,
 };

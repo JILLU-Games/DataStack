@@ -17,6 +17,18 @@ const ALLOWED_PATCH_KEYS = new Set([
   "status",
 ]);
 
+function serializeClientResponse<
+  T extends { secret?: string; token?: string },
+>(client: T, options: { includeToken: boolean }) {
+  const { secret, token, ...clientSummary } = client;
+  void secret;
+  return {
+    ...clientSummary,
+    tokenPreview: token ? `${token.slice(0, 12)}...` : "",
+    ...(options.includeToken && token ? { token } : {}),
+  };
+}
+
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -36,14 +48,8 @@ export async function GET(
     if (!client) {
       return NextResponse.json({ error: "Client not found" }, { status: 404 });
     }
-    const { secret, token, ...clientSummary } = client;
-    void secret;
     return NextResponse.json({
-      client: {
-        ...clientSummary,
-        tokenPreview: token ? `${token.slice(0, 12)}...` : "",
-        ...(includeToken ? { token } : {}),
-      },
+      client: serializeClientResponse(client, { includeToken }),
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Failed to load client";
@@ -132,7 +138,9 @@ export async function PATCH(
         },
       });
 
-      return NextResponse.json({ client: refreshed });
+      return NextResponse.json({
+        client: serializeClientResponse(refreshed, { includeToken: true }),
+      });
     } catch (err: unknown) {
       const message =
         err instanceof Error ? err.message : "Token regeneration failed";
@@ -277,7 +285,9 @@ export async function PATCH(
       metadata: updates,
     });
 
-    return NextResponse.json({ client: updated });
+    return NextResponse.json({
+      client: serializeClientResponse(updated, { includeToken: false }),
+    });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Update failed";
     const isDbWrite = message.includes("DATABASE_WRITE_FAILED");

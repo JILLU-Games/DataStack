@@ -36,6 +36,13 @@ interface Client {
   name: string;
 }
 
+interface CorruptPartitionWarning {
+  clientId: string;
+  filename: string;
+  code?: string;
+  error: string;
+}
+
 const PAGE_SIZE = 12;
 
 function formatEventPayload(raw: string): string {
@@ -70,6 +77,7 @@ export function DataBrowser() {
   const [filtersReady, setFiltersReady] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [corruptPartitions, setCorruptPartitions] = useState<CorruptPartitionWarning[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<StreamEvent | null>(null);
 
   const fetchEvents = useCallback(async () => {
@@ -94,6 +102,9 @@ export function DataBrowser() {
       setEvents(data.events || []);
       setTotal(data.total || 0);
       setPageCount(data.pageCount || 1);
+      setCorruptPartitions(
+        Array.isArray(data.corruptPartitions) ? data.corruptPartitions : []
+      );
       setErrorMessage('');
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Unable to load events');
@@ -270,6 +281,29 @@ export function DataBrowser() {
           </p>
         )}
       </Card>
+
+      {corruptPartitions.length > 0 && (
+        <div
+          role="status"
+          data-testid="data-corrupt-partitions-warning"
+          className="border border-[var(--warning)]/40 bg-[var(--warning)]/10 px-3 py-2 text-[11.5px] text-[var(--text)]"
+        >
+          <div className="font-medium">
+            {corruptPartitions.length} corrupt .csv.gz partition
+            {corruptPartitions.length === 1 ? '' : 's'} skipped while loading healthy events.
+          </div>
+          <ul className="mt-1 flex flex-col gap-0.5 font-mono text-[10.5px] text-[var(--text-muted)]">
+            {corruptPartitions.slice(0, 5).map((item) => (
+              <li key={`${item.clientId}:${item.filename}`}>
+                {item.clientId}/{item.filename} — {item.error}
+              </li>
+            ))}
+            {corruptPartitions.length > 5 && (
+              <li>+{corruptPartitions.length - 5} more unreadable archive(s)</li>
+            )}
+          </ul>
+        </div>
+      )}
 
       <Panel
         title="Events"

@@ -15,6 +15,22 @@ const REDIS_RATE_LIMIT_LUA_SCRIPT = [
   "return c",
 ].join("\n");
 
+const DEFAULT_MAX_BATCH_ITEMS = 1000;
+const MIN_BATCH_ITEMS = 1;
+const MAX_BATCH_ITEMS_CEILING = 10000;
+
+function resolveMaxBatchItems() {
+  const raw = process.env.DATASTACK_MAX_BATCH_ITEMS;
+  if (raw === undefined || String(raw).trim() === "") {
+    return DEFAULT_MAX_BATCH_ITEMS;
+  }
+  const parsed = Math.floor(Number(raw));
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_MAX_BATCH_ITEMS;
+  }
+  return Math.min(MAX_BATCH_ITEMS_CEILING, Math.max(MIN_BATCH_ITEMS, parsed));
+}
+
 function generateFallbackEventId() {
   return `evt_${Date.now()}_${crypto.randomBytes(6).toString("hex")}`;
 }
@@ -594,6 +610,21 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
       try {
         if (!Array.isArray(batch)) {
           if (callback) callback({ success: false, error: "Expected array" });
+          return;
+        }
+
+        const maxBatchItems = resolveMaxBatchItems();
+        if (batch.length > maxBatchItems) {
+          if (callback) {
+            callback({
+              success: false,
+              processed: 0,
+              rejected: batch.length,
+              code: "BATCH_LIMIT_EXCEEDED",
+              error: `BATCH_LIMIT_EXCEEDED: Batch size (${batch.length}) exceeds maximum allowed ${maxBatchItems} items per request.`,
+              maxBatchItems,
+            });
+          }
           return;
         }
 

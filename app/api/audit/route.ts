@@ -1,4 +1,4 @@
-import { listAdminAuditLogsAsync } from "@/core/auth/auditLog";
+import { listAdminAuditLogsWithStatusAsync } from "@/core/auth/auditLog";
 import { requireAdminApiSession } from "@/lib/adminAuth";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -22,17 +22,25 @@ export async function GET(req: NextRequest) {
     const search =
       searchParams.get("q") || searchParams.get("search") || undefined;
 
-    const logs = await listAdminAuditLogsAsync({
+    const result = await listAdminAuditLogsWithStatusAsync({
       limit,
       action,
       actorEmail,
       search,
     });
 
-    return NextResponse.json({
-      logs,
-      total: logs.length,
+    const response = NextResponse.json({
+      logs: result.logs,
+      total: result.logs.length,
+      storageMode: result.storageMode,
+      degraded: result.degraded,
+      ...(result.code ? { code: result.code } : {}),
+      ...(result.warning ? { warning: result.warning } : {}),
     });
+    if (result.degraded) {
+      response.headers.set("X-DataStack-Audit-Degraded", "1");
+    }
+    return response;
   } catch (err: unknown) {
     const message =
       err instanceof Error ? err.message : "Unable to fetch audit logs.";

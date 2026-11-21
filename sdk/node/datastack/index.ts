@@ -645,8 +645,7 @@ export class DataStackClient {
           const msg = String(ack.error || 'Socket event rejected');
           const authErr = classifyAuthRejection(code, msg);
           if (authErr) {
-            this.heartbeatStopped = true;
-            this.stopHeartbeatMonitor();
+            this.disconnect();
             reject(
               new DataStackAuthError(msg, authErr.code, authErr.statusCode, ack)
             );
@@ -902,8 +901,7 @@ export class DataStackClient {
               const msg = String(ack.error || 'Batch rejected');
               const authErr = classifyAuthRejection(code, msg);
               if (authErr) {
-                this.heartbeatStopped = true;
-                this.stopHeartbeatMonitor();
+                this.disconnect();
                 reject(
                   new DataStackAuthError(
                     msg,
@@ -1055,7 +1053,7 @@ export class DataStackClient {
   private async deliverChunkWithSplitAndRetry(
     chunk: DataStackEnvelope[],
     allowSpoolFallback = true
-  ): Promise<DataStackSendResult> {
+  ): Promise<DataStackSendResult & { unprocessedEnvelopes?: DataStackEnvelope[] }> {
     let pending = [...chunk];
     let totalAccepted = 0;
     let totalDuplicates = 0;
@@ -1084,6 +1082,18 @@ export class DataStackClient {
         pending = pending.filter((item) => rateLimitedSet.has(item.eventId));
 
         if (attempt >= this.config.maxRetries) {
+          if (!allowSpoolFallback) {
+            return {
+              success: false,
+              transport: lastTransport,
+              accepted: totalAccepted,
+              duplicates: totalDuplicates,
+              spooled: totalSpooled,
+              rateLimitedEventIds: pending.map((p) => p.eventId),
+              unprocessedItems: pending.map((p) => p.data),
+              unprocessedEnvelopes: pending,
+            };
+          }
           throw new DataStackRateLimitError(
             `Rate limit exceeded for ${pending.length} event(s) after ${this.config.maxRetries} retries.`,
             pending.map((p) => p.eventId)
@@ -1105,34 +1115,57 @@ export class DataStackClient {
             pending.slice(mid),
             allowSpoolFallback
           );
+          const combinedEnvelopes = [
+            ...(left.unprocessedEnvelopes || []),
+            ...(right.unprocessedEnvelopes || []),
+          ];
+          const combinedItems = [
+            ...(left.unprocessedItems || []),
+            ...(right.unprocessedItems || []),
+          ];
           return {
             success: left.success && right.success,
             transport: right.transport,
             accepted: (left.accepted || 0) + (right.accepted || 0),
             duplicates: (left.duplicates || 0) + (right.duplicates || 0),
             spooled: (left.spooled || 0) + (right.spooled || 0),
+            ...(combinedItems.length > 0 ? { unprocessedItems: combinedItems } : {}),
+            ...(combinedEnvelopes.length > 0
+              ? { unprocessedEnvelopes: combinedEnvelopes }
+              : {}),
           };
         }
 
-        if (
-          err instanceof DataStackRateLimitError &&
-          attempt < this.config.maxRetries
-        ) {
+        if (err instanceof DataStackRateLimitError) {
           const rlSet = new Set(err.rateLimitedEventIds);
           if (rlSet.size > 0 && rlSet.size < pending.length) {
             totalAccepted += pending.length - rlSet.size;
             pending = pending.filter((p) => rlSet.has(p.eventId));
           }
-          attempt += 1;
-          await new Promise((r) => setTimeout(r, 50 * attempt));
-          continue;
+          if (attempt < this.config.maxRetries) {
+            attempt += 1;
+            await new Promise((r) => setTimeout(r, 50 * attempt));
+            continue;
+          }
+          if (!allowSpoolFallback) {
+            return {
+              success: false,
+              transport: lastTransport,
+              accepted: totalAccepted,
+              duplicates: totalDuplicates,
+              spooled: totalSpooled,
+              rateLimitedEventIds: pending.map((p) => p.eventId),
+              unprocessedItems: pending.map((p) => p.data),
+              unprocessedEnvelopes: pending,
+            };
+          }
+          throw err;
         }
 
         if (
           err instanceof DataStackAuthError ||
           err instanceof DataStackQuotaExceededError ||
           err instanceof DataStackPayloadTooLargeError ||
-          err instanceof DataStackRateLimitError ||
           err instanceof DataStackConfigError
         ) {
           throw err;
@@ -1160,6 +1193,7 @@ export class DataStackClient {
       duplicates: totalDuplicates,
       spooled: totalSpooled,
       unprocessedItems: pending.map((p) => p.data),
+      ...(pending.length > 0 ? { unprocessedEnvelopes: pending } : {}),
     };
   }
 
@@ -1365,12 +1399,22 @@ export class DataStackClient {
         const batch = this.spooler.peekBatch(this.config.batchChunkSize);
         if (batch.length === 0) break;
         const res = await this.deliverChunkWithSplitAndRetry(batch, false);
-        if (res.success) {
-          this.spooler.removeFirst(batch.length);
-          drained += batch.length;
-        } else {
+        const processedNow = res.accepted || 0;
+        const duplicatesNow = res.duplicates || 0;
+        const remaining = res.unprocessedEnvelopes ?? [];
+
+        if (!res.success && processedNow === 0 && duplicatesNow === 0) {
           break;
         }
+
+        if (remaining.length > 0) {
+          const acked = this.spooler.ackAndRequeueFront(batch.length, remaining);
+          drained += acked;
+          break;
+        }
+
+        this.spooler.ackAndRequeueFront(batch.length, []);
+        drained += batch.length;
       }
     } finally {
       this.isDrainingSpool = false;

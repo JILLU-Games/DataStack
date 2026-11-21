@@ -6,7 +6,8 @@
     "node": ">=20.0.0"
   },
   "scripts": {
-    "dev": "next dev -p 3000 -H 0.0.0.0",
+    "dev": "node scripts/dev-all.js",
+    "dev:web": "next dev -p 3000 -H 0.0.0.0",
     "dev:all": "node scripts/dev-all.js",
     "server": "node server/index.js",
     "build": "NODE_ENV=production next build",
@@ -20,6 +21,7 @@
     "@hookform/resolvers": "^5.2.1",
     "autoprefixer": "^10.4.21",
     "class-variance-authority": "^0.7.1",
+    "cloudcmd": "^19.23.2",
     "clsx": "^2.1.1",
     "cors": "^2.8.6",
     "csv-parse": "^7.0.3",

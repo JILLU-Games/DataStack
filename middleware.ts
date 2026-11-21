@@ -9,7 +9,6 @@ const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 function isProtectedApi(pathname: string, method: string) {
   if (pathname === "/api/auth/login") return false;
-  if (pathname === "/api/auth/setup/status" && method === "GET") return false;
   if (pathname === "/api/auth/setup" && method === "POST") return false;
   if (pathname === "/api/events" && method === "POST") return false;
   if (pathname === "/api/health" && method === "GET") return false;

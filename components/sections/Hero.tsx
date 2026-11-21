@@ -21,7 +21,7 @@ export const Hero: React.FC = () => (
         Explore features
       </Link>
       <Link href="/#sdk" className={buttonClassNames({ variant: 'secondary', size: 'sm' })}>
-        Python SDK
+        Client SDKs
       </Link>
     </div>
     <ActivityPreview />

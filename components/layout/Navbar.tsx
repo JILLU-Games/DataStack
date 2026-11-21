@@ -17,8 +17,11 @@ const VCON_LABELS: Record<string, string> = {
   '/vcon/clients': 'Clients',
   '/vcon/export': 'Export',
   '/vcon/storage': 'Storage',
-  '/vcon/sdk': 'Python SDK',
+  '/vcon/files': 'Files Manager',
+  '/vcon/sdk': 'Client SDKs',
   '/vcon/simulator': 'Simulator',
+  '/vcon/team': 'Team & RBAC',
+  '/vcon/audit': 'Audit Log',
   '/vcon/profile': 'Profile',
   '/vcon/settings': 'Settings',
 };

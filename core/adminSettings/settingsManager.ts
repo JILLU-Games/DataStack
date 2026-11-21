@@ -309,6 +309,34 @@ export class SettingsManager {
     return true;
   }
 
+  public static async bootstrapMaintenanceSchedulerOnBoot(): Promise<{
+    schedulerActive: boolean;
+    hydrated: boolean;
+    error?: string;
+  }> {
+    this.ensureMaintenanceScheduler();
+    try {
+      await this.getSettingsAsync();
+      return {
+        schedulerActive: this.isMaintenanceSchedulerActive(),
+        hydrated:
+          !process.env.DATABASE_URL?.trim() ||
+          globals.__dataStackSettingsHydrated === true,
+      };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(
+        "[DataStack Boot] Maintenance scheduler init deferred/failed:",
+        message,
+      );
+      return {
+        schedulerActive: this.isMaintenanceSchedulerActive(),
+        hydrated: false,
+        error: message,
+      };
+    }
+  }
+
   public static stopMaintenanceScheduler(): void {
     if (globals.__dataStackMaintenanceTimer) {
       clearInterval(globals.__dataStackMaintenanceTimer);

@@ -15,6 +15,40 @@ import {
 } from "./adminSession";
 import { clearAuditLogsForTests } from "./auditLog";
 import { DatabaseEngine, ensureCoreSchemaOnPool } from "../Database/database";
+import { getInternalIngestionHeaders } from "../Security/security";
+
+async function notifyIngestionAdminSessionSync(payload: {
+  memberId?: string;
+  email?: string;
+  previousEmail?: string;
+  minTokenVersion?: number;
+  disabled?: boolean;
+  deleted?: boolean;
+}): Promise<void> {
+  const configuredUrl = process.env.INGESTION_INTERNAL_URL?.trim();
+  if (process.env.DATASTACK_DISABLE_LISTEN === "1" && !configuredUrl) {
+    return;
+  }
+  const baseUrl = (configuredUrl || "http://127.0.0.1:4000").replace(
+    /\/+$/,
+    "",
+  );
+  try {
+    await fetch(`${baseUrl}/internal/admin-session-sync`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...getInternalIngestionHeaders(),
+      },
+      body: JSON.stringify(payload),
+      cache: "no-store",
+      signal: AbortSignal.timeout(1200),
+    });
+  } catch {
+    // Best-effort bridge sync when Port 4000 is offline or not running
+  }
+}
+
 
 const PASSWORD_HASH_BYTES = 64;
 const PASSWORD_SALT_BYTES = 16;
@@ -1040,6 +1074,13 @@ export async function updateAdminAccount({
       tokenVersion: nextVersion,
       createdAt: existing.createdAt,
     };
+    await notifyIngestionAdminSessionSync({
+      memberId: "owner-1",
+      email: cleanEmail,
+      previousEmail: existing.email,
+      minTokenVersion: nextVersion,
+      disabled: false,
+    });
     return {
       ok: true as const,
       email: cleanEmail,
@@ -1084,6 +1125,13 @@ export async function updateAdminAccount({
     passwordHash,
     tokenVersion: nextVersion,
     updatedAt: new Date(),
+  });
+  await notifyIngestionAdminSessionSync({
+    memberId: member.id,
+    email: cleanEmail,
+    previousEmail: member.email,
+    minTokenVersion: nextVersion,
+    disabled: member.status === "disabled",
   });
   return {
     ok: true as const,
@@ -1131,6 +1179,12 @@ export async function revokeAdminSessions(
         member.tokenVersion += 1;
         member.updatedAt = new Date();
         teamMap.set(member.id, member);
+        await notifyIngestionAdminSessionSync({
+          memberId: member.id,
+          email: member.email,
+          minTokenVersion: member.tokenVersion,
+          disabled: member.status === "disabled",
+        });
         return member.tokenVersion;
       }
     }
@@ -1157,6 +1211,12 @@ export async function revokeAdminSessions(
           member.tokenVersion += 1;
           member.updatedAt = new Date();
           teamMap.set(member.id, member);
+          await notifyIngestionAdminSessionSync({
+            memberId: member.id,
+            email: member.email,
+            minTokenVersion: member.tokenVersion,
+            disabled: member.status === "disabled",
+          });
           return member.tokenVersion;
         }
       }
@@ -1181,6 +1241,12 @@ export async function revokeAdminSessions(
     globals.__dataStackInMemoryAdmin ?? (await getOrInitInMemoryAdmin());
   existing.tokenVersion += 1;
   globals.__dataStackInMemoryAdmin = existing;
+  await notifyIngestionAdminSessionSync({
+    memberId: "owner-1",
+    email: existing.email,
+    minTokenVersion: existing.tokenVersion,
+    disabled: false,
+  });
   return existing.tokenVersion;
 }
 
@@ -1588,6 +1654,12 @@ export async function updateAdminTeamMemberAsync(
     updatedAt: new Date(),
   };
   teamMap.set(id, updated);
+  await notifyIngestionAdminSessionSync({
+    memberId: updated.id,
+    email: updated.email,
+    minTokenVersion: updated.tokenVersion,
+    disabled: updated.status === "disabled",
+  });
 
   return {
     id: updated.id,
@@ -1654,6 +1726,13 @@ export async function deleteAdminTeamMemberAsync(
     );
   }
   teamMap.delete(id);
+  await notifyIngestionAdminSessionSync({
+    memberId: existing.id,
+    email: existing.email,
+    minTokenVersion: existing.tokenVersion + 1,
+    disabled: true,
+    deleted: true,
+  });
   return { id: existing.id, email: existing.email };
 }
 

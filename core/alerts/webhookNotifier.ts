@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { validateOutboundUrlAsync } from "@/core/Security/ssrfGuard";
 
 export type WebhookAlertEventType =
   | "DISK_SPACE_LOW"
@@ -30,6 +31,7 @@ export interface WebhookDispatchResult {
   ok: boolean;
   skipped?: boolean;
   reason?: string;
+  code?: string;
   status?: number;
   error?: string;
 }
@@ -106,21 +108,17 @@ export async function dispatchWebhookAlertAsync(
     };
   }
 
-  let parsedUrl: URL;
-  try {
-    parsedUrl = new URL(webhookUrl);
-    if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
-      return {
-        ok: false,
-        error: "Webhook URL must use http:// or https://.",
-      };
-    }
-  } catch {
+  const ssrfCheck = await validateOutboundUrlAsync(webhookUrl, {
+    fieldName: "Webhook URL",
+  });
+  if (!ssrfCheck.allowed || !ssrfCheck.url) {
     return {
       ok: false,
-      error: "Webhook URL is not a valid URL.",
+      code: ssrfCheck.code || "SSRF_BLOCKED_HOST",
+      error: ssrfCheck.error || "Webhook URL is not allowed.",
     };
   }
+  const parsedUrl = ssrfCheck.url;
 
   const dedupeKey = `${payload.event}:${payload.clientId || "global"}`;
   const cooldownMs = Math.max(0, (Number(config.cooldownSec) || 300) * 1000);
@@ -156,8 +154,18 @@ export async function dispatchWebhookAlertAsync(
       headers,
       body: bodyStr,
       cache: "no-store",
+      redirect: "manual",
       signal: AbortSignal.timeout(timeoutMs),
     });
+
+    if (res.status >= 300 && res.status < 400) {
+      return {
+        ok: false,
+        code: "SSRF_BLOCKED_HOST",
+        status: res.status,
+        error: `Webhook endpoint attempted an unsupported HTTP ${res.status} redirect.`,
+      };
+    }
 
     if (!res.ok) {
       if (!options?.bypassCooldown) {

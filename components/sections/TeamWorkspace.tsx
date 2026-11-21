@@ -1,6 +1,7 @@
 'use client';
 
 import { PageShell } from '@/components/layout/PageShell';
+import { useVconRole } from '@/components/layout/VconShell';
 import { Button } from '@/components/ui/Button';
 import { Input, Select } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
@@ -34,8 +35,9 @@ interface TeamMemberItem {
 
 export function TeamWorkspace() {
   const { success, error } = useToast();
+  const shellRole = useVconRole();
   const [members, setMembers] = useState<TeamMemberItem[]>([]);
-  const [currentRole, setCurrentRole] = useState<string>('owner');
+  const [currentRole, setCurrentRole] = useState<string>(() => shellRole || 'viewer');
   const [loading, setLoading] = useState<boolean>(true);
 
   const [createOpen, setCreateOpen] = useState<boolean>(false);
@@ -43,6 +45,7 @@ export function TeamWorkspace() {
   const [newPassword, setNewPassword] = useState<string>('');
   const [newRole, setNewRole] = useState<string>('viewer');
   const [creating, setCreating] = useState<boolean>(false);
+  const [deleteTarget, setDeleteTarget] = useState<TeamMemberItem | null>(null);
 
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -186,6 +189,7 @@ export function TeamWorkspace() {
         throw new Error(data?.error || 'Delete failed.');
       }
       success(`Removed ${member.email} from team.`);
+      setDeleteTarget(null);
       await fetchMembers();
     } catch (err: unknown) {
       error(err instanceof Error ? err.message : 'Unable to delete team member.');
@@ -246,7 +250,7 @@ export function TeamWorkspace() {
               value: String(ownerCount),
             },
             {
-              label: 'Admins / Operators',
+              label: 'Operators / Admins',
               value: String(operatorCount),
             },
             {
@@ -306,14 +310,15 @@ export function TeamWorkspace() {
                           <Select
                             compact
                             aria-label={`Role for ${row.email}`}
-                            value={row.role === 'operator' ? 'admin' : row.role}
+                            value={row.role}
                             disabled={busyId === row.id}
                             onChange={(e) =>
                               void handleRoleChange(row, e.target.value)
                             }
                             options={[
                               { value: 'viewer', label: 'Viewer (Read-Only)' },
-                              { value: 'admin', label: 'Admin / Operator' },
+                              { value: 'operator', label: 'Operator (Manage Clients)' },
+                              { value: 'admin', label: 'Admin (Manage Clients)' },
                               { value: 'owner', label: 'Owner (Full Control)' },
                             ]}
                           />
@@ -359,7 +364,7 @@ export function TeamWorkspace() {
                               variant="danger"
                               size="sm"
                               disabled={busyId === row.id}
-                              onClick={() => void handleDeleteMember(row)}
+                              onClick={() => setDeleteTarget(row)}
                             >
                               Remove
                             </Button>
@@ -411,8 +416,12 @@ export function TeamWorkspace() {
                 label: 'Viewer — Read-only dashboards, events, clients & exports',
               },
               {
+                value: 'operator',
+                label: 'Operator — Manage SDK clients, tokens & manual flushes',
+              },
+              {
                 value: 'admin',
-                label: 'Admin / Operator — Manage SDK clients, tokens & flushes',
+                label: 'Admin — Operational role (manage SDK clients & flushes)',
               },
               {
                 value: 'owner',
@@ -439,6 +448,50 @@ export function TeamWorkspace() {
             </Button>
           </div>
         </form>
+      </Modal>
+
+      <Modal
+        isOpen={Boolean(deleteTarget)}
+        onClose={() => {
+          if (!busyId) setDeleteTarget(null);
+        }}
+        title="Confirm Team Member Removal"
+        maxWidth="sm"
+      >
+        {deleteTarget && (
+          <div className="flex flex-col gap-3">
+            <p className="text-[12px] text-[var(--text-muted)] leading-relaxed">
+              Remove{' '}
+              <span className="font-mono font-medium text-[var(--text)]">
+                {deleteTarget.email}
+              </span>{' '}
+              (<span className="font-mono uppercase">{deleteTarget.role}</span>) from
+              administrator access? Active sessions will stop working immediately.
+            </p>
+            <div className="flex justify-end gap-2 pt-1">
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={busyId === deleteTarget.id}
+                onClick={() => setDeleteTarget(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant="danger"
+                size="sm"
+                data-testid="confirm-remove-member"
+                loading={busyId === deleteTarget.id}
+                disabled={busyId === deleteTarget.id}
+                onClick={() => void handleDeleteMember(deleteTarget)}
+              >
+                Confirm Remove
+              </Button>
+            </div>
+          </div>
+        )}
       </Modal>
     </PageShell>
   );

@@ -138,6 +138,64 @@ export class DiskSpooler {
     }
   }
 
+  /**
+   * Atomically removes `ackedCount` head lines from `spool.jsonl` while
+   * preserving any `unprocessed` envelopes at the FRONT of the queue in a
+   * single atomic temp-file + `fsyncSync` + `renameSync` operation (FIFO safe).
+   */
+  public ackAndRequeueFront(
+    ackedCount: number,
+    unprocessed: DataStackEnvelope[] = []
+  ): number {
+    if (!this.enabled || ackedCount <= 0 || !fs.existsSync(this.spoolFile)) {
+      return 0;
+    }
+    const raw = fs.readFileSync(this.spoolFile, 'utf8');
+    const allLines = raw
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    const consumed = Math.min(Math.floor(ackedCount), allLines.length);
+    const tailLines = allLines.slice(consumed);
+    const headLines = unprocessed.map((evt) => JSON.stringify(evt));
+    const combined = [...headLines, ...tailLines];
+
+    if (combined.length === 0) {
+      try {
+        fs.unlinkSync(this.spoolFile);
+      } catch {
+        // Ignore if already removed
+      }
+      return consumed;
+    }
+
+    this.ensureDir();
+    const tmpFile = `${this.spoolFile}.${process.pid}.${Date.now()}.tmp`;
+    const payload = combined.join('\n') + '\n';
+    try {
+      const fd = fs.openSync(tmpFile, 'w');
+      try {
+        fs.writeFileSync(fd, payload, 'utf8');
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      fs.renameSync(tmpFile, this.spoolFile);
+    } catch (err) {
+      try {
+        if (fs.existsSync(tmpFile)) {
+          fs.unlinkSync(tmpFile);
+        }
+      } catch {
+        // Ignore cleanup failure
+      }
+      throw err;
+    }
+
+    return Math.max(0, consumed - headLines.length);
+  }
+
   public count(): number {
     if (!this.enabled || !fs.existsSync(this.spoolFile)) {
       return 0;

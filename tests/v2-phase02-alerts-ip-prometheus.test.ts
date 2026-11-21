@@ -191,6 +191,9 @@ test("V2-Phase-02 [Webhook Notifier & /api/settings/webhook-test]: HMAC-SHA256 s
   const port = (mockWebhookServer.address() as AddressInfo).port;
   const webhookUrl = `http://127.0.0.1:${port}/hooks/datastack`;
 
+  const prevAllowPrivate = process.env.DATASTACK_ALLOW_PRIVATE_URLS;
+  process.env.DATASTACK_ALLOW_PRIVATE_URLS = "true";
+
   try {
     // 1. Format & signature verification
     const formattedJsonStr = formatOutboundWebhookBody({
@@ -297,6 +300,8 @@ test("V2-Phase-02 [Webhook Notifier & /api/settings/webhook-test]: HMAC-SHA256 s
     const failTestData = await failTestRes.json();
     assert.equal(failTestData.code, "WEBHOOK_DELIVERY_FAILED");
   } finally {
+    if (prevAllowPrivate === undefined) delete process.env.DATASTACK_ALLOW_PRIVATE_URLS;
+    else process.env.DATASTACK_ALLOW_PRIVATE_URLS = prevAllowPrivate;
     await new Promise<void>((resolve) => mockWebhookServer.close(() => resolve()));
     await DataBufferEngine.shutdown();
     resetAdminStateForTests();
@@ -807,6 +812,9 @@ test("V2-Audit-Phase-02 [BUG-V2-AUDIT-05, BUG-V2-AUDIT-06, BUG-V2-AUDIT-08]: Por
   );
   const socketPort = (testHttpServer.address() as AddressInfo).port;
 
+  const prevAllowPrivate = process.env.DATASTACK_ALLOW_PRIVATE_URLS;
+  process.env.DATASTACK_ALLOW_PRIVATE_URLS = "true";
+
   try {
     serverIndex.clearWebhookCooldownCacheForTests();
     serverIndex.applyRuntimeSettingsObject({
@@ -890,6 +898,8 @@ test("V2-Audit-Phase-02 [BUG-V2-AUDIT-05, BUG-V2-AUDIT-06, BUG-V2-AUDIT-08]: Por
     const forbiddenHealthBody = await forbiddenHealthRes.json();
     assert.equal(forbiddenHealthBody.code, "CLIENT_IP_FORBIDDEN");
   } finally {
+    if (prevAllowPrivate === undefined) delete process.env.DATASTACK_ALLOW_PRIVATE_URLS;
+    else process.env.DATASTACK_ALLOW_PRIVATE_URLS = prevAllowPrivate;
     serverIndex.applyRuntimeSettingsObject({
       enableWebhookAlerts: false,
       webhookUrl: "",

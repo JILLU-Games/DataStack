@@ -1,7 +1,7 @@
 # MEMORY.md — DataStack Cross-IDE Persistent Project Memory
 
-> **Last Synchronized**: 2026-11-20  
-> **Status**: **R3 Production Remediation (`BASELINE-2026-11-20-R3`): `3 / 4` Phases Complete (`12 / 16` Bugs Resolved — `R3-Phase-01`, `R3-Phase-02`, & `R3-Phase-03` Verified Complete; `R3-Phase-04` ready for `Proceed to R3-Phase-04`).**  
+> **Last Synchronized**: 2026-11-21  
+> **Status**: **`R4` Production Hardening (`BASELINE-2026-11-20-R4`: `4 / 4` Phases Complete — All `R4-Phase-01`..`04` Complete & Verified (`AUDIT-01`–`20`, `19 / 19` actionable findings resolved)).**  
 > **Scope Rule**: Maintain this file accurately across VS Code, Google Antigravity, Cursor, and any other IDE after every modification, feature update, or bug fix (see `.ai-rules` and `AGENTS.md`).
 
 ---
@@ -61,12 +61,13 @@ datastack/
 │   │   ├── data/                  # Paginated CSV search/query across partitions
 │   │   ├── events/                # Authenticated HTTP ingestion (single/batch/file records) & recent list
 │   │   ├── export/                # Streaming CSV / JSON filtered export (UTC dates, optional flush=false)
+│   │   ├── files/status/          # Safe server-side Port 4000 Files Manager probe (catches ECONNREFUSED cleanly)
 │   │   ├── health/                # Web health + client Bearer token probe + async buffer depth
 │   │   ├── metrics/               # Aggregated Port 3000 + Port 4000 + DB + CSV metrics
 │   │   ├── settings/              # Allowlisted runtime config get/post + live Port 4000 sync
 │   │   └── storage/               # CSV partition listing & manual cross-process buffer flush
 │   └── vcon/                      # Protected Admin Console pages:
-│       ├── dashboard/ clients/ data/ export/ login/ profile/ sdk/ settings/ setup/ simulator/ storage/
+│       ├── dashboard/ clients/ data/ export/ files/ login/ profile/ sdk/ settings/ setup/ simulator/ storage/ team/ audit/
 ├── components/
 │   ├── ui/                        # Single-source-of-truth UI primitives (Button, Input, Table, Modal, Panel, etc.)
 │   ├── layout/                    # MainLayout, Navbar, Sidebar, VconShell, PageShell, AdminPageHeader, Footer
@@ -89,7 +90,8 @@ datastack/
 │   ├── dev-all.js                 # Local concurrent Next.js (3000) + Ingestion (4000) dev runner
 │   └── start-all.js               # Production concurrent Next.js (`next start`) + Ingestion (`server/index.js`) runner
 ├── server/
-│   ├── index.js                   # Express 5 + Socket.IO (Port 4000), /health, /internal/* bridge, PG sync, graceful exit
+│   ├── index.js                   # Express 5 + Socket.IO (Port 4000), /health, /internal/* bridge, PG sync, filesManager mount
+│   ├── filesManager.js            # Hard-locked cloudcmd@19.23.2 (/vcon/files-engine), isolated Socket.IO, Admin Cookie/DB/RBAC/CSRF/*.lock guard
 │   ├── socket/handlers.js         # Handshake JWT auth, ping_verify, sync_data, batch_sync
 │   └── workers/csvWriter.js       # Partitioned CSV batch writer & rotation/pruning worker
 ├── sdk/python/datastack/          # Official pip-installable Python SDK (`datastack` v2.2.0)
@@ -146,16 +148,17 @@ datastack/
 │       ├── configuration-reference.md # Complete environment variable & setting bounds
 │       ├── dependencies.md        # Runtime & dev dependencies audit with rationales
 │       └── glossary.md            # Technical domain terminology & concept glossary
-├── notes/                         # Production Remediation Governance & Scope-Lock Suite (`BASELINE-2026-11-20-R3`):
-│   ├── README.md                  # Master governance index, 6-step execution workflow & phase approval commands
-│   ├── FORENSIC_AUDIT_REPORT.md   # 100% raw-code verified audit (16 bugs: BUG-01..BUG-16) & Demo vs Prod matrix
-│   ├── BASELINE_FREEZE.md         # Frozen baseline snapshot (`BASELINE-2026-11-20-R3`) & 1:1 bug alignment
-│   ├── PRODUCTION_READINESS_SCOPE_LOCK.md # (Doc 001) Exact bug fix contracts & per-phase Scope Locks (`R3-Phase-01`..`04`)
-│   ├── PRODUCTION_ROADMAP.md      # (Doc 002) Dependency-ordered A–Z 4-phase roadmap & burn-down tracker
-│   ├── PHASE_EXECUTION_LOG.md     # (Doc 003) Live phase completion log (`0/4` complete in R3 cycle) & zero-drift guardrails
-│   ├── ERROR_HANDLING_MATRIX.md   # (Doc 004) Active error-handling catalog & 7 planned fixes (`ERR-R3-01`..`07`)
-│   └── ACTUAL_IMPLEMENTATION_STATUS.md # Ground-truth working vs completed-per-phase vs remaining ledger (16 items remaining)
+├── notes/                         # `R4` Production Hardening Governance Suite (`BASELINE-2026-11-20-R4`):
+│   ├── README.md                  # Master governance index, 6-step zero-drift protocol & approval triggers (`R4-Phase-01`..`04`)
+│   ├── FULL_PROJECT_FORENSIC_AUDIT.md # 100% raw-source-verified deep scan (20 findings: 3 Critical, 6 High, 7 Medium, 4 Low)
+│   ├── BASELINE_FREEZE.md         # Frozen baseline snapshot (`BASELINE-2026-11-20-R4`) & 1:1 audit alignment matrix
+│   ├── PRODUCTION_READINESS_SCOPE_LOCK.md # (Doc 001) All 20 defect fix contracts & exact per-phase Scope Locks
+│   ├── PRODUCTION_ROADMAP.md      # (Doc 002) Dependency-ordered A–Z 4-phase roadmap & verification gates
+│   ├── PHASE_EXECUTION_LOG.md     # (Doc 003) Live phase completion tracker (`4 / 4` complete) & changelog template
+│   ├── ERROR_HANDLING_MATRIX.md   # (Doc 004) Verified existing error contracts + 10 planned `R4` contracts (`ERR-R4-01`..`10`)
+│   └── ACTUAL_IMPLEMENTATION_STATUS.md # Ground-truth working vs phase-delivered vs pending ledger (Demo & Production)
 └── tests/                         # Automated verification suites:
+    ├── files-manager.test.ts      # CloudCmd RCE lockdown, CRUD/ZIP/UNZIP, RBAC, CSRF, *.lock, DB revocation, proxy & UI wiring
     ├── phase01-auth.test.ts       # Auth fail-closed, tokenVersion, brute-force lockout, Bearer revocation, CSRF
     ├── phase02-sync.test.ts       # Internal bridge auth, settings sync, JWT rotation kick, rate/security metrics
     ├── phase03-storage-buffer.test.ts # Redis durability, cooperative CSV locks, streaming row count, export filters
@@ -377,6 +380,49 @@ All planned hardening & deployment phases (**Phase-01 through Phase-07**) are **
           - **`BUG-07` (`ERR-R3-05`)**: Implemented real `heartbeatIntervalMs` monitor in Node.js SDK (`startHeartbeatMonitor` with `.unref?.()`, zero-CPU `IDLE_WS` pause, automatic `ping_verify` recovery & spool drain, clean timer teardown, `status().heartbeatActive`); fixed single HTTP/WS `DUPLICATE_DROPPED` reporting (`accepted: 0, duplicates: 1`); wired `TOKEN_ROTATED` (`401`) and `CLIENT_REVOKED` (`403`) fast-fail `DataStackAuthError` across WS `connect_error`, `ping_verify`, `sync_data`, `batch_sync`, and HTTP fallback; compiled CommonJS `sdk/node/datastack/dist/{index,types,spool}.{js,d.ts}` via `tsconfig.json` and pointed `package.json` `main`/`types`/`exports` to `./dist/index.js` & `./dist/index.d.ts`.
           - **`BUG-08` (`ERR-R3-06`)**: Added non-retryable `DataStackQuotaExceededError(DataStackError, retryable=False)` in `sdk/python/datastack/datastack/exceptions.py`, re-exported it in both `datastack` and `datastack_sdk`, and wired immediate fail-fast handling for HTTP `507` and WS `STORAGE_QUOTA_EXCEEDED` / `DISK_SPACE_LOW` in `sdk/python/datastack/datastack/client.py` with `0` retries, `0` HTTP fallback after WS quota rejection, and `0` offline spooling.
           - **Verified**: `13/13` Node SDK/packaging tests (`5/5` `tests/r3-phase03-sdk-parity.test.ts` against live Socket.IO handlers + `4/4` `v2-phase04-node-sdk.test.ts` + `4/4` `phase05-packaging.test.ts`), `14/14` Python SDK tests (`3/3` `tests/r3_phase03_python_sdk_test.py` + `11/11` `phase05_sdk_test.py`), `py_compile`, `tsc`, `npm run build` clean, `npm run lint` (`0` errors, `0` warnings). `0` Port 3000/4000/UI/Docker files modified.
+        - **`R3-Phase-04` Complete & Verified (`2026-11-20`)** (`BUG-11`, `BUG-12`, `BUG-14`, `BUG-16`; `ERR-R3-07`):
+          - **`BUG-11` (`ERR-R3-07`)**: Added `shouldRedirectSimulatorUnauthorized(status, body)` in `lib/vconUiHelpers.ts` and wired it post-JSON-parse across both single & batch HTTP sends in `app/vcon/simulator/page.tsx` so expired/rotated/revoked client `401` responses display inline without logging out the authenticated admin.
+          - **`BUG-12`**: Added browser-local `formatDateForLocalInput(iso)` in `lib/vconUiHelpers.ts` and replaced UTC `.toISOString().slice(0, 16)` inside `ClientsTable.tsx` `openEditModal()`, eliminating local timezone drift on client edits.
+          - **`BUG-14`**: Added `isUiClientExpired()`, `classifyUiClientStatus()`, and `summarizeUiClientCounts()` in `lib/vconUiHelpers.ts`; excluded expired clients from `activeClients` and exposed `expiredClients` in `core/apiEngine/apiService.ts` and `DashboardOverview.tsx`; emitted `datastack_clients_total{status="expired"}` and excluded expired clients from `status="active"` in `app/api/prometheus/route.ts`; expanded `/vcon/clients` with a 6-column `StatStrip` + 6-pill status filter (`Total`, `Online`, `Offline`, `Pending`, `Expired`, `Revoked`).
+          - **`BUG-16`**: Propagated verified session role from `app/vcon/layout.tsx` through `components/layout/VconShell.tsx` (`VconRoleContext` / `useVconRole()`) + `getVconRoleCapabilities()` (`lib/vconUiHelpers.ts`) to gate all role-restricted UI controls across `SettingsWorkspace`, `ClientsTable`, `/vcon/clients`, `DashboardOverview`, `/vcon/storage`, and `/vcon/simulator`.
+          - **Verified**: `29/29` TS unit/integration tests (`4/4` `r3-phase04-ui-metrics-rbac.test.ts` + `15/15` `phase04-ui-sync.test.ts` + `5/5` `v2-phase02-alerts-ip-prometheus.test.ts` + `5/5` `v2-phase03-rbac-audit.test.ts`), live headless Chromium (`playwright-cli`, `1440x900`) verification across `/vcon/dashboard`, `/vcon/clients`, `/vcon/simulator`, `/vcon/storage`, and `/vcon/settings` (`0` JS/React pageerrors), `npm run build` clean, `npm run lint` (`0` errors, `0` warnings). `0` Port 4000/SDK/Auth/Storage/Docker files modified. **All `4 / 4` R3 phases (`16 / 16` bugs) complete.**
+      - **Full-Project Production Forensic Audit & `R4` Baseline Freeze (`BASELINE-2026-11-20-R4`)**:
+        - Cleaned all 8 prior Files Manager files from `notes/` and created the 100% raw-source-verified `notes/FULL_PROJECT_FORENSIC_AUDIT.md` (**20** verified findings: `3` Critical, `6` High, `7` Medium, `4` Low — `19` actionable + `1` verified intentional preview `AUDIT-17`).
+        - Froze the untouched codebase as `BASELINE-2026-11-20-R4` and created the complete 8-file `R4` governance & Scope-Lock suite in `notes/` (`README.md`, `FULL_PROJECT_FORENSIC_AUDIT.md`, `BASELINE_FREEZE.md`, `PRODUCTION_READINESS_SCOPE_LOCK.md`, `PRODUCTION_ROADMAP.md`, `PHASE_EXECUTION_LOG.md`, `ERROR_HANDLING_MATRIX.md`, `ACTUAL_IMPLEMENTATION_STATUS.md`) across `4` Scope-Locked phases (`R4-Phase-01`..`R4-Phase-04`).
+        - **`R4-Phase-01` Complete & Verified (`2026-11-21`)** (`AUDIT-01`, `AUDIT-03`, `AUDIT-04`, `AUDIT-09`; `ERR-R4-01`–`ERR-R4-05`):
+          - **`AUDIT-01` (`ERR-R4-01`)**: Created shared SSRF validator `core/Security/ssrfGuard.ts` blocking non-HTTP(S) schemes, embedded credentials, loopback, RFC1918/CGNAT/ULA, `0.0.0.0/8`, cloud metadata (`169.254.0.0/16`, `fe80::/10`, `metadata.google.internal`), bare internal hostnames, and DNS-rebinding targets, plus `redirect: "manual"` 3xx rejection; enforced uniformly across `core/alerts/webhookNotifier.ts`, `core/Storage/s3Archive.ts`, `app/api/settings/route.ts`, `app/api/settings/webhook-test/route.ts`, `app/api/storage/s3-test/route.ts`, and `server/index.js` `triggerWebhookAlert`, with `DATASTACK_ALLOW_PRIVATE_URLS=true` documented in `.env.example` (metadata still unconditionally blocked).
+          - **`AUDIT-03` (`ERR-R4-02`)**: Mirrored `admin_team_members` and `admin_audit_logs` DDL 1:1 into `server/index.js` `ensureDatabaseSchema()` for full 7-table parity across Port `3000` and Port `4000` on fresh PostgreSQL boots.
+          - **`AUDIT-04` (`ERR-R4-03`)**: Added Next.js `instrumentation.ts` (`register()` on `NEXT_RUNTIME === "nodejs"`) invoking `SettingsManager.bootstrapMaintenanceSchedulerOnBoot()` to hydrate settings and start the periodic storage maintenance scheduler automatically on Port `3000` startup.
+          - **`AUDIT-09` (`ERR-R4-04`, `ERR-R4-05`)**: Added `console.warn` + `storageMode`, `degraded: true`, `code: "AUDIT_STORAGE_DEGRADED"`, `warning`, and `X-DataStack-Audit-Degraded: 1` header in `core/auth/auditLog.ts` & `GET /api/audit`; wired `POST /internal/admin-session-sync` in `server/index.js`, `syncInMemoryAdminSessionState` / `checkInMemorySessionRevocation` in `server/filesManager.js`, and `notifyIngestionAdminSessionSync` in `core/auth/adminUsers.ts` so `!dbPool` Files Manager sessions revoke immediately on logout/disable/delete/credential rotation.
+          - **Verified**: `5/5` `tests/r4-phase01-security-boot.test.ts` + `85/85` regression tests (`phase01..04`, `phase07`, `files-manager`, `r3-phase01`, `r3-phase02`, `v2-phase03`, `v2-phase04` = `90/90` PASS), `npm run build`, `npm run lint` (`0` errors). `0` forbidden UI/SDK/Docker/ingestion-batch files modified.
+        - **`R4-Phase-02` Complete & Verified (`2026-11-21`)** (`AUDIT-05`, `AUDIT-06`, `AUDIT-07`, `AUDIT-10`, `AUDIT-11`, `AUDIT-12`; `ERR-R4-06`–`ERR-R4-08`):
+          - **`AUDIT-05` (`ERR-R4-06`)**: Enforced `DATASTACK_MAX_BATCH_ITEMS` (default `1000`, clamped `1..10000`, documented in `.env.example`) across `POST /api/events` (`400 BATCH_LIMIT_EXCEEDED`, evaluated before storage admission scan) and Socket.IO `batch_sync` (`server/socket/handlers.js`).
+          - **`AUDIT-06`**: Added `FILES_MANAGER_MUTATION` and `DATA_EXPORT_DOWNLOADED` to `core/auth/auditLog.ts` and `ACTION_FILTER_OPTIONS` in `components/sections/AuditLogViewer.tsx`; wired export download audit logs in `app/api/export/route.ts` and CloudCmd HTTP/Socket mutation audit logs (`admin_audit_logs` PG + RAM fallback) in `server/filesManager.js`.
+          - **`AUDIT-07` (`ERR-R4-07`)**: Isolated corrupt `.csv.gz` decompression failures inside `GET /api/data` (`app/api/data/route.ts`) so healthy client partitions return HTTP `200` alongside `corruptPartitions` (`CORRUPT_GZIP_PARTITION`) and `warnings`.
+          - **`AUDIT-10`**: Added `serializeClientResponse()` in `app/api/clients/[id]/route.ts` stripping `secret` and non-rotation `token` from `PATCH /api/clients/[id]` responses while exposing `tokenPreview` (and full `token` only on `action === "regenerate_token"`).
+          - **`AUDIT-11`**: Made `POST /internal/client-sync` (`action === "updated"`) in `server/index.js` disconnect live sockets only on security-relevant updates (`status === "revoked"`, expired `expiresAt`, token rotation, `allowedIps` change, or live socket credential mismatch), keeping metadata-only updates (`name`, `rateLimit`, `storageQuotaMb`) connected without disruption.
+          - **`AUDIT-12` (`ERR-R4-08`)**: Converted `uploadFileToS3` (`core/Storage/s3Archive.ts`) to streaming SHA-256 pre-pass + `Readable.toWeb(fs.createReadStream(...))` (`duplex: "half"`) with `.destroy()` teardown, and hardened `CSVStorageManager.openPartitionTextStream` + `countCsvDataRowsStreamAsync` (`public static`) with `for await` + `.destroy()` cleanup.
+          - **Verified**: `5/5` `tests/r4-phase02-ingestion-audit-streaming.test.ts` PASS, regression suites (`r4-phase01`, `files-manager`, `phase02-04`, `v2-phase02-03`, `r3-phase02`, `r3-phase04`) PASS, Playwright `/vcon/audit` (`0` console errors, new action filter options visible), `npm run build`, and `npm run lint` (`0` errors). `0` forbidden SDK/Docker/Nginx/middleware/auth/unrelated UI files touched.
+        - **`R4-Phase-03` Complete & Verified (`2026-11-21`)** (`AUDIT-02`, `AUDIT-08`, `AUDIT-13`, `AUDIT-20`; `ERR-R4-09`):
+          - **`AUDIT-02`**: Added `"prepare": "npm run build"` and `"devDependencies": { "typescript": "^5.9.3" }` to `sdk/node/datastack/package.json` and compiled `sdk/node/datastack/dist/{index,spool,types}.{js,d.ts}` so CommonJS `require('./sdk/node/datastack')` works cleanly out of the box.
+          - **`AUDIT-20`**: Added atomic `DiskSpooler.ackAndRequeueFront(ackedCount, unprocessed)` in `sdk/node/datastack/spool.ts` and wired `deliverChunkWithSplitAndRetry()` + `flushSpool()` in `sdk/node/datastack/index.ts` (with `dist/` rebuilt) so partial-batch rate-limit recoveries commit acknowledged events without dropping or reordering unprocessed envelopes ahead of tail items.
+          - **`AUDIT-08` (`ERR-R4-09`)**: Added `DATASTACK_ADMIN_EMAIL: "${DATASTACK_ADMIN_EMAIL:-admin@datastack.dev}"` to `services.ingestion.environment` in `docker/docker-compose.yml`; added `proxyMode`/`wsSupported`/`wsHint` detection in `GET /api/files/status` (`app/api/files/status/route.ts`) and rendered a non-blocking `[data-testid="files-manager-proxy-hint"]` strip in `components/sections/FilesManagerWorkspace.tsx` when running standalone without Nginx WebSocket proxying.
+          - **`AUDIT-13`**: Removed dead `/api/auth/setup/status` whitelist line from `middleware.ts` and passed explicit `role: "owner"`, `memberId: "owner-1"` arguments to `createAdminSessionToken()` in `app/api/auth/setup/route.ts`.
+          - **Verified**: `4/4` `tests/r4-phase03-sdk-deploy-auth.test.ts` + `43/43` regression checks (`47/47` total PASS across `v2-phase04-node-sdk`, `r3-phase03-sdk-parity`, `phase05-packaging`, `phase07-deployment`, `phase01-auth`, `files-manager`), `node -e "require('./sdk/node/datastack')"` PASS (`2.2.0`), Playwright `/vcon/files` (`0` console errors), `npm run build`, and `npm run lint` (`0` errors). `0` forbidden Storage/Webhook/Client/Team/Profile/Landing files modified.
+        - **`R4-Phase-04` Complete & Verified (`2026-11-21`)** (`AUDIT-14`, `AUDIT-15`, `AUDIT-16`, `AUDIT-18`, `AUDIT-19`; `ERR-R4-10`, plus `AUDIT-07` non-blocking `corruptPartitions` UI notice):
+          - **`AUDIT-14`**: Updated `components/sections/TeamWorkspace.tsx` to initialize role from `useVconRole()` (`shellRole || 'viewer'`), preserve distinct `operator` and `admin` `<Select>` options and row values without coercing `operator` to `admin`, label StatStrip `'Operators / Admins'`, and require an explicit `<Modal>` (`"Confirm Team Member Removal"`, `[data-testid="confirm-remove-member"]`) before `DELETE /api/team/${id}`.
+          - **`AUDIT-15` (`ERR-R4-10`)**: Wired `useVconRole()` + `getVconRoleCapabilities(shellRole)` (`canOperate`) in `app/vcon/sdk/page.tsx` so `viewer` sessions skip `?includeToken=true` requests cleanly (`0` HTTP `403`s) and display inline `[data-testid="sdk-viewer-rbac-banner"]` RBAC guidance while preserving existing `loadingToken` disabled guards.
+          - **`AUDIT-16`**: Seeded `components/layout/Sidebar.tsx` role badge from `useVconRole()` (`formatShellRoleLabel()`), renamed `'Python SDK'` to `'Client SDKs'`, and added `components/layout/Navbar.tsx` mobile `VCON_LABELS` for `'/vcon/files'` (`'Files Manager'`), `'/vcon/sdk'` (`'Client SDKs'`), `'/vcon/team'` (`'Team & RBAC'`), and `'/vcon/audit'` (`'Audit Log'`).
+          - **`AUDIT-19`**: Replaced fake Demo fallback constants in `components/sections/ProfileWorkspace.tsx` with neutral `EMPTY_PROFILE` placeholders (`'Loading...'` / `'—'`) until `/api/auth/profile` resolves.
+          - **`AUDIT-07` UI Hook**: Surfaced non-blocking `[data-testid="data-corrupt-partitions-warning"]` banners inside `components/sections/DataBrowser.tsx` when `GET /api/data` reports `corruptPartitions`.
+          - **`AUDIT-18`**: Aligned `components/sections/Hero.tsx`, `components/sections/SdkSection.tsx`, and `components/sections/LandingAbout.tsx` around `'Client SDKs'` with side-by-side Python (`datastack v2.2.0`) and Node.js / TypeScript (`@datastack/sdk v2.2.0`) quick-start cards.
+          - **Verified**: `5/5` `tests/r4-phase04-ui-rbac-copy.test.ts` + `46/46` regression checks (`51/51` total PASS), live headless Chromium desktop (`1440x900`) & mobile (`390x844`) verification across `/`, `/vcon/team`, `/vcon/profile`, `/vcon/data`, `/vcon/files`, `/vcon/audit`, `/vcon/sdk` (`0` console/page errors, `0` viewer `403`s), `npm run build`, and `npm run lint` (`0` errors). `0` forbidden backend/SDK/Docker/Nginx files modified. **All `4 / 4` R4 phases (`19 / 19` actionable findings) complete.**
+
+        - **`PREPUSH-FIX-01` Complete & Verified (`2026-11-21`)** (`DEPLOY-BLK-01`, `DEPLOY-BUG-02`–`05`):
+          - **`DEPLOY-BLK-01`**: Resynchronized `package-lock.json` (`lockfileVersion: 3`) with `package.json` (`cloudcmd ^19.23.2` + full dependency tree) and verified `npm ci --include=dev --dry-run` (`Dockerfile.web`) and `npm ci --omit=dev --dry-run` (`Dockerfile.server`) both exit `0`.
+          - **`DEPLOY-BUG-02`**: Hardened `docker/coolify-nginx.conf` and `nginx/default.conf` with `ngx_http_realip_module` (`set_real_ip_from` loopback/RFC1918/Docker bridges + IPv6 ULA, `real_ip_header X-Forwarded-For`, `real_ip_recursive on`) so `proxy_set_header X-Real-IP $remote_addr` preserves real external client IPs behind Coolify Traefik without permitting untrusted public IP spoofing.
+          - **`DEPLOY-BUG-03` & `DEPLOY-BUG-04`**: Added `ARG INGESTION_INTERNAL_URL=http://ingestion:4000` + `ENV INGESTION_INTERNAL_URL` in `docker/Dockerfile.web` `builder` stage for standalone Next.js rewrites, and forwarded optional `DATASTACK_ALLOW_PRIVATE_URLS`, `DATASTACK_MAX_BATCH_ITEMS`, `DATASTACK_RECENT_LIMIT`, `DATASTACK_MAINTENANCE_INTERVAL_MS`, and `DATASTACK_PROXY_MODE` env vars in `docker/docker-compose.yml`.
+          - **`DEPLOY-BUG-05`**: Updated `sdk/node/datastack/index.ts` (`emitSocketSingle` and `sendBatchChunkInternal`) to call `this.disconnect()` on terminal `DataStackAuthError` rejections (`TOKEN_ROTATED`, `CLIENT_REVOKED`, etc.) and recompiled `sdk/node/datastack/dist/*` so subsequent `client.connect()` performs a fresh handshake (`tests/r3-phase03-sdk-parity.test.ts` `5/5` PASS).
 
 ---
 
@@ -384,4 +430,5 @@ All planned hardening & deployment phases (**Phase-01 through Phase-07**) are **
 - Never add per-row telemetry `INSERT` queries to PostgreSQL or add `DROP`/`TRUNCATE` auto-migrations.
 - Never move Socket.IO handlers into Next.js `app/api/*` routes.
 - When deploying updates to an existing Coolify VPS, always preserve existing `SERVICE_*` environment variables and avoid `docker compose down -v` so `pgdata`, `datastack-data`, and `redisdata` volumes remain intact.
-- After any code change, verify with `npm run build`, `npm run lint`, the TS `tests/phase*.test.ts` suite (`npx --yes tsx --test`), and `python3 -m unittest tests/phase05_sdk_test.py`, then synchronize this `MEMORY.md`.
+- After any code change, verify with `npm run build`, `npm run lint`, `npm ci --dry-run`, and the test suites, then synchronize this `MEMORY.md`.
+

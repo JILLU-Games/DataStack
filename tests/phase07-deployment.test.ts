@@ -444,17 +444,17 @@ test("DEPLOY-BUG-02, 03 & 04: Port 4000 memoizes schema DDLs, hydrates rotated J
     assert.equal(failedSync, false);
     assert.equal(ddlCount, 1);
 
-    // 2. Recovery runs 8 DDLs once and hydrates rotated jwt_secret; repeated calls do zero extra DDLs
+    // 2. Recovery runs 10 DDLs once (7 CREATE TABLE + 3 ALTER TABLE) and hydrates rotated jwt_secret; repeated calls do zero extra DDLs
     failDdl = false;
     ddlCount = 0;
     assert.equal(await ingestionServer.syncSettingsFromDatabase(), true);
-    assert.equal(ddlCount, 8);
+    assert.equal(ddlCount, 10);
     assert.equal(selectCount, 1);
     assert.equal(ingestionServer.runtimeConfig.jwtSecret, rotatedSecret);
 
     assert.equal(await ingestionServer.syncSettingsFromDatabase(), true);
     assert.equal(await ingestionServer.syncSettingsFromDatabase(), true);
-    assert.equal(ddlCount, 8, "Repeated 3s sync ticks must NOT re-run CREATE/ALTER DDL statements");
+    assert.equal(ddlCount, 10, "Repeated 3s sync ticks must NOT re-run CREATE/ALTER DDL statements");
     assert.equal(selectCount, 3);
 
     // 3. Graceful shutdown flushes buffered events, quits Redis, and closes PostgreSQL pool cleanly
@@ -605,4 +605,42 @@ test("V2-Deploy-Fix-01 (DEPLOY-V2-BUG-01, 02 & 03): middleware permits GET /api/
     );
   }
 });
+
+test("PREPUSH-FIX-01: Nginx preserves upstream real client IP behind Traefik, Dockerfile.web & Compose align runtime/build env vars, and package-lock includes cloudcmd", () => {
+  for (const confRel of ["docker/coolify-nginx.conf", "nginx/default.conf"]) {
+    const conf = readFileSync(resolve(process.cwd(), confRel), "utf8");
+    assert.match(conf, /set_real_ip_from\s+127\.0\.0\.1;/, `${confRel} must trust loopback proxy`);
+    assert.match(conf, /set_real_ip_from\s+172\.16\.0\.0\/12;/, `${confRel} must trust Docker bridge proxy subnet`);
+    assert.match(conf, /real_ip_header\s+X-Forwarded-For;/, `${confRel} must extract real IP from X-Forwarded-For`);
+    assert.match(conf, /real_ip_recursive\s+on;/, `${confRel} must enable real_ip_recursive`);
+  }
+
+  const webDockerfile = readFileSync(resolve(process.cwd(), "docker/Dockerfile.web"), "utf8");
+  assert.match(
+    webDockerfile,
+    /ARG INGESTION_INTERNAL_URL=http:\/\/ingestion:4000[\s\S]*ENV INGESTION_INTERNAL_URL=\$\{INGESTION_INTERNAL_URL\}[\s\S]*RUN npm run build/,
+    "Dockerfile.web builder must set INGESTION_INTERNAL_URL=http://ingestion:4000 before npm run build",
+  );
+
+  const compose = readFileSync(resolve(process.cwd(), "docker/docker-compose.yml"), "utf8");
+  for (const envKey of [
+    "DATASTACK_ALLOW_PRIVATE_URLS",
+    "DATASTACK_MAX_BATCH_ITEMS",
+    "DATASTACK_RECENT_LIMIT",
+  ]) {
+    const matches = compose.match(new RegExp(`^\\s+${envKey}:`, "gm")) ?? [];
+    assert.equal(matches.length, 2, `Both web and ingestion must forward ${envKey}`);
+  }
+  assert.match(compose, /^\s+DATASTACK_MAINTENANCE_INTERVAL_MS:/m);
+  assert.match(compose, /^\s+DATASTACK_PROXY_MODE:/m);
+
+  const lockJson = JSON.parse(
+    readFileSync(resolve(process.cwd(), "package-lock.json"), "utf8"),
+  ) as {
+    packages?: Record<string, { dependencies?: Record<string, string> }>;
+  };
+  assert.ok(lockJson.packages?.[""]?.dependencies?.cloudcmd, "Root lockfile must declare cloudcmd");
+  assert.ok(lockJson.packages?.["node_modules/cloudcmd"], "package-lock.json must resolve node_modules/cloudcmd");
+});
+
 
