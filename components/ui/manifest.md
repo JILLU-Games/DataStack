@@ -18,3 +18,4 @@ Single-source-of-truth UI component library implementing DataStack's compact, ze
 - `Text.tsx`: Typography helper component for headings, labels, and inline code.
 - `Icon.tsx`: Dynamic Lucide icon renderer.
 - `Toast.tsx`: Toast notification provider (`useToast`) for operation feedback.
+- `SettingsLayout.tsx`: Standardized tabbed settings layout (`SettingsTabs`, `SettingsPanel`, `SettingsGroup` with optional right-aligned header `action`, `SettingsField`, `SettingsFooter`).

@@ -1,7 +1,7 @@
 // REFERENCE SCHEMA ONLY — NOT EXECUTED BY PRISMA CLI AT RUNTIME.
 // Canonical PostgreSQL runtime DDL is owned by `core/Database/database.ts` (Port 3000 via `pg`)
 // and mirrored 1:1 in `server/index.js` (Port 4000 standalone container).
-// Keep all 7 models below strictly synchronized with `core/Database/database.ts` (verified by tests).
+// Keep all 8 models below strictly synchronized with `core/Database/database.ts` (verified by tests).
 
 generator client {
   provider = "prisma-client-js"
@@ -119,4 +119,20 @@ model AdminSettings {
   updatedAt                 DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@map("admin_settings")
+}
+
+model McpSettings {
+  id              String   @id @default("default")
+  enabled         Boolean  @default(false)
+  tokenHash       String   @default("") @map("token_hash")
+  tokenEnc        String   @default("") @map("token_enc")
+  tokenPreview    String   @default("") @map("token_preview")
+  allowedIps      String   @default("") @map("allowed_ips")
+  permissionsJson String   @default("{}") @map("permissions_json")
+  coolifyUrl      String   @default("") @map("coolify_url")
+  coolifyTokenEnc String   @default("") @map("coolify_token_enc")
+  coolifyAppUuid  String   @default("") @map("coolify_app_uuid")
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("mcp_settings")
 }

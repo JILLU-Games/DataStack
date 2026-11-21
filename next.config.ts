@@ -31,6 +31,14 @@ const nextConfig: NextConfig = {
         source: '/vcon/files-engine/:path*',
         destination: `${ingestionBase}/vcon/files-engine/:path*`,
       },
+      {
+        source: '/mcp',
+        destination: `${ingestionBase}/mcp`,
+      },
+      {
+        source: '/mcp/:path*',
+        destination: `${ingestionBase}/mcp/:path*`,
+      },
     ];
   },
   webpack: (config, {dev}) => {

@@ -1,7 +1,7 @@
 # MEMORY.md — DataStack Cross-IDE Persistent Project Memory
 
 > **Last Synchronized**: 2026-11-21  
-> **Status**: **`R5-MCP` (`BASELINE-2026-11-21-R5-MCP`: `1 / 3` Phases Complete — `R5-Phase-01` Complete & Verified; `R4` `4/4` & `PREPUSH-FIX-01` `5/5` Preserved).**  
+> **Status**: **`R5-MCP` (`BASELINE-2026-11-21-R5-MCP`: `3 / 3` Phases Complete — `R5-Phase-03` Complete & Verified; All `R5-MCP`, `R4` `4/4` & `PREPUSH-FIX-01` `5/5` Complete).**  
 > **Scope Rule**: Maintain this file accurately across VS Code, Google Antigravity, Cursor, and any other IDE after every modification, feature update, or bug fix (see `.ai-rules` and `AGENTS.md`).
 
 ---
@@ -64,17 +64,19 @@ datastack/
 │   │   ├── files/status/          # Safe server-side Port 4000 Files Manager probe (catches ECONNREFUSED cleanly)
 │   │   ├── health/                # Web health + client Bearer token probe + async buffer depth
 │   │   ├── metrics/               # Aggregated Port 3000 + Port 4000 + DB + CSV metrics
+│   │   ├── mcp/                   # Owner-only Streamable HTTP MCP settings, token rotation/revocation, & permissions API
 │   │   ├── settings/              # Allowlisted runtime config get/post + live Port 4000 sync
 │   │   └── storage/               # CSV partition listing & manual cross-process buffer flush
 │   └── vcon/                      # Protected Admin Console pages:
-│       ├── dashboard/ clients/ data/ export/ files/ login/ profile/ sdk/ settings/ setup/ simulator/ storage/ team/ audit/
+│       └── dashboard/ clients/ data/ export/ files/ login/ mcp/ profile/ sdk/ settings/ setup/ simulator/ storage/ team/ audit/
 ├── components/
-│   ├── ui/                        # Single-source-of-truth UI primitives (Button, Input, Table, Modal, Panel, etc.)
+│   ├── ui/                        # Single-source-of-truth UI primitives (Button, Input, Table, Modal, Panel, SettingsLayout, etc.)
 │   ├── layout/                    # MainLayout, Navbar, Sidebar, VconShell, PageShell, AdminPageHeader, Footer
-│   ├── sections/                  # Modular feature sections (DashboardOverview, ClientsTable, DataBrowser, ExportWorkspace, SettingsWorkspace, etc.)
+│   ├── sections/                  # Modular feature sections (DashboardOverview, ClientsTable, DataBrowser, ExportWorkspace, McpWorkspace, SettingsWorkspace, etc.)
 │   └── pwa/                       # PwaLifecycle.tsx service worker registration
 ├── lib/
 │   ├── adminAuth.ts               # Uniform API session guard (requireAdminApiSession) + proxy-safe extractClientIp()
+│   ├── mcpUiHelpers.ts            # Browser-safe MCP endpoint URL, AI client JSON snippet, preset & diff helpers
 │   ├── vconCache.ts               # In-memory SWR cache + clearAuthCaches() for logout/SW cleanup
 │   └── vconUiHelpers.ts           # Pure Admin UI sync helpers (settings bounds, bridge sync, UTC presets, timestamps)
 ├── core/
@@ -431,7 +433,28 @@ All planned hardening & deployment phases (**Phase-01 through Phase-07**) are **
           - Created `scripts/capture-build-log.js` (`package.json` `"build"`) and updated `docker/Dockerfile.web` so standalone Next.js builds emit `.next/standalone/build.log`, `.next/standalone/build-meta.json`, and `.runtime-logs/last-build*`.
           - Created `core/mcp/mcpSettings.ts` (`McpSettingsManager` with default `enabled: false`, `17` permission definitions across 4 categories, `dsmcp_` token generation + SHA-256 digest + AES-256-GCM vault encryption, IP CIDR validation, SSRF-guarded `coolifyUrl`, PG/RAM roundtrip, and `POST /internal/mcp-sync` notifier) and added `MCP_*` action types + secret redactions in `core/auth/auditLog.ts`.
           - Added `middleware.ts` internal secret pass + timing-safe `/api/internal/mcp` bridge (`app/api/internal/mcp/route.ts`) supporting metrics, runtime/build logs, audit queries, client CRUD, safe settings updates, CSV+buffer data queries, storage stats/flush, and S3 archive.
-          - **Verified**: `5/5` `tests/r5-phase01-mcp-foundation-logs.test.ts` + `78/78` regression checks across 8 suites (`83/83` PASS), `compile_applet` (`npm run build` -> `.next/standalone/build.log` + `build-meta.json` generated), `lint_applet` (`eslint .` -> `0` errors), and `npm ci --include=dev --dry-run` / `--omit=dev --dry-run` clean. Ready for `Proceed to R5-Phase-02`.
+          - **Verified**: `5/5` `tests/r5-phase01-mcp-foundation-logs.test.ts` + `78/78` regression checks across 8 suites (`83/83` PASS), `compile_applet` (`npm run build` -> `.next/standalone/build.log` + `build-meta.json` generated), `lint_applet` (`eslint .` -> `0` errors), and `npm ci --include=dev --dry-run` / `--omit=dev --dry-run` clean.
+        - **`R5-Phase-02` Complete & Verified (`2026-11-21`)** (`MCP-AUDIT-01`, `MCP-AUDIT-03/04/05/06/07` Server & Proxy Delivery; `ERR-R5-03`–`ERR-R5-06`):
+          - Added `@modelcontextprotocol/sdk` (`^1.32.2`) + `zod` (`^4.6.7`) dependencies and resynchronized `package-lock.json` (`lockfileVersion: 3`, removing `bun.lock`).
+          - Created Owner-only Admin MCP REST API (`app/api/mcp/route.ts`: `GET` masked status + 17 permission definitions; `POST` strict allowlist supporting `enabled`, `allowedIps`, `permissions`, `rotateToken`, `revokeToken`, and SSRF-guarded `coolifyUrl`/`coolifyToken`/`coolifyAppUuid`, with `MCP_TOKEN_ROTATED` & `MCP_SETTINGS_UPDATED` audit logging and live `/internal/mcp-sync`).
+          - Created Port 4000 Streamable HTTP MCP Engine (`server/mcp/mcpEngine.js`) using official `McpServer` + stateless `StreamableHTTPServerTransport`, enforcing disabled gate (`503 MCP_DISABLED`), CIDR allowlist (`403 MCP_IP_FORBIDDEN`), timing-safe SHA-256 `dsmcp_...` Bearer auth (`401 MCP_UNAUTHORIZED`), per-tool permission gate (`MCP_PERMISSION_DENIED`), symlink/`..`/`*.lock`/`.runtime-logs` write-protected storage sandbox, SSRF-guarded optional Coolify log proxy, `admin_audit_logs` telemetry (`MCP_TOOL_CALLED` / `MCP_TOOL_DENIED`), and all **17** registered `datastack_*` tools.
+          - Wired `POST /internal/mcp-sync`, `app.all('/mcp')`, and DB `mcp_settings` hydration (`syncSettingsFromDatabase()`) in `server/index.js`; added `/mcp` reverse proxy blocks in `docker/coolify-nginx.conf`, `nginx/default.conf`, and `next.config.ts`; added `WEB_INTERNAL_URL` in `docker/docker-compose.yml` & `.env.example`.
+          - **Verified**: `3/3` `tests/r5-phase02-mcp-server.test.ts` + `50/50` regression checks across 8 suites (`53/53` PASS), live Port 3000 & Port 4000 `@modelcontextprotocol/sdk` E2E test (login -> `/api/mcp` -> `/mcp` direct + rewritten `tools/list` [17] & `datastack_metrics_health` -> revoke `503`), `npm ci --include=dev --dry-run` / `--omit=dev --dry-run` exit `0`, `compile_applet` clean, and `lint_applet` clean. Ready for `Proceed to R5-Phase-03`.
+        - **`R5-Phase-03` Complete & Verified (`2026-11-21`)** (`MCP-AUDIT-08`; `/vcon/mcp` Admin UI, Navigation & E2E):
+          - Added browser-safe `lib/mcpUiHelpers.ts` (`MCP_CLIENT_TARGETS`, `MCP_PERMISSION_CATEGORIES`, `DEFAULT_PUBLIC_MCP_SETTINGS`, `buildMcpEndpointUrl`, `buildMcpClientConfigSnippet`, `groupMcpPermissionsByCategory`, `countEnabledMcpPermissions`, `applyMcpPermissionPreset`, `applyCategoryPermissionToggle`, `describeMcpBridgeSync`, `buildMcpSavePayload`, `isMcpDraftDirty`).
+          - Added optional additive `action?: React.ReactNode` header slot on `SettingsGroup` (`components/ui/SettingsLayout.tsx`) while preserving all existing callers unchanged.
+          - Created Owner-only `components/sections/McpWorkspace.tsx` and `/vcon/mcp` (`app/vcon/mcp/page.tsx`, exported via `components/sections/index.ts`) using shared UI primitives (`PageShell`, `StatStrip`, `SettingsTabs`, `SettingsPanel`, `SettingsGroup`, `SettingsField`, `SettingsFooter`, `Panel`, `Button`, `Input`, `FormSwitch`, `CodeBlock`, `Modal`, `useToast`): Connection & Token tab (Master Switch, Endpoint URL copy, CIDR allowlist, Mint/Rotate/Revoke & Disable confirmation modals, one-time `dsmcp_...` component-state reveal banner with auto-`scrollIntoView` & `--accent-text` contrast), Permissions tab (`17` ON/OFF switches grouped across `4` categories + `Read-Only`/`Defaults`/`Disable All` presets + aligned per-category `Enable All`/`Disable`), AI Client Setup tab (copyable JSON for Claude Desktop / Code, Cursor, VS Code Copilot, Windsurf), Build Logs (Coolify) tab (`coolifyUrl`, masked/clearable `coolifyToken`, `coolifyAppUuid`), and Non-owner RBAC banner (`mcp-non-owner-banner`) skipping `/api/mcp` fetches cleanly (`0` `403`s).
+          - Wired `MCP Server` (`href: '/vcon/mcp'`, `icon: 'Cpu'`) into `components/layout/Sidebar.tsx` (`System` group) and `'/vcon/mcp': 'MCP Server'` into `components/layout/Navbar.tsx`, and added `tests/r5-phase03-mcp-ui.test.ts`.
+          - **Verified**: `30/30` PASS across `tests/r5-phase03-mcp-ui.test.ts` (`2/2`), `r5-phase02-mcp-server.test.ts` (`3/3`), `r5-phase01-mcp-foundation-logs.test.ts` (`5/5`), `phase04-ui-sync.test.ts` (`15/15`), and `r4-phase04-ui-rbac-copy.test.ts` (`5/5`); two rounds of live headless Chromium (`playwright-cli`) verification covering Dark & Light themes, desktop (`1440x900`) & mobile (`390x844`), enable/mint/reload/rotate/revoke lifecycle, `Permissions` header alignment, auto-scroll reveal, and `viewer` RBAC (`0` console errors, `0` HTTP `403`s); `compile_applet` & `lint_applet` clean. **All `3 / 3` `R5-MCP` phases complete.**
+        - **`FINAL-DEPLOY-FIX-01` Complete & Verified (`2026-11-21`)** (Pre-GitHub-Push Docker / Coolify Deployment Audit Remediation):
+          - **`BLOCKER-01`**: Rebuilt `@datastack/sdk` TypeScript outputs (`sdk/node/datastack/dist/{index,spool,types}.{js,d.ts}`) via `tsc -p sdk/node/datastack/tsconfig.json`, fixing `AUDIT-02` (`require('./sdk/node/datastack')` -> `2.2.0`).
+          - **`ISSUE-02`**: Removed stale `/bun.lock` so `/package-lock.json` (`lockfileVersion: 3`) is the sole lockfile across Coolify/Docker `npm ci` builds.
+          - **`BUG-03`**: Added PostgreSQL `SettingsManager.getSettingsAsync()` hydration guards prior to reading `resolveInternalIngestionSecret()` / `getInternalIngestionHeaders()` in `app/api/internal/mcp/route.ts` (`POST`) and `core/mcp/mcpSettings.ts` (`notifyIngestionMcpSync`), preventing cold-boot bridge secret desyncs when `DATASTACK_INTERNAL_SECRET` is empty and `jwt_secret` was rotated in DB.
+          - **`ISSUE-04` & `ISSUE-05`**: Pre-created `/app/storage/.runtime-logs` and enforced `chown -R node:node /app/storage/.runtime-logs` on boot in both `docker/Dockerfile.web` and `docker/Dockerfile.server` without recursing `/app/storage/data` when UID/GID already matches; synchronized `prisma/schema.prisma` (`model McpSettings @@map("mcp_settings")`) with all 8 canonical runtime PostgreSQL tables.
+          - **Verified**: `49/49` PASS across 9 TypeScript suites (`r4-phase01`, `r4-phase02`, `r4-phase03`, `phase07-deployment`, `phase04-ingestion-hygiene`, `r3-phase03-sdk-parity`, `r5-phase01`, `r5-phase02`, `r5-phase03`), `11/11` PASS (`tests/phase05_sdk_test.py`), `npm ci --dry-run` + `npm ci --omit=dev --dry-run` PASS, `compile_applet` + `lint_applet` clean.
+      - **AI Studio Migration Sync**:
+        - Removed `/bun.lock` to standardize package management exclusively on `npm` (`package-lock.json`).
+        - Expanded `.env.example` to document all 20 runtime environment variables used across the Next.js web app (port `3000`) and Express/Socket.IO ingestion engine (port `4000`), preserving built-in in-memory fallbacks when `DATABASE_URL` and `REDIS_URL` are omitted.
 
 ---
 

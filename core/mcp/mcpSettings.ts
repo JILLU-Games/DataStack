@@ -1,4 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { SettingsManager } from "../adminSettings/settingsManager";
 import { DatabaseEngine } from "../Database/database";
 import { getInternalIngestionHeaders } from "../Security/security";
 import {
@@ -479,6 +480,10 @@ export class McpSettingsManager {
       };
       globals.__dataStackLastMcpBridgeSync = skipped;
       return skipped;
+    }
+
+    if (DatabaseEngine.getPool()) {
+      await SettingsManager.getSettingsAsync();
     }
 
     const headers = getInternalIngestionHeaders();

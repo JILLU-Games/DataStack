@@ -5,8 +5,10 @@ import { resolve } from "node:path";
 import test, { after } from "node:test";
 import { NextRequest } from "next/server";
 import { GET as getHealthRoute } from "../app/api/health/route";
+import { POST as postInternalMcpRoute } from "../app/api/internal/mcp/route";
 import { SettingsManager } from "../core/adminSettings/settingsManager";
 import { DataBufferEngine, type RedisBufferClient } from "../core/data/buffer";
+import { resolveInternalIngestionSecret } from "../core/Security/security";
 
 const require = createRequire(import.meta.url);
 
@@ -642,5 +644,96 @@ test("PREPUSH-FIX-01: Nginx preserves upstream real client IP behind Traefik, Do
   assert.ok(lockJson.packages?.[""]?.dependencies?.cloudcmd, "Root lockfile must declare cloudcmd");
   assert.ok(lockJson.packages?.["node_modules/cloudcmd"], "package-lock.json must resolve node_modules/cloudcmd");
 });
+
+test("FINAL-DEPLOY-FIX-01: Single npm lockfile, Dockerfile .runtime-logs ownership parity, 8-table prisma sync, and cold-boot MCP bridge hydration", async () => {
+  assert.equal(existsSync(resolve(process.cwd(), "bun.lock")), false, "Stale bun.lock must stay removed");
+
+  for (const dfRel of ["docker/Dockerfile.web", "docker/Dockerfile.server"]) {
+    const dfSrc = readFileSync(resolve(process.cwd(), dfRel), "utf8");
+    assert.match(dfSrc, /mkdir -p \/app\/storage\/data \/app\/storage\/\.runtime-logs/, `${dfRel} must pre-create .runtime-logs`);
+    assert.match(dfSrc, /chown -R node:node \/app\/storage\/\.runtime-logs/, `${dfRel} must ensure node:node ownership on .runtime-logs`);
+  }
+
+  const prismaSrc = readFileSync(resolve(process.cwd(), "prisma/schema.prisma"), "utf8");
+  assert.match(prismaSrc, /@@map\("mcp_settings"\)/, "prisma/schema.prisma must map mcp_settings");
+
+  const prevCorePool = g.__dataStackCorePool;
+  const prevCoreSchema = (g as Record<string, unknown>).__dataStackCoreSchema;
+  const prevHydrated = g.__dataStackSettingsHydrated;
+  const prevSettings = g.__dataStackAdminSettings;
+  const prevInternalSecret = process.env.DATASTACK_INTERNAL_SECRET;
+  const rotatedJwt = "rotated-db-jwt-secret-minimum-32-chars-ok";
+
+  try {
+    delete process.env.DATASTACK_INTERNAL_SECRET;
+    process.env.DATABASE_URL = "postgres://datastack:test@127.0.0.1:5432/datastack";
+    g.__dataStackSettingsHydrated = false;
+    g.__dataStackAdminSettings = undefined;
+    (g as Record<string, unknown>).__dataStackCoreSchema = Promise.resolve();
+    g.__dataStackCorePool = {
+      async query(sql: string) {
+        if (/FROM admin_settings/i.test(sql)) {
+          return {
+            rowCount: 1,
+            rows: [
+              {
+                server_port: 4000,
+                web_port: 3000,
+                max_events_per_sec: 100,
+                max_payload_size_kb: 100,
+                batch_flush_threshold: 500,
+                batch_flush_interval_ms: 2000,
+                file_rotation_mb: 100,
+                jwt_secret: rotatedJwt,
+                enable_idempotency: true,
+                auto_prune_days: 30,
+                compress_after_days: 0,
+                enable_s3_backup: false,
+                s3_endpoint: "",
+                s3_region: "auto",
+                s3_bucket: "",
+                s3_prefix: "datastack/",
+                s3_access_key_id: "",
+                s3_secret_access_key_enc: "",
+                disk_pause_threshold_pct: 95,
+                enable_webhook_alerts: false,
+                webhook_url: "",
+                webhook_secret_enc: "",
+                webhook_cooldown_sec: 300,
+                enable_prometheus_metrics: false,
+                prometheus_metrics_token_enc: "",
+                updated_at: new Date().toISOString(),
+              },
+            ],
+          };
+        }
+        return { rowCount: 0, rows: [] };
+      },
+    };
+
+    const expectedRotatedHeader = resolveInternalIngestionSecret(rotatedJwt);
+    const res = await postInternalMcpRoute(
+      new NextRequest("http://localhost:3000/api/internal/mcp", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-datastack-internal-secret": expectedRotatedHeader,
+        },
+        body: JSON.stringify({ action: "settings_get" }),
+      }),
+    );
+    assert.equal(res.status, 200);
+  } finally {
+    g.__dataStackCorePool = prevCorePool;
+    (g as Record<string, unknown>).__dataStackCoreSchema = prevCoreSchema;
+    g.__dataStackSettingsHydrated = prevHydrated;
+    g.__dataStackAdminSettings = prevSettings;
+    if (prevInternalSecret === undefined) delete process.env.DATASTACK_INTERNAL_SECRET;
+    else process.env.DATASTACK_INTERNAL_SECRET = prevInternalSecret;
+    if (prevDbUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = prevDbUrl;
+  }
+});
+
 
 

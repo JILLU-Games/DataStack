@@ -46,6 +46,7 @@ const NAVIGATION_SECTIONS = [
       { name: 'Simulator', href: '/vcon/simulator', icon: 'Play' },
       { name: 'Team & RBAC', href: '/vcon/team', icon: 'Users' },
       { name: 'Audit Log', href: '/vcon/audit', icon: 'FileText' },
+      { name: 'MCP Server', href: '/vcon/mcp', icon: 'Cpu' },
       { name: 'Settings', href: '/vcon/settings', icon: 'Sliders' },
       { name: 'Profile', href: '/vcon/profile', icon: 'User' },
     ],

@@ -15,6 +15,7 @@ const {
   clearInMemoryAdminSessionStateForTests,
 } = require('./filesManager');
 const { installRuntimeLogHook } = require('./runtimeLogCapture');
+const { createMcpEngine } = require('./mcp/mcpEngine');
 
 function parseAllowedCorsOrigins(raw = process.env.DATASTACK_CORS_ORIGINS) {
   if (typeof raw !== 'string') return null;
@@ -1627,6 +1628,16 @@ async function triggerWebhookAlert(payload, options = {}) {
   }
 }
 
+const mcpEngine = createMcpEngine({
+  getStorageDataDir: () => writer.baseDir,
+  getDbPool: () => dbPool,
+  isClientIpAllowed,
+  resolveInternalSecret: () => resolveInternalSecret(),
+  decryptVaultSecret,
+  validateOutboundUrlAsync: validateOutboundWebhookUrlAsync,
+  flushBuffer,
+});
+
 async function ensureDatabaseSchema() {
   const pool = dbPool;
   if (!pool) return false;
@@ -1866,6 +1877,7 @@ async function syncSettingsFromDatabase() {
         : 300,
       jwtSecret: row.jwt_secret ? String(row.jwt_secret).trim() : undefined,
     });
+    await mcpEngine.hydrateFromDatabase(dbPool);
     return true;
   } catch {
     return false;
@@ -2295,6 +2307,15 @@ app.post('/internal/admin-session-sync', requireInternalAuth, (req, res) => {
   res.json({ success: true, synced });
 });
 
+app.post('/internal/mcp-sync', requireInternalAuth, (req, res) => {
+  mcpEngine.syncState(req.body || {});
+  res.json({ success: true, state: mcpEngine.getStateSnapshot() });
+});
+
+app.all('/mcp', (req, res) => {
+  void mcpEngine.handleHttpRequest(req, res);
+});
+
 function stopTimers() {
   if (flushTimer) {
     clearInterval(flushTimer);
@@ -2503,4 +2524,5 @@ module.exports = {
   syncInMemoryAdminSessionState,
   clearInMemoryAdminSessionStateForTests,
   getFilesManagerHandle: () => filesManagerHandle,
+  mcpEngine,
 };

@@ -13,3 +13,4 @@ Modular feature sections used across the public landing page and `/vcon/*` admin
 - `ClientsView.tsx`: Client management workspace with search, status filters, and registration modal.
 - `ClientsTable.tsx`: Client registry table with credential display, key rotation, access revocation, and deletion modals.
 - `ExportWorkspace.tsx`: CSV and JSON dataset export builder with client/date filtering and recent partition downloads.
+- `McpWorkspace.tsx`: Owner-only MCP Server configuration workspace with Connection & Token, categorized 17-tool Permissions, AI Client Setup JSON snippets, and Coolify Build Logs controls.

@@ -22,6 +22,7 @@ const VCON_LABELS: Record<string, string> = {
   '/vcon/simulator': 'Simulator',
   '/vcon/team': 'Team & RBAC',
   '/vcon/audit': 'Audit Log',
+  '/vcon/mcp': 'MCP Server',
   '/vcon/profile': 'Profile',
   '/vcon/settings': 'Settings',
 };

@@ -10,6 +10,7 @@ import {
   recordAdminAuditLogAsync,
 } from "@/core/auth/auditLog";
 import { DataBufferEngine, REDIS_BUFFER_KEY } from "@/core/data/buffer";
+import { DatabaseEngine } from "@/core/Database/database";
 import {
   readBuildLogs,
   readRuntimeLogs,
@@ -106,6 +107,9 @@ function parseBoundedInt(
 }
 
 export async function POST(req: NextRequest) {
+  if (DatabaseEngine.getPool()) {
+    await SettingsManager.getSettingsAsync();
+  }
   if (!verifyInternalBridgeSecret(req)) {
     return NextResponse.json(
       {

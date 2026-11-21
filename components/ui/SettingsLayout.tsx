@@ -63,16 +63,21 @@ export function SettingsPanel({
 
 export function SettingsGroup({
   title,
+  action,
   children,
 }: {
   title: string;
+  action?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
     <section className="border-b border-[var(--border)] p-3.5 last:border-b-0">
-      <h2 className="mb-2.5 flex items-center gap-1.5 text-[9.5px] font-medium uppercase tracking-wider text-[var(--text-faint)]">
-        {title}
-      </h2>
+      <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
+        <h2 className="flex items-center gap-1.5 text-[9.5px] font-medium uppercase tracking-wider text-[var(--text-faint)]">
+          {title}
+        </h2>
+        {action && <div className="flex items-center gap-1">{action}</div>}
+      </div>
       <div className="flex flex-col gap-1.5">{children}</div>
     </section>
   );

@@ -8,9 +8,9 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT_SOCKET=4000
 RUN apk add --no-cache su-exec \
-  && mkdir -p /app/storage/data \
+  && mkdir -p /app/storage/data /app/storage/.runtime-logs \
   && chown -R node:node /app/storage
 COPY --from=dependencies --chown=node:node /app/node_modules ./node_modules
 COPY --chown=node:node server ./server
 EXPOSE 4000
-CMD ["sh", "-c", "mkdir -p /app/storage/data && NODE_UG=\"$(id -u node):$(id -g node)\" && if [ \"$(stat -c '%u:%g' /app/storage/data)\" != \"$NODE_UG\" ]; then chown -R node:node /app/storage; else chown node:node /app/storage /app/storage/data; fi && exec su-exec node:node node server/index.js"]
+CMD ["sh", "-c", "mkdir -p /app/storage/data /app/storage/.runtime-logs && NODE_UG=\"$(id -u node):$(id -g node)\" && if [ \"$(stat -c '%u:%g' /app/storage/data)\" != \"$NODE_UG\" ]; then chown -R node:node /app/storage; else chown node:node /app/storage /app/storage/data && chown -R node:node /app/storage/.runtime-logs; fi && exec su-exec node:node node server/index.js"]
