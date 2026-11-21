@@ -1,0 +1,39 @@
+name: DataStack Docker Build CI
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.gitea/workflows/datastack-docker-ci.yml'
+  workflow_dispatch:
+
+jobs:
+  docker-build:
+    runs-on: ubuntu-latest
+    container: node:22-alpine
+    timeout-minutes: 40
+    steps:
+      - name: Provision isolated Docker CLI and Git tools
+        run: |
+          set -eu
+          apk add --no-cache git docker-cli docker-cli-compose
+          docker --version
+          docker compose version
+      - uses: actions/checkout@v4
+        with:
+          github-server-url: https://dev.ivib.cc
+      - name: Validate actual Compose configuration
+        run: |
+          set -eu
+          docker compose -f docker/docker-compose.yml config --no-interpolate --quiet
+          echo DATASTACK_COMPOSE_CONFIG_PASS
+      - name: Check CI-only Docker daemon
+        run: |
+          set -eu
+          docker info >/dev/null || { echo DOCKER_DAEMON_UNAVAILABLE; exit 3; }
+      - name: Build all DataStack container images without deployment
+        run: |
+          set -eu
+          docker build -f docker/Dockerfile.server -t datastack-ci-ingestion .
+          docker build -f docker/Dockerfile.web -t datastack-ci-web .
+          docker build -f docker/Dockerfile.proxy -t datastack-ci-proxy .
+          echo DATASTACK_DOCKER_IMAGES_PASS
