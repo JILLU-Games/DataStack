@@ -1,0 +1,121 @@
+name: DataStack CI Verification
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.gitea/workflows/datastack-ci.yml'
+  workflow_dispatch:
+
+jobs:
+  node-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          github-server-url: https://dev.ivib.cc
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build Node SDK
+        run: |
+          npm --prefix sdk/node/datastack install --no-audit --no-fund
+          npm --prefix sdk/node/datastack run build
+      - name: Run all TypeScript regression suites
+        run: npx --yes tsx@4.20.6 --test --test-concurrency=1 tests/*.test.ts
+
+  python-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          github-server-url: https://dev.ivib.cc
+      - name: Install Python toolchain
+        run: |
+          set -eu
+          apt-get update -qq
+          apt-get install -y python3 python3-venv python3-pip
+          python3 -m venv /tmp/datastack-ci-venv
+          /tmp/datastack-ci-venv/bin/python -m pip install -e ./sdk/python/datastack -e ./sdk-python
+      - name: Run all Python SDK tests
+        run: |
+          set -eu
+          /tmp/datastack-ci-venv/bin/python -m compileall -q ./sdk/python/datastack ./sdk-python
+          /tmp/datastack-ci-venv/bin/python -m unittest discover -s tests -p '*_test.py' -v
+
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          github-server-url: https://dev.ivib.cc
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: TypeScript type check
+        run: npx tsc --noEmit
+      - name: ESLint
+        run: npm run lint
+
+  production-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          github-server-url: https://dev.ivib.cc
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Next.js production build
+        run: |
+          set -eu
+          npm run build
+          test -f .next/standalone/server.js
+
+  docker-image-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          github-server-url: https://dev.ivib.cc
+      - name: Docker and Compose availability
+        run: |
+          set -eu
+          docker --version
+          docker compose version
+          docker info
+      - name: Validate Compose structure
+        run: docker compose -f docker/docker-compose.yml config --no-interpolate --quiet
+      - name: Build Docker images without running services
+        run: |
+          set -eu
+          docker build -f docker/Dockerfile.server -t datastack-ci-ingestion .
+          docker build -f docker/Dockerfile.web -t datastack-ci-web .
+          docker build -f docker/Dockerfile.proxy -t datastack-ci-proxy .
+
+  windows-compatibility:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          github-server-url: https://dev.ivib.cc
+      - name: Verify native Windows toolchain
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node --version
+          npm --version
+          python --version
+          git rev-parse HEAD
+      - name: Install dependencies and compile Node SDK
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm ci --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'npm install failed' }
+          npm --prefix sdk/node/datastack install --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'SDK install failed' }
+          npm --prefix sdk/node/datastack run build
+          if ($LASTEXITCODE -ne 0) { throw 'SDK compilation failed' }
