@@ -1,0 +1,33 @@
+name: DataStack ESLint CI
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.gitea/workflows/datastack-eslint-ci.yml'
+  workflow_dispatch:
+
+jobs:
+  eslint-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          github-server-url: https://dev.ivib.cc
+      - name: Install dependencies in isolated checkout
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node --version
+          npm --version
+          npm install --package-lock-only --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Temporary lock regeneration failed' }
+          npm ci --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'npm ci failed' }
+      - name: Run full ESLint
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm run lint
+          if ($LASTEXITCODE -ne 0) { throw 'ESLint check failed' }
+          Write-Output 'DATASTACK_ESLINT_PASS'
