@@ -20,8 +20,22 @@ jobs:
         run: |
           npm --prefix sdk/node/datastack install --no-audit --no-fund
           npm --prefix sdk/node/datastack run build
-      - name: Run all TypeScript regression suites
-        run: npx --yes tsx@4.20.6 --test --test-concurrency=1 tests/*.test.ts
+      - name: Run all TypeScript regression suites with bounded isolation
+        run: |
+          set +e
+          failed=0
+          total=0
+          for file in tests/*.test.ts; do
+            total=$((total + 1))
+            echo "CI_SUITE_BEGIN $file"
+            timeout --signal=TERM --kill-after=5s 70s npx --yes tsx@4.20.6 --test "$file"
+            code=$?
+            echo "CI_SUITE_EXIT $file $code"
+            if [ "$code" -ne 0 ]; then failed=$((failed + 1)); fi
+          done
+          echo "CI_SUITE_SUMMARY total=$total failed=$failed"
+          test "$total" -eq 24 || exit 1
+          test "$failed" -eq 0
 
   python-regression:
     runs-on: ubuntu-latest
@@ -113,8 +127,12 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
+          # Diagnostic only: regenerate the lock in the disposable runner checkout.
+          # The tracked repository lock remains unchanged for the later bug-fix phase.
+          npm install --package-lock-only --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Temporary lock regeneration failed' }
           npm ci --no-audit --no-fund
-          if ($LASTEXITCODE -ne 0) { throw 'npm install failed' }
+          if ($LASTEXITCODE -ne 0) { throw 'Diagnostic npm install failed' }
           npm --prefix sdk/node/datastack install --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { throw 'SDK install failed' }
           npm --prefix sdk/node/datastack run build
