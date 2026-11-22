@@ -164,6 +164,16 @@ function setRedisClientForTests(client) {
 
 async function pushEventsToRedisOrFallback(events) {
   if (!events || events.length === 0) return bufferQueue.length;
+  // Failed persistence may leave an unacknowledged RAM event beside an SDK
+  // retry with the same ID. Persist each client/event ID at most once per push.
+  const seen = new Set();
+  events = events.filter((evt) => {
+    if (!evt || !evt.clientId || !evt.eventId) return true;
+    const key = JSON.stringify([evt.clientId, evt.eventId]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
   const redis = getRedisClient();
   let persistFailed = false;
   if (redis) {
@@ -1985,8 +1995,14 @@ const socketHandlersApi = setupSocketHandlers(io, bufferQueue, writer, {
       return;
     }
 
-    if (bufferQueue.length >= runtimeConfig.batchFlushThreshold) {
-      void flushBuffer().catch(() => undefined);
+    // Redis is optional. Without it, a positive Socket.IO ACK requires a
+    // completed CSV write, not merely an event sitting in volatile RAM.
+    // Keep existing RAM retry state if the disk write fails.
+    if (bufferQueue.length > 0) {
+      const saved = await flushBuffer();
+      if (saved.lockTimedOut || bufferQueue.length > 0) {
+        throw new Error('BUFFER_PERSIST_FAILED: Event not durably queued');
+      }
     }
   },
 });

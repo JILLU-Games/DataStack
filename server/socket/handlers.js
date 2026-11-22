@@ -478,6 +478,84 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
     return hasNonEnvelopeKey ? stripped : {};
   }
 
+  // P02 R-01: an idempotency claim is created before persistence. After a
+  // crash that claim may survive without its event. Prove the event reached
+  // Redis's buffer or a CSV partition before issuing a duplicate-success ACK.
+  async function hasDurableEvent(clientId, eventId, timestamp) {
+    const ackKey = `\u0000durably-acked:${clientId}:${eventId}`;
+    const previousAck = idempotencyMap.get(ackKey);
+    if (typeof previousAck === 'number' && Date.now() - previousAck < IDEMPOTENCY_TTL_MS) {
+      return true;
+    }
+    const redis = getRedisClient();
+    if (redis && typeof redis.lrange === 'function') {
+      try {
+        // Bounded read: reject uncertain old claims instead of loading a huge Redis queue.
+        const queued = await redis.lrange('datastack:buffer:events', -512, -1);
+        if (Array.isArray(queued) && queued.some((raw) => {
+          try {
+            const evt = JSON.parse(raw);
+            return evt && evt.clientId === clientId && evt.eventId === eventId;
+          } catch { return false; }
+        })) {
+          idempotencyMap.set(ackKey, Date.now());
+          return true;
+        }
+      } catch {
+        // Redis cannot prove durability; fall through to read-only CSV proof.
+      }
+    }
+    if (!worker || typeof worker.sanitizeClientId !== 'function' ||
+        typeof worker.extractSafePartitionDate !== 'function' ||
+        typeof worker.isPartitionFilename !== 'function' ||
+        typeof worker.extractDateFromFilename !== 'function') return false;
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const { pipeline } = require('node:stream/promises');
+    const { Writable } = require('node:stream');
+    const { parse } = require('csv-parse');
+    const zlib = require('node:zlib');
+    const aborter = new AbortController();
+    const deadline = setTimeout(() => aborter.abort(), 1800);
+    deadline.unref?.();
+    try {
+      const base = await fs.promises.realpath(worker.baseDir);
+      const directory = path.resolve(base, worker.sanitizeClientId(clientId));
+      const realDir = await fs.promises.realpath(directory);
+      if (!realDir.startsWith(base + path.sep)) return false;
+      const date = worker.extractSafePartitionDate(timestamp);
+      const files = await fs.promises.readdir(realDir, { withFileTypes: true });
+      let scannedBytes = 0;
+      for (const item of files) {
+        if (!item.isFile() || !worker.isPartitionFilename(item.name) ||
+            worker.extractDateFromFilename(item.name) !== date) continue;
+        const filename = path.join(realDir, item.name);
+        scannedBytes += (await fs.promises.stat(filename)).size;
+        if (scannedBytes > 256 * 1024 * 1024) return false;
+        let found = false;
+        const stages = [fs.createReadStream(filename)];
+        if (item.name.endsWith('.gz')) stages.push(zlib.createGunzip());
+        stages.push(parse({ columns: true, bom: true, skip_empty_lines: true }));
+        stages.push(new Writable({
+          objectMode: true,
+          write(row, _encoding, done) {
+            if (row.clientId === clientId && row.eventId === eventId) found = true;
+            done();
+          },
+        }));
+        await pipeline(...stages, { signal: aborter.signal });
+        if (found) {
+          idempotencyMap.set(ackKey, Date.now());
+          return true;
+        }
+      }
+    } catch {
+      // Missing, corrupt, unreadable or slow CSV cannot justify positive ACK.
+    } finally {
+      clearTimeout(deadline);
+    }
+    return false;
+  }
   io.on("connection", (socket) => {
     const clientId = socket.data.clientId;
     socket.join(`client:${clientId}`);
@@ -551,7 +629,6 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
 
         // A previous Redis write failure can leave an uncommitted idempotency
         // claim. Never report that claim as a successful durable duplicate.
-        const failedAt = idempotencyMap.get(`${clientId}:${eventId}`);
         const check = await validateSingleEventAsync(
           clientId,
           eventId,
@@ -560,14 +637,14 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
         );
         if (!check.allowed) {
           if (check.duplicate) {
-            if (typeof failedAt === "number" && failedAt < 0 &&
-                Date.now() + failedAt < IDEMPOTENCY_TTL_MS) {
-              if (callback) callback({
-                success: false, eventId, code: "BUFFER_PERSIST_FAILED",
-                error: "BUFFER_PERSIST_FAILED: Event not durably queued",
-              });
+            if (await hasDurableEvent(clientId, eventId, timestamp)) {
+              idempotencyMap.delete(`\u0000failed-persist:${clientId}:${eventId}`);
+              if (callback) callback({ success: true, eventId, note: "DUPLICATE_DROPPED" });
             } else if (callback) {
-              callback({ success: true, eventId, note: "DUPLICATE_DROPPED" });
+              callback({
+                success: false, eventId, code: "BUFFER_PERSIST_FAILED",
+                error: "BUFFER_PERSIST_FAILED: Idempotency claim has no durable event",
+              });
             }
             return;
           }
@@ -597,7 +674,8 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
           // Invalidate the pre-persistence idempotency claim so SDK retry can
           // resubmit after Redis recovers. Keep the volatile RAM event pending.
           const claimKey = `${clientId}:${eventId}`;
-          idempotencyMap.set(claimKey, -Date.now());
+          idempotencyMap.delete(claimKey);
+          idempotencyMap.set(`\u0000failed-persist:${claimKey}`, Date.now());
           const claimRedis = getRedisClient();
           if (claimRedis && typeof claimRedis.del === "function") {
             try {
@@ -621,6 +699,9 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
           return;
         }
 
+        // Clear any failed local persistence marker only after a durable write.
+        idempotencyMap.delete(`\u0000failed-persist:${clientId}:${eventId}`);
+        idempotencyMap.set(`\u0000durably-acked:${clientId}:${eventId}`, Date.now());
         if (callback) callback({ success: true, eventId });
       } catch (err) {
         if (callback) callback({ success: false, error: err.message });
@@ -726,8 +807,7 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
               : new Date().toISOString();
           const rawData = extractBatchItemData(safeItem);
 
-          const failedAt = idempotencyMap.get(`${clientId}:${eventId}`);
-          const check = await validateSingleEventAsync(
+            const check = await validateSingleEventAsync(
             clientId,
             eventId,
             rawData,
@@ -735,14 +815,14 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
           );
           if (!check.allowed) {
             if (check.duplicate) {
-              if (typeof failedAt === "number" && failedAt < 0 &&
-                  Date.now() + failedAt < IDEMPOTENCY_TTL_MS) {
+              if (await hasDurableEvent(clientId, eventId, timestamp)) {
+                idempotencyMap.delete(`\u0000failed-persist:${clientId}:${eventId}`);
+                duplicates += 1;
+              } else {
                 rejected += 1;
                 volatileDuplicate = true;
                 if (errors.length < 5) errors.push(
-                  `${eventId}: BUFFER_PERSIST_FAILED: Event not durably queued`);
-              } else {
-                duplicates += 1;
+                  `${eventId}: BUFFER_PERSIST_FAILED: Idempotency claim has no durable event`);
               }
               continue;
             }
@@ -779,7 +859,8 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
             const claimRedis = getRedisClient();
             for (const eventId of acceptedEventIds) {
               const claimKey = `${clientId}:${eventId}`;
-              idempotencyMap.set(claimKey, -Date.now());
+              idempotencyMap.delete(claimKey);
+              idempotencyMap.set(`\u0000failed-persist:${claimKey}`, Date.now());
               if (claimRedis && typeof claimRedis.del === "function") {
                 try {
                   await claimRedis.del(`${REDIS_IDEMPOTENCY_PREFIX}${claimKey}`);
@@ -804,6 +885,21 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
             }
             return;
           }
+        }
+
+        for (const persistedId of acceptedEventIds) {
+          idempotencyMap.delete(`\u0000failed-persist:${clientId}:${persistedId}`);
+          idempotencyMap.set(`\u0000durably-acked:${clientId}:${persistedId}`, Date.now());
+        }
+        // Never ACK a mixed batch as successful while any event remains volatile.
+        if (volatileDuplicate) {
+          if (callback) callback({
+            success: false, processed, rejected, duplicates,
+            code: "BUFFER_PERSIST_FAILED",
+            error: "BUFFER_PERSIST_FAILED: Batch contains non-durable event",
+            errors,
+          });
+          return;
         }
 
         if (processed === 0 && duplicates === 0 && rejected > 0) {

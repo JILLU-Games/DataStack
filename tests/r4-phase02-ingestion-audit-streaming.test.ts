@@ -776,3 +776,60 @@ test("R4-Phase-02 AUDIT-12 / ERR-R4-08: Streaming S3 upload & streaming .csv.gz 
     assert.equal(fs.existsSync(tmpDir), false);
   }
 });
+
+test("P02 R-01: stale pre-persistence Redis claim after restart never yields a false duplicate ACK", async () => {
+  // A fresh Socket.IO handler has no in-process ACK cache, but Redis retained
+  // the idempotency claim from a hypothetical crash before Redis RPUSH.
+  const client = await SDKManager.registerClientAsync({
+    clientId: "p02_stale_claim", name: "P02 Stale Claim", rateLimit: 200,
+  });
+  const eventId = "p02-not-yet-persisted-001";
+  const stored = [] as string[];
+  const redis = {
+    status: "ready",
+    async get(key: string) {
+      return key === `datastack:idem:${client.clientId}:${eventId}` ? "1" : null;
+    },
+    async set() { return null; },
+    async incr() { return 1; },
+    async pexpire() { return 1; },
+    async lrange() { return stored; },
+  };
+  const httpServer = http.createServer();
+  const io = new Server(httpServer);
+  setupSocketHandlers(io, [], null, {
+    getRuntimeConfig: () => ({
+      jwtSecret: "datastack-jwt-default-secret-key-32-chars-long",
+      maxEventsPerSec: 200, maxPayloadSizeBytes: 100 * 1024, enableIdempotency: true,
+    }),
+    verifyClientInDb: async () => ({ allowed: true, rateLimit: 200 }),
+    getRedisClient: () => redis,
+    onBufferPush: async () => undefined,
+  });
+  let socket: ReturnType<typeof ioClient> | null = null;
+  try {
+    await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+    const port = (httpServer.address() as AddressInfo).port;
+    socket = ioClient(`http://127.0.0.1:${port}`, { auth: { token: client.token }, transports: ["websocket"] });
+    await new Promise<void>((resolve, reject) => {
+      socket!.once("connect", resolve);
+      socket!.once("connect_error", reject);
+    });
+    const sendDuplicate = () => new Promise<{ success: boolean; code?: string; note?: string }>((resolve, reject) => {
+      socket!.timeout(3000).emit("sync_data", { eventId, data: { seq: 1 } },
+        (err: Error | null, ack: { success: boolean; code?: string; note?: string }) => {
+          if (err) reject(err); else resolve(ack);
+        });
+    });
+    const uncertain = await sendDuplicate();
+    assert.equal(uncertain.success, false, "Redis idempotency claim alone is not a persistence proof");
+    assert.equal(uncertain.code, "BUFFER_PERSIST_FAILED");
+    stored.push(JSON.stringify({ clientId: client.clientId, eventId }));
+    const durable = await sendDuplicate();
+    assert.equal(durable.success, true, "Same claim is a valid duplicate only after its event is durable");
+    assert.equal(durable.note, "DUPLICATE_DROPPED");
+  } finally {
+    socket?.disconnect();
+    await new Promise<void>((resolve) => io.close(() => resolve()));
+  }
+});

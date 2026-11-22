@@ -36,6 +36,7 @@ import {
 const require = createRequire(import.meta.url);
 
 interface IngestionServerModule {
+  writer: { baseDir: string };
   server: import("node:http").Server;
   io: import("socket.io").Server;
   bufferQueue: Array<{ clientId: string; eventId: string; timestamp: string; payload: string }>;
@@ -1221,7 +1222,7 @@ test("R2 PHASE-02 BUG-10: GET, PATCH (regenerate_token), and DELETE /api/clients
   }
 });
 
-test("P02 R-01 diagnostic: Redis RPUSH failure yields positive WS ACK for volatile RAM-only event", async () => {
+test("P02 R-01 remediation: Redis RPUSH failure rejects non-durable WS ACK", async () => {
   // Disposable test-only fixture: no production Redis, service, or storage state.
   const previousThreshold = serverMod.runtimeConfig.batchFlushThreshold;
   const previousRam = serverMod.bufferQueue.slice();
@@ -1255,6 +1256,12 @@ test("P02 R-01 diagnostic: Redis RPUSH failure yields positive WS ACK for volati
     assert.equal(sameIdRetry.success, false,
       "Pending idempotency claims must not return false positive duplicate ACK");
     assert.equal(sameIdRetry.code, "BUFFER_PERSIST_FAILED");
+    const secondRetry = await emitWithAck<{ success: boolean; code?: string }>(
+      socket, "sync_data",
+      { eventId: "p02-ack-before-crash-001", data: { value: 42 } },
+    );
+    assert.equal(secondRetry.success, false, "A repeated pending claim must remain negative");
+    assert.equal(secondRetry.code, "BUFFER_PERSIST_FAILED");
     assert.equal(committedRows.length, 0, "Fake Redis has no durable event");
     assert.equal(volatileRows.length, 1, "Acknowledged event is RAM-only");
     // Crash model: restart loses RAM but fake Redis survives. No actual process is killed.
@@ -1268,7 +1275,12 @@ test("P02 R-01 diagnostic: Redis RPUSH failure yields positive WS ACK for volati
       { eventId: "p02-ack-recovered-002", data: { value: 43 } },
     );
     assert.equal(recovered.success, true);
-    assert.equal((await healthyRedis.lrange("datastack:buffer:events", 0, -1)).length, 1);
+    const recoveredSameId = await emitWithAck<{ success: boolean; code?: string }>(
+      socket, "sync_data",
+      { eventId: "p02-ack-before-crash-001", data: { value: 42 } },
+    );
+    assert.equal(recoveredSameId.success, true, "Original eventId must be retryable after Redis recovery");
+    assert.equal((await healthyRedis.lrange("datastack:buffer:events", 0, -1)).length, 2);
   } finally {
     socket?.disconnect();
     serverMod.setRedisClientForTests(undefined);
@@ -1303,6 +1315,7 @@ test("P02 R-01: batch_sync rejects non-durable Redis writes and pending duplicat
   const previousThreshold = serverMod.runtimeConfig.batchFlushThreshold;
   const previousQueue = serverMod.bufferQueue.slice();
   const failingRedis = createSharedMockRedis();
+  const recoveredRpush = failingRedis.rpush.bind(failingRedis);
   failingRedis.rpush = async () => { throw new Error("P02 injected batch Redis outage"); };
   serverMod.setRedisClientForTests(failingRedis);
   serverMod.runtimeConfig.batchFlushThreshold = 100_000;
@@ -1331,10 +1344,72 @@ test("P02 R-01: batch_sync rejects non-durable Redis writes and pending duplicat
     );
     assert.equal(retry.success, false);
     assert.equal(retry.code, "BUFFER_PERSIST_FAILED");
+    failingRedis.rpush = recoveredRpush;
+    const mixed = await emitWithAck<{ success: boolean; code?: string; processed?: number }>(
+      socket, "batch_sync", [payload[0], { eventId: "p02-batch-recovered-3", data: { value: 3 } }],
+    );
+    assert.equal(mixed.success, false, "A mixed recovered/volatile batch cannot ACK success");
+    assert.equal(mixed.code, "BUFFER_PERSIST_FAILED");
+    assert.equal(mixed.processed, 1, "New item is durably queued, old idempotency claim is uncertain");
+    const confirmed = await emitWithAck<{ success: boolean; duplicates?: number }>(
+      socket, "batch_sync", payload,
+    );
+    assert.equal(confirmed.success, true, "Once old events are persisted, duplicates are safely acknowledged");
+    assert.equal(confirmed.duplicates, 2);
   } finally {
     socket?.disconnect();
     serverMod.setRedisClientForTests(undefined);
     serverMod.runtimeConfig.batchFlushThreshold = previousThreshold;
     serverMod.bufferQueue.splice(0, serverMod.bufferQueue.length, ...previousQueue);
+  }
+});
+
+test("P02 R-01: Redis-free Socket.IO ACK waits for CSV durability and denies disk errors", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "datastack-p02-ack-disk-"));
+  const previousDir = serverMod.writer.baseDir;
+  const previousThreshold = serverMod.runtimeConfig.batchFlushThreshold;
+  const previousQueue = serverMod.bufferQueue.slice();
+  serverMod.writer.baseDir = baseDir;
+  serverMod.runtimeConfig.batchFlushThreshold = 100_000;
+  serverMod.setRedisClientForTests(null);
+  serverMod.bufferQueue.length = 0;
+  let socket: Socket | undefined;
+  try {
+    const client = await SDKManager.registerClientAsync({
+      clientId: "p02_disk_durability", name: "P02 Disk Durability", rateLimit: 100,
+    });
+    socket = await connectSocket(client.token);
+    const accepted = await emitWithAck<{ success: boolean; code?: string }>(
+      socket, "sync_data", { eventId: "p02-disk-ack-001", data: { value: 11 } },
+    );
+    assert.equal(accepted.success, true);
+    const csvPath = path.join(baseDir, client.clientId, new Date().toISOString().slice(0, 10) + ".csv");
+    assert.equal(fs.readFileSync(csvPath, "utf8").includes("p02-disk-ack-001"), true,
+      "A successful ACK requires a completed CSV append when Redis is absent");
+    const blockedBase = path.join(baseDir, "not-a-directory");
+    fs.writeFileSync(blockedBase, "fixture");
+    serverMod.writer.baseDir = blockedBase;
+    const failed = await emitWithAck<{ success: boolean; code?: string }>(
+      socket, "sync_data", { eventId: "p02-disk-ack-002", data: { value: 12 } },
+    );
+    assert.equal(failed.success, false, "CSV failure must never receive a positive ACK");
+    assert.equal(failed.code, "BUFFER_PERSIST_FAILED");
+    serverMod.writer.baseDir = baseDir;
+    const retry = await emitWithAck<{ success: boolean; code?: string }>(
+      socket, "sync_data", { eventId: "p02-disk-ack-002", data: { value: 12 } },
+    );
+    assert.equal(retry.success, true, "The same eventId must recover after disk restoration");
+    const csv = fs.readFileSync(csvPath, "utf8");
+    assert.equal(csv.split("p02-disk-ack-002").length - 1, 1);
+  } finally {
+    socket?.disconnect();
+    serverMod.setRedisClientForTests(undefined);
+    serverMod.writer.baseDir = previousDir;
+    serverMod.runtimeConfig.batchFlushThreshold = previousThreshold;
+    serverMod.bufferQueue.splice(0, serverMod.bufferQueue.length, ...previousQueue);
+    fs.rmSync(baseDir, { recursive: true, force: true });
   }
 });

@@ -1629,10 +1629,18 @@ test("P02 R-02: Port 4000 CSV worker suppresses a crash-window replay after Redi
     assert.equal(await mockRedis.llen(REDIS_BUFFER_KEY), 1);
     const csvPath = path.join(tmpStorageDir, evt.clientId, "2026-11-22.csv");
     assert.equal(fs.readFileSync(csvPath, "utf8").split(evt.eventId).length - 1, 1);
+    // Crash/restart may occur after daily part rotation and archive compression.
+    // Verify replay detection against an actual rotated .csv.gz partition.
+    const zlib = await import("node:zlib");
+    const archivedPath = path.join(tmpStorageDir, evt.clientId, "2026-11-22-part2.csv.gz");
+    fs.writeFileSync(archivedPath, zlib.gzipSync(fs.readFileSync(csvPath)));
+    fs.unlinkSync(csvPath);
     const recovered = await ingestion.flushBuffer();
-    assert.equal(recovered.written, 0, "Recovered replay should not append the event again");
+    assert.equal(recovered.written, 0, "Recovered compressed replay must not append again");
     assert.equal(await mockRedis.llen(REDIS_BUFFER_KEY), 0);
-    assert.equal(fs.readFileSync(csvPath, "utf8").split(evt.eventId).length - 1, 1);
+    assert.equal(fs.existsSync(csvPath), false, "No duplicate active CSV partition should be created");
+    const archivedRows = zlib.gunzipSync(fs.readFileSync(archivedPath)).toString("utf8");
+    assert.equal(archivedRows.split(evt.eventId).length - 1, 1);
   } finally {
     ingestion.writer.baseDir = previousDir;
     ingestion.bufferQueue.splice(0, ingestion.bufferQueue.length, ...previousQueue);
