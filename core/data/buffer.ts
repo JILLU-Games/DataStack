@@ -650,6 +650,66 @@ export class DataBufferEngine {
     }
 
     const executeFlush = async (): Promise<FlushResult> => {
+
+      // P02 R-02: examine CSV partitions before replay of an untrimmed Redis
+      // batch. Streaming parsing limits memory and handles escaped/newline CSV.
+      const excludeAlreadyPersisted = async (events: DataEvent[]): Promise<DataEvent[]> => {
+        if (!events.length) return events;
+        const fs = await import('node:fs');
+        const path = await import('node:path');
+        const zlib = await import('node:zlib');
+        const { pipeline } = await import('node:stream/promises');
+        const { Writable } = await import('node:stream');
+        const { parse } = await import('csv-parse');
+        const groups = new Map<string, {
+          clientId: string; date: string; ids: Set<string>;
+        }>();
+        for (const event of events) {
+          const clientId = String(event.clientId || 'unknown');
+          const date = CSVStorageManager.extractSafePartitionDate(event.timestamp);
+          const key = JSON.stringify([clientId, date]);
+          if (!groups.has(key)) groups.set(key, { clientId, date, ids: new Set() });
+          groups.get(key)!.ids.add(String(event.eventId));
+        }
+        const persisted = new Set<string>();
+        for (const [groupKey, group] of groups) {
+          const dir = CSVStorageManager.ensureClientDir(group.clientId);
+          const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+          for (const entry of entries) {
+            if (!entry.isFile() ||
+                !/\.csv(?:\.gz)?$/.test(entry.name) ||
+                CSVStorageManager.extractSafePartitionDate(
+                  entry.name.replace(/\.csv(?:\.gz)?$/, '').replace(/(?:-(?:part|gz)\d+)+$/, ''),
+                ) !== group.date) continue;
+            const reader = fs.createReadStream(path.join(dir, entry.name));
+            const parser = parse({ columns: true, bom: true, skip_empty_lines: true });
+            const sink = new Writable({
+              objectMode: true,
+              write(row: { clientId?: string; eventId?: string }, _enc, done) {
+                if (row.clientId === group.clientId && group.ids.has(String(row.eventId))) {
+                  persisted.add(JSON.stringify([groupKey, String(row.eventId)]));
+                }
+                done();
+              },
+            });
+            if (entry.name.endsWith('.gz')) {
+              await pipeline(reader, zlib.createGunzip(), parser, sink);
+            } else {
+              await pipeline(reader, parser, sink);
+            }
+          }
+        }
+        const batchSeen = new Set<string>();
+        return events.filter((event) => {
+          const key = JSON.stringify([String(event.clientId || 'unknown'),
+            CSVStorageManager.extractSafePartitionDate(event.timestamp)]);
+          const rowKey = JSON.stringify([key, String(event.eventId)]);
+          if (persisted.has(rowKey) || batchSeen.has(rowKey)) return false;
+          batchSeen.add(rowKey);
+          return true;
+        });
+      };
+
       state.isFlushing = true;
       let totalWritten = 0;
       let lockTimedOut = false;
@@ -793,9 +853,12 @@ export class DataBufferEngine {
                 if (lockLost) break;
 
                 if (parsedBatch.length > 0) {
-                  const res = await CSVStorageManager.appendBatch(parsedBatch);
-                  totalWritten += res.written;
-                  for (const f of res.filesUpdated) filesSet.add(f);
+                  const unwritten = await excludeAlreadyPersisted(parsedBatch);
+                  if (unwritten.length > 0) {
+                    const res = await CSVStorageManager.appendBatch(unwritten);
+                    totalWritten += res.written;
+                    for (const f of res.filesUpdated) filesSet.add(f);
+                  }
                 }
 
                 if (Date.now() - lastRenewAt >= renewIntervalMs) {
@@ -845,9 +908,12 @@ export class DataBufferEngine {
 
           if (validRamBatch.length > 0) {
             try {
-              const res = await CSVStorageManager.appendBatch(validRamBatch);
-              totalWritten += res.written;
-              for (const f of res.filesUpdated) filesSet.add(f);
+              const unwritten = await excludeAlreadyPersisted(validRamBatch);
+              if (unwritten.length > 0) {
+                const res = await CSVStorageManager.appendBatch(unwritten);
+                totalWritten += res.written;
+                for (const f of res.filesUpdated) filesSet.add(f);
+              }
             } catch (err) {
               state.buffer.unshift(...validRamBatch);
               throw err;

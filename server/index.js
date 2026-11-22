@@ -165,6 +165,7 @@ function setRedisClientForTests(client) {
 async function pushEventsToRedisOrFallback(events) {
   if (!events || events.length === 0) return bufferQueue.length;
   const redis = getRedisClient();
+  let persistFailed = false;
   if (redis) {
     const serialized = events.map((e) => JSON.stringify(e));
     let bufferLen = null;
@@ -173,6 +174,7 @@ async function pushEventsToRedisOrFallback(events) {
       redisConnected = true;
     } catch {
       redisConnected = false;
+      persistFailed = true;
     }
 
     if (bufferLen !== null) {
@@ -189,6 +191,11 @@ async function pushEventsToRedisOrFallback(events) {
   }
 
   bufferQueue.push(...events);
+  if (persistFailed) {
+    // Keep the volatile fallback for later recovery, but never ACK it as durable.
+    // Suppress sensitive Redis transport details in the client-facing error.
+    throw new Error('BUFFER_PERSIST_FAILED: Redis unavailable; event not durably queued');
+  }
   return bufferQueue.length;
 }
 
@@ -834,6 +841,61 @@ async function isClientDeletedForFlush(clientId, redis, cache) {
 }
 
 async function flushBuffer(options = {}) {
+
+  // P02 R-02: Redis and CSV cannot be committed atomically. Before replaying an
+  // untrimmed Redis batch, check actual CSV partitions for previously written IDs.
+  // Streaming parsing bounds memory and preserves multiline/quoted CSV fields.
+  const excludeAlreadyPersisted = async (events) => {
+    if (!events.length) return events;
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const zlib = require('node:zlib');
+    const { pipeline } = require('node:stream/promises');
+    const { Writable } = require('node:stream');
+    const { parse } = require('csv-parse');
+    const groups = new Map();
+    for (const event of events) {
+      const clientId = String(event.clientId || 'unknown');
+      const date = writer.extractSafePartitionDate(event.timestamp);
+      const key = JSON.stringify([clientId, date]);
+      if (!groups.has(key)) groups.set(key, { clientId, date, ids: new Set() });
+      groups.get(key).ids.add(String(event.eventId));
+    }
+    const persisted = new Set();
+    for (const [groupKey, group] of groups) {
+      const dir = writer.ensureClientDir(group.clientId);
+      const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile() || !writer.isPartitionFilename(entry.name) ||
+            writer.extractDateFromFilename(entry.name) !== group.date) continue;
+        const reader = fs.createReadStream(path.join(dir, entry.name));
+        const streams = [reader];
+        if (entry.name.endsWith('.gz')) streams.push(zlib.createGunzip());
+        streams.push(parse({ columns: true, bom: true, skip_empty_lines: true }));
+        streams.push(new Writable({
+          objectMode: true,
+          write(row, _enc, done) {
+            if (row.clientId === group.clientId && group.ids.has(String(row.eventId))) {
+              persisted.add(JSON.stringify([groupKey, String(row.eventId)]));
+            }
+            done();
+          },
+        }));
+        // On read/parse failure, abort without LTRIM: never discard uncertain rows.
+        await pipeline(...streams);
+      }
+    }
+    const batchSeen = new Set();
+    return events.filter((event) => {
+      const key = JSON.stringify([String(event.clientId || 'unknown'),
+        writer.extractSafePartitionDate(event.timestamp)]);
+      const rowKey = JSON.stringify([key, String(event.eventId)]);
+      if (persisted.has(rowKey) || batchSeen.has(rowKey)) return false;
+      batchSeen.add(rowKey);
+      return true;
+    });
+  };
+
   if (pendingRedisWrites.size > 0) {
     await Promise.allSettled([...pendingRedisWrites]);
   }
@@ -979,9 +1041,12 @@ async function flushBuffer(options = {}) {
               if (lockLost) break;
 
               if (parsedBatch.length > 0) {
-                const res = await writer.writeBatch(parsedBatch);
-                totalWritten += res.written;
-                for (const f of res.files) filesSet.add(f);
+                const unwritten = await excludeAlreadyPersisted(parsedBatch);
+                if (unwritten.length > 0) {
+                  const res = await writer.writeBatch(unwritten);
+                  totalWritten += res.written;
+                  for (const f of res.files) filesSet.add(f);
+                }
               }
 
               if (Date.now() - lastRenewAt >= renewIntervalMs) {
@@ -1022,9 +1087,12 @@ async function flushBuffer(options = {}) {
 
         if (validBatch.length > 0) {
           try {
-            const res = await writer.writeBatch(validBatch);
-            totalWritten += res.written;
-            for (const f of res.files) filesSet.add(f);
+            const unwritten = await excludeAlreadyPersisted(validBatch);
+            if (unwritten.length > 0) {
+              const res = await writer.writeBatch(unwritten);
+              totalWritten += res.written;
+              for (const f of res.files) filesSet.add(f);
+            }
           } catch (err) {
             bufferQueue.unshift(...validBatch);
             throw err;

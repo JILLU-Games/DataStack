@@ -64,3 +64,15 @@ The previous #58 package-lock error was resolved by adding the exact nested opti
 | R-03 availability | Redis `llen` rejection leaves Express `/health` online with `redisConnected:false`. Recovery flips the flag while HTTP 200 remains unchanged. | Public 200 is liveness by existing contract; a protected dependency readiness probe/503 is **not implemented** and needs explicit approval. |
 
 Security invariants: do not expose secrets in ACK/errors, keep JWT/auth and 401/403/429/503/507 contracts unchanged, and never run failure-injection against actual Redis, Postgres, production API, live events, or user CSV. Disposable fake Redis and temporary files only. CI #63: https://dev.ivib.cc/vibtools/DataStack/actions/runs/63; results tracked in notes/003.
+
+
+## P02 Runtime Candidate — Error-path change inventory (pending CI)
+
+| Path | Candidate result | Explicit limitation |
+|---|---|---|
+| Redis `RPUSH` rejects with configured Redis client | Retains event in volatile RAM as preexisting fallback but returns `BUFFER_PERSIST_FAILED` to Socket.IO via thrown error; **no successful ACK** for that failure; error text does not expose connection details | No-Redis intentional legacy RAM mode unchanged, still not a durable guarantee |
+| `sync_data` and `batch_sync` failures | `success:false`, `code:BUFFER_PERSIST_FAILED` and best-effort rollback of previously claimed idempotency keys, negative failure marker for in-process retries | If claim rollback cannot reach Redis and process crashes, durable claim/queue atomicity remains unsolved |
+| Redis buffer `LTRIM` rejects after successful CSV append | Subsequent flush checks physically stored CSV IDs and avoids appending matching rows again; Redis is trimmed only after successful check/write | Concurrent independent CSV appenders, compressed archived CSV, corrupt partial rows, and per-flush CSV scan cost require separate proof |
+| Legacy public health | **UNCHANGED** HTTP 200 liveness contract and Redis-connected diagnostic field; R-03 readiness is not introduced in this approval | Does not prove full DB/Redis transactional readiness |
+
+Security/API invariants: leave token/JWT/auth/rate limits/quotas/webhooks/MCP/sandbox/UI/SDK unchanged. No production Redis/Postgres/API/CSV mutation. No lockfile/dependency versions or CI workflow changes. CI acceptance remains pending; these are code-level observations, not release certification.

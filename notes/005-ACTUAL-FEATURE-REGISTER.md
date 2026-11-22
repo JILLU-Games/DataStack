@@ -52,3 +52,11 @@ Do not mark "actual working" simply because a patch compiled. Distinguish source
 - R-02: existing CSV-before-Redis-trim order audited, *not corrected*. Exactly-once replay safety is **NOT VERIFIED**.
 - R-03: current public Express health 200 plus `redisConnected:false` is liveness, not dependency readiness. Separate readiness remains **NOT IMPLEMENTED**.
 - Gitea disposable CI #63: https://dev.ivib.cc/vibtools/DataStack/actions/runs/63. The previous P01 working results remain valid; no live read/write test or production deploy is included in P02.
+
+
+## P02 Runtime Candidate Feature Delta — 2026-11-22 (NOT RELEASED)
+
+- **Intended change:** failure cases on socket ingestion report `BUFFER_PERSIST_FAILED` instead of positive ACK when Redis RPUSH rejects; single and batch code paths tested by new disposable assertions. Ordinary success ACK, auth, limits and SDK public interfaces intended unchanged.
+- **Intended change:** Redis replay flush on both ingestion/Next paths inspects existing client CSV partitions and filters already-stored event IDs before reappend; safe failure leaves Redis queue untrimmed. This prevents the tested post-append/LTRIM replay duplication but does **not** prove transactionally exactly-once delivery or zero performance impact.
+- **No changes:** application UI/UX, auth, SDK, database schema, Docker, environment, public R-03 health, other features and production runtime. No deployment or live verification.
+- **Status:** P02 code candidate locally committed, acceptance CI blocked by Gitea unavailability; **NOT CLOSED**, not production-ready. P01 remains only completed phase.

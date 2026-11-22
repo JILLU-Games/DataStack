@@ -237,3 +237,25 @@ return bufferQueue.length;
 - `P02 R-03 diagnostic: Redis query failure leaves public ingestion health 200/online` — **ok 16**, same suite exit 0, Redis flag false while liveness stays online.
 - `P02 R-02 diagnostic: post-CSV Redis trim failure replays identical event on retry` — **ok 18**, `phase03-storage-buffer` suite exit 0; duplicate append after retry reproduced on representative web buffer path. **Direct ingestion Port 4000 CSV worker crash coverage remains outstanding** and should be requested in remediation approval before guarantee changes.
 - These three diagnostic tests **prove findings, do not close production-readiness**. See Gitea https://dev.ivib.cc/vibtools/DataStack/actions/runs/63; never call run successful until terminal conclusion is confirmed. No server-side source fix applied.
+
+
+## F. P02 Remediation Candidate Patch Proof — 2026-11-22
+
+Base: Gitea/GitHub published P02 diagnostic tree `fd57a3518d14bcb8367ce9ab9c3ec306bcfc9898`; GitLab distinct commit, same previous tree. Local candidate commit `44eee8877e40d1683f44502c2a0ba3d437a03b88` on isolated worktree. Initial exact delta: 5 approved source/test paths, 310 insertions and 22 deletions, no application UI, Python SDK, auth, public health route, CI or deployment edit. `git diff --check` and `node --check` on JS files PASS.
+
+- `server/index.js:pushEventsToRedisOrFallback`: catch RPUSH failure, keep previous RAM buffering, throw sanitized `BUFFER_PERSIST_FAILED`; no positive ACK for that branch.
+- `server/socket/handlers.js:sync_data/batch_sync`: negative ACK and best-effort claimed idempotency-key rollback with negative retry guard, no change to legitimate duplicate success path or existing auth/limits/error codes.
+- `server/index.js:flushBuffer` and `core/data/buffer.ts:flush`: scoped streaming CSV/CSV.gz read-before-reappend (parsing quoted/multiline rows), exact client/date/event ID match; failures abort before Redis LTRIM. No changes to `server/workers/csvWriter.js`.
+- `tests/phase02-sync.test.ts`: R-01 single/batch outage and duplicate claim ACK negative, successful recovery ACK, and unchanged R-03 liveness.
+- `tests/phase03-storage-buffer.test.ts`: web-side replay verifies exactly one physically stored row; new direct Port 4000 writer Redis-trim failure/recovery proof. All tests on fake Redis and disposable temp CSV paths.
+
+**Unverified:** Gitea P02 implementation acceptance was unavailable due inaccessible host/connector. Local `npm ci` not confirmed successful. Do not invent a CI run ID or claim full PASS. Full cross-process transactional exactly-once and all Redis claim crash windows are out of proof scope and may require exact additional approval. The streaming dedupe scan changes I/O cost per flush; performance validation before production is required.
+
+
+### Blocked acceptance evidence — actual tool outcomes
+
+- JS syntax: local `node --check server/index.js` and `node --check server/socket/handlers.js` PASS.
+- Source scope: local `git diff --check` PASS; only the five allowed P02 runtime/test paths changed before notes updates.
+- Gitea: connection returned `UNAVAILABLE: McpServerError: Connection failed`; Git remote `dev.ivib.cc` unresponsive. No Gitea CI run ID exists for candidate `44eee8877e40d1683f44502c2a0ba3d437a03b88`.
+- Local Windows npm: `npm ci` failed `ETARGET yaml@2.9.1` and cleanup `EPERM` in the isolated worktree, **not** a TypeScript/test result. Dependency changes are out of P02 scope.
+- Therefore neither TS typecheck nor regression-suite remediation acceptance is established; keep P02 BLOCKED and do not advance P03 or alter any protected runtime/source beyond this approval.

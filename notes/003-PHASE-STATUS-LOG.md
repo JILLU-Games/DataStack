@@ -91,3 +91,19 @@ Historical baseline code stayed frozen through these CI workflow changes. Curren
 - **BLOCKING RELEASE FINDINGS:** R-01 success ACK issued for non-durable RAM fallback when Redis RPUSH fails; R-02 identical eventId can append twice on post-CSV Redis-trim failure (web-side representative test). R-03 health remains online on Redis loss; liveness-only behavior is backward-compatible, protected dependency-readiness verification remains missing.
 - **P02 PHASE = BLOCKED**, diagnostic implementation done, release reliability acceptance NOT satisfied. Runtime remediation requires separate exact approval. 1/3 phases still CLOSED (P01 only); P02 and P03 remain unclosed. No P03 start authorization from this diagnostic completion.
 - Next approval must explicitly authorize exact narrow server/core patch for ACK durability and CSV replay deduplication, plus concrete no-loss/no-duplicate tests. Any readiness endpoint change needs separate explicit approval. User's initial P02 approval is insufficient for runtime mutation.
+
+
+## P02-RUNTIME-REMEDIATION — Candidate implementation checkpoint (2026-11-22)
+
+- **Current P02: BLOCKED / NOT CLOSED.** One previous diagnostic Gitea CI #63 reproduced R-01/R-02/R-03; runtime remediation was separately approved after that. Verified completed implementation phases remain **1/3** (P01 only). Do not approve P03 yet.
+- Published P02 diagnosis baseline `fd57a3518d14bcb8367ce9ab9c3ec306bcfc9898`; isolated local candidate commit `44eee8877e40d1683f44502c2a0ba3d437a03b88` on `p02-runtime-remediation-20261122`.
+- Exactly five code/test files changed in this candidate: `server/index.js`, `server/socket/handlers.js`, `core/data/buffer.ts`, `tests/phase02-sync.test.ts`, `tests/phase03-storage-buffer.test.ts`. No `server/workers/csvWriter.js`, `app/**`, `components/**`, SDK, public R-03 health, CI workflow, database, migration, production data, secrets or deployment touched.
+- JS `node --check` on two changed JS files PASS; `git diff --check` PASS and allowlist audit PASS. Targeted TS/Node regression and Gitea CI **NOT YET RUN TO TERMINAL PASS**. The Gitea connector/host was unavailable when dispatch/push was attempted. Local temporary dependency installation also not yet complete.
+- The original user PC root `D:\VibTools_Workspace\01_Products\14_DataStack` still has 16 pre-existing staged P01 paths on older `d8ac96e`; deliberately preserved without reset/stash/discard. All P02 implementation is in a separate temporary worktree. Do not assume the old local root is up to date.
+- R-01 and R-02 implementations are candidates; practical reliability limitations and I/O cost recorded in `notes/001` and `notes/004`. No false claim of globally exactly-once CSV or universally durable ACK.
+- **Next gates:** restore Gitea access; run one focused disposable acceptance; fix any in-scope test/TS defects; record exact CI terminal results; only after required acceptance and security audit, squash single phase main commit and verify GitHub/GitLab/Gitea tree parity; then, and only then, decide P02 CLOSED versus residual-risk blocker.
+
+
+### Verification environment blocker — local dependency install
+
+The authorized Windows PC attempted a **local disposable** `npm.cmd ci --ignore-scripts --no-audit --no-fund --prefer-offline` in the isolated P02 worktree only; it failed with `npm ERR! ETARGET No matching version found for yaml@2.9.1` plus cleanup EPERM warnings in the temp worktree's `node_modules`. Exact output captured in `%TEMP%\DataStack-P02-npm-ci.log` on the authorized PC. This is **not a passed code test nor proof of a repository package defect**, and `package-lock.json` / `package.json` cannot be edited under P02 scope. Gitea MCP remained UNAVAILABLE and the Git remote/HTTP service was not responding when CI was attempted, so the mandatory P02 focused CI was **not dispatched**. Phase remains BLOCKED pending actual CI evidence; no runtime change was pushed to production/main.
