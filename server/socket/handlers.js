@@ -549,6 +549,9 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
             : new Date().toISOString();
         const eventData = extractSingleEventData(payload);
 
+        // A previous Redis write failure can leave an uncommitted idempotency
+        // claim. Never report that claim as a successful durable duplicate.
+        const failedAt = idempotencyMap.get(`\u0000failed-persist:${clientId}:${eventId}`);
         const check = await validateSingleEventAsync(
           clientId,
           eventId,
@@ -557,7 +560,13 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
         );
         if (!check.allowed) {
           if (check.duplicate) {
-            if (callback) {
+            if (typeof failedAt === "number" &&
+                Date.now() - failedAt < IDEMPOTENCY_TTL_MS) {
+              if (callback) callback({
+                success: false, eventId, code: "BUFFER_PERSIST_FAILED",
+                error: "BUFFER_PERSIST_FAILED: Event not durably queued",
+              });
+            } else if (callback) {
               callback({ success: true, eventId, note: "DUPLICATE_DROPPED" });
             }
             return;
@@ -585,6 +594,20 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
         try {
           await onBufferPush();
         } catch (persistErr) {
+          // Invalidate the pre-persistence idempotency claim so SDK retry can
+          // resubmit after Redis recovers. Keep the volatile RAM event pending.
+          const claimKey = `${clientId}:${eventId}`;
+          idempotencyMap.delete(claimKey);
+          idempotencyMap.set(`\u0000failed-persist:${claimKey}`, Date.now());
+          const claimRedis = getRedisClient();
+          if (claimRedis && typeof claimRedis.del === "function") {
+            try {
+              await claimRedis.del(`${REDIS_IDEMPOTENCY_PREFIX}${claimKey}`);
+              idempotencyMap.delete(claimKey);
+            } catch {
+              // Claim may remain: negative ACK must be retained for retries.
+            }
+          }
           if (callback) {
             callback({
               success: false,
@@ -599,6 +622,7 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
           return;
         }
 
+        idempotencyMap.delete(`\u0000failed-persist:${clientId}:${eventId}`);
         if (callback) callback({ success: true, eventId });
       } catch (err) {
         if (callback) callback({ success: false, error: err.message });
@@ -689,6 +713,8 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
         const rateLimitedEventIds = [];
         const oversizedEventIds = [];
         const errors = [];
+        const acceptedEventIds = [];
+        let volatileDuplicate = false;
 
         for (const item of batch) {
           const safeItem = item && typeof item === "object" ? item : {};
@@ -702,6 +728,7 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
               : new Date().toISOString();
           const rawData = extractBatchItemData(safeItem);
 
+          const failedAt = idempotencyMap.get(`\u0000failed-persist:${clientId}:${eventId}`);
           const check = await validateSingleEventAsync(
             clientId,
             eventId,
@@ -710,7 +737,15 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
           );
           if (!check.allowed) {
             if (check.duplicate) {
-              duplicates += 1;
+              if (typeof failedAt === "number" &&
+                  Date.now() - failedAt < IDEMPOTENCY_TTL_MS) {
+                rejected += 1;
+                volatileDuplicate = true;
+                if (errors.length < 5) errors.push(
+                  `${eventId}: BUFFER_PERSIST_FAILED: Event not durably queued`);
+              } else {
+                duplicates += 1;
+              }
               continue;
             }
             rejected += 1;
@@ -735,6 +770,7 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
             payload: check.payloadStr,
           });
           processed += 1;
+          acceptedEventIds.push(eventId);
         }
 
         if (processed > 0) {
@@ -742,6 +778,20 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
           try {
             await onBufferPush();
           } catch (persistErr) {
+            const claimRedis = getRedisClient();
+            for (const eventId of acceptedEventIds) {
+              const claimKey = `${clientId}:${eventId}`;
+              idempotencyMap.delete(claimKey);
+              idempotencyMap.set(`\u0000failed-persist:${claimKey}`, Date.now());
+              if (claimRedis && typeof claimRedis.del === "function") {
+                try {
+                  await claimRedis.del(`${REDIS_IDEMPOTENCY_PREFIX}${claimKey}`);
+                  idempotencyMap.delete(claimKey);
+                } catch {
+                  // Preserve negative-ACK retry guard if claim removal fails.
+                }
+              }
+            }
             if (callback) {
               callback({
                 success: false,
@@ -759,12 +809,30 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
           }
         }
 
+        // Only durable new writes clear pending failure markers.
+        for (const persistedId of acceptedEventIds) {
+          idempotencyMap.delete(`\u0000failed-persist:${clientId}:${persistedId}`);
+        }
+        // A mixed batch must never receive success while one event still has
+        // an uncommitted Redis claim, even if other items were persisted.
+        if (volatileDuplicate) {
+          if (callback) callback({
+            success: false, processed, rejected, duplicates,
+            code: "BUFFER_PERSIST_FAILED",
+            error: "BUFFER_PERSIST_FAILED: Batch contains non-durable event",
+            errors,
+          });
+          return;
+        }
+
         if (processed === 0 && duplicates === 0 && rejected > 0) {
-          const code = hitPayloadLimit
-            ? "PAYLOAD_TOO_LARGE"
-            : hitRateLimit
-              ? "RATE_LIMIT_EXCEEDED"
-              : "BATCH_REJECTED";
+          const code = volatileDuplicate
+            ? "BUFFER_PERSIST_FAILED"
+            : hitPayloadLimit
+              ? "PAYLOAD_TOO_LARGE"
+              : hitRateLimit
+                ? "RATE_LIMIT_EXCEEDED"
+                : "BATCH_REJECTED";
           if (callback) {
             callback({
               success: false,

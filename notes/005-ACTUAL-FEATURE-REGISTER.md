@@ -52,3 +52,29 @@ Do not mark "actual working" simply because a patch compiled. Distinguish source
 - R-02: existing CSV-before-Redis-trim order audited, *not corrected*. Exactly-once replay safety is **NOT VERIFIED**.
 - R-03: current public Express health 200 plus `redisConnected:false` is liveness, not dependency readiness. Separate readiness remains **NOT IMPLEMENTED**.
 - Gitea disposable CI #63: https://dev.ivib.cc/vibtools/DataStack/actions/runs/63. The previous P01 working results remain valid; no live read/write test or production deploy is included in P02.
+
+
+## P02 Runtime Candidate Feature Delta — 2026-11-22 (NOT RELEASED)
+
+- **Intended change:** failure cases on socket ingestion report `BUFFER_PERSIST_FAILED` instead of positive ACK when Redis RPUSH rejects; single and batch code paths tested by new disposable assertions. Ordinary success ACK, auth, limits and SDK public interfaces intended unchanged.
+- **Intended change:** Redis replay flush on both ingestion/Next paths inspects existing client CSV partitions and filters already-stored event IDs before reappend; safe failure leaves Redis queue untrimmed. This prevents the tested post-append/LTRIM replay duplication but does **not** prove transactionally exactly-once delivery or zero performance impact.
+- **No changes:** application UI/UX, auth, SDK, database schema, Docker, environment, public R-03 health, other features and production runtime. No deployment or live verification.
+- **Status:** P02 code candidate locally committed, acceptance CI blocked by Gitea unavailability; **NOT CLOSED**, not production-ready. P01 remains only completed phase.
+
+
+## P02 Final Feature/Compatibility Register — 2026-11-22
+
+Existing UI/UX, admin auth, SDK public signatures, health route, database schema, Docker and deployment: **UNCHANGED**. Only existing Socket.IO single/batch persistence failure ACK/idempotency cleanup, Redis->CSV replay duplicate filtering and disposable tests changed during P02. No new production feature, public endpoint, release or migration. CI #66 terminal SUCCESS (24/24 TS suites, strict types, ESLint, Windows Node SDK, Next production build); final CI #69 pending. Client-facing `BUFFER_PERSIST_FAILED` error is used only for previously incorrectly acknowledged Redis-backed failure; intentionally Redis-free RAM mode is preserved. CSV write content/format unchanged, gzip and rotation replay acceptance covered in final test fixture. All live status values are **NOT VERIFIED / NO DEPLOYMENT**. No guarantee of global exactly-once delivery or hard bound on disk scans; future throughput benchmark/design approval if required. P03 still gated on final P02 close.
+
+
+### P02 final acceptance correction checkpoint
+
+Gitea #69 node-regression observed one **fixture timeout**, not a proven new production feature defect, caused by altering global `Date.now`. A separate source-proven mixed batch all-duplicate ACK bug was corrected only in `server/socket/handlers.js`, test case added in existing allowed TS file. Revised `acca8be01a31f8d3972564cbaec8fd3117a0b551` pending focused Gitea CI #72. Existing UI/SDK/auth/public health remain unchanged. This is not evidence that production has been deployed or live-tested.
+
+
+### P02 verified feature-state reconciliation — Gitea #72 SUCCESS
+
+- **P02 R-01: FIXED in source and CI-PASS, conditional scope.** Configured Redis queue RPUSH rejects => `BUFFER_PERSIST_FAILED` negative ACK for single/mixed batches, stale Redis idempotency claim cannot be reported as durable success; clock arithmetic and actual negative ACK retries verified. Intentionally Redis-free RAM mode historical best-effort ACK **preserved**, not a lossless guarantee.
+- **P02 R-02: FIXED for verified crash/replay windows**, not global transactionality. Port4000 and Port3000 CSV replay suppresses duplicate same-client/day/eventId across plain, rotated and gz; failed reads prevent trimming; dedicated regression tests PASS. Streaming parser bounded memory, disk read throughput/latency not yet load-tested.
+- **P02 R-03: UNCHANGED**: public /health remains backwards-compatible liveness, not a dependency-readiness endpoint. Production live health **NOT VERIFIED**.
+- All other runtime features/UI/auth/API/SDK/database/Compose and package dependencies unchanged. **P02 CI ACCEPTED at #72**; code SHA `acca8be01a31f8d3972564cbaec8fd3117a0b551`. Phase closed only after verified 3-way content sync. No P03 implementation or production deployment.

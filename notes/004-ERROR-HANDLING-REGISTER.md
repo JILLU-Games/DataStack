@@ -64,3 +64,41 @@ The previous #58 package-lock error was resolved by adding the exact nested opti
 | R-03 availability | Redis `llen` rejection leaves Express `/health` online with `redisConnected:false`. Recovery flips the flag while HTTP 200 remains unchanged. | Public 200 is liveness by existing contract; a protected dependency readiness probe/503 is **not implemented** and needs explicit approval. |
 
 Security invariants: do not expose secrets in ACK/errors, keep JWT/auth and 401/403/429/503/507 contracts unchanged, and never run failure-injection against actual Redis, Postgres, production API, live events, or user CSV. Disposable fake Redis and temporary files only. CI #63: https://dev.ivib.cc/vibtools/DataStack/actions/runs/63; results tracked in notes/003.
+
+
+## P02 Runtime Candidate — Error-path change inventory (pending CI)
+
+| Path | Candidate result | Explicit limitation |
+|---|---|---|
+| Redis `RPUSH` rejects with configured Redis client | Retains event in volatile RAM as preexisting fallback but returns `BUFFER_PERSIST_FAILED` to Socket.IO via thrown error; **no successful ACK** for that failure; error text does not expose connection details | No-Redis intentional legacy RAM mode unchanged, still not a durable guarantee |
+| `sync_data` and `batch_sync` failures | `success:false`, `code:BUFFER_PERSIST_FAILED` and best-effort rollback of previously claimed idempotency keys, negative failure marker for in-process retries | If claim rollback cannot reach Redis and process crashes, durable claim/queue atomicity remains unsolved |
+| Redis buffer `LTRIM` rejects after successful CSV append | Subsequent flush checks physically stored CSV IDs and avoids appending matching rows again; Redis is trimmed only after successful check/write | Concurrent independent CSV appenders, compressed archived CSV, corrupt partial rows, and per-flush CSV scan cost require separate proof |
+| Legacy public health | **UNCHANGED** HTTP 200 liveness contract and Redis-connected diagnostic field; R-03 readiness is not introduced in this approval | Does not prove full DB/Redis transactional readiness |
+
+Security/API invariants: leave token/JWT/auth/rate limits/quotas/webhooks/MCP/sandbox/UI/SDK unchanged. No production Redis/Postgres/API/CSV mutation. No lockfile/dependency versions or CI workflow changes. CI acceptance remains pending; these are code-level observations, not release certification.
+
+
+## P02 Final Fault / Recovery Matrix
+
+| Case | Final behavior target and evidence |
+|---|---|
+| Redis RPUSH rejects with Redis configured | `BUFFER_PERSIST_FAILED` negative ACK, no false durable success; candidate CI #66 verified single/batch, final CI #69 for marker TTL |
+| Redis idempotency claim survives failed queue write | Positive-time separate failed marker survives cleanup after +61000ms (below five-minute TTL); two retries remain negative rather than `DUPLICATE_DROPPED` success. Final disposable fixture `tests/phase02-sync.test.ts` |
+| Mixed `batch_sync` contains stale claim and a new durable record | Overall response `success:false` with `BUFFER_PERSIST_FAILED`, even if some new records committed; preserve counts and avoid success cover-up |
+| Redis deliberately disabled | Historical RAM mode unchanged; distinguish this existing best-effort contract from configured Redis durability |
+| CSV append success but Redis LTRIM failure | Replay scans written event IDs and does not duplicate physical row before trim; direct Port4000 and web-buffer regression |
+| Rotated / gzip CSV, quoted multiline payload | Streaming CSV parser, exact client/date/eventId match, no duplicate append or data-format change |
+| Matching CSV partial/corrupt | Fail closed (no Redis trim); disposable repair allows retry; do not touch real user CSV |
+| Public /health & 401/403/429/503/507 | Preserve existing behavior; no new endpoint or error contract beyond already approved BUFFER_PERSIST_FAILED |
+
+**Limitations:** no globally atomic Redis+CSV transaction, stale Redis claim after process crash may require TTL/retry policy, and per-partition scan has data-size-proportional I/O even though memory is streamed. No live production reliability or throughput certification. CI #66 SUCCESS; final CI #69 pending.
+
+
+### Additional P02 final-acceptance negative ACK case
+
+If a `batch_sync` contains only (a) an uncommitted Redis-claim duplicate and (b) an ordinary already-durable duplicate, the old `processed===0 && duplicates===0 && rejected>0` test did not trigger; success ACK incorrectly masked volatile claim. Narrow correction uses `if (volatileDuplicate)` before the generic aggregate success path, independent of `processed` or `duplicates`. Specific test in `tests/phase02-sync.test.ts` injects Redis RPUSH failure and fake stale claim then includes the existing durable duplicate. All pending-claim ACKs must remain `BUFFER_PERSIST_FAILED`, even if some other events already committed. Terminal CI #72 pending; no global 5-minute clock advancement inside sockets.
+
+
+### P02 terminal CI #72 error handling acceptance
+
+Gitea #72 **SUCCESS** at verified final code SHA `acca8be01a31f8d3972564cbaec8fd3117a0b551`; all 24 TS suites exit zero including stale claim, mixed batch (both with new durable event and old durable duplicate), Redis-free compatibility, gzip/rotated CSV and corrupt matching CSV fail-closed. `BUFFER_PERSIST_FAILED` is negative-ACK response on configured Redis write failure, rather than success for RAM fallback. Redis-free RAM mode old semantics unchanged. Existing 401/403/429/503/507 tests unaffected and pass within 24 suites. Public /health liveness remains HTTP 200 with `redisConnected:false` during mocked outage; separate readiness endpoint not approved. Remaining risk: no atomic Redis+CSV commit, no global exactly-once guarantee, CSV partition scan disk I/O grows with volume. No live traffic test.

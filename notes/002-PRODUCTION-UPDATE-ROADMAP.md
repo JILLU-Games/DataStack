@@ -1,7 +1,7 @@
 # DataStack — Production Update Roadmap / Exact Scope Lock
 
 Planning baseline: `d725841ebc828d58cbe90f517da9e600f23c4630` (frozen; documentation commits will advance Git HEAD but NOT this source baseline).
-Current state: **P01 CLOSED and CI-verified (1 of 3 phases complete); P02 and P03 NOT STARTED; P02 requires new explicit approval**.
+Current state: **P01 CLOSED; P02 CI ACCEPTED (Gitea #72 terminal SUCCESS), final three-remote publication gate; P03 NOT STARTED and requires separate explicit approval**. See latest P02 final acceptance appendix and publication report.
 Prerequisite for any phase: compare current HEAD and changed paths with this baseline and previously committed notes. For new commits since source baseline, inspect exact diff; no implicit rebase or silent discard.
 
 ## Global non-negotiable Scope Lock (applies to ALL phases)
@@ -81,3 +81,47 @@ P02 approved as **diagnostic-only**. Published P01 baseline: `667a140c4e9e75382b
 `APPROVED — DataStack P02-RUNTIME-REMEDIATION. Baseline: use the verified P02 diagnostic commit/remote tree. Fix reproduced R-01 and R-02 only, following exact notes/001–006 proof and scoped server/index.js pushEventsToRedisOrFallback/onBufferPush and flushBuffer, server/socket/handlers.js sync_data/batch_sync ACK, and their three existing P02 test files. First document safe ACK/retry semantics, exactly-once versus at-least-once CSV contract and crash recovery. Add disposable fault tests proving no positive ACK for non-durable data and no unbounded duplicate replay. Runtime sources core/data/buffer.ts and server/workers/csvWriter.js remain READ-ONLY unless a separately justified exact file/line amendment is approved. Preserve all UI/auth/SDK/public health behavior and existing error codes, production data, security, other features and Docker. One focused CI, diff/security audit, notes update, commit and 3-remote parity. No deployment, migrations, tags/releases or scope expansion. If a safe fix cannot be achieved within these exact methods, stop and report the required additional Scope Lock rather than broadening automatically.`
 
 After separate approved remediation and verified P02 closure, **P03 plan** remains CI-06 Linux Python runner provisioning, CI-07 isolated Docker/BuildKit failure remediation and 3-image build, CI-08 supply-chain advisory triage, and non-mutating readiness evidence. P03 should not modify unrelated UI/runtime/API code by default.
+
+
+## P02 Runtime Remediation Execution Handoff — 2026-11-22
+
+The user explicitly approved **only** R-01 Redis failure ACK and R-02 Redis-to-CSV replay corrections in these methods: `server/index.js` `pushEventsToRedisOrFallback` / `flushBuffer` / existing `onBufferPush` integration; `server/socket/handlers.js` `sync_data` / `batch_sync` ACK handling; `core/data/buffer.ts` `flush` if needed; the three earlier P02 test files; `notes/001–006`. No other application method/UI/API/auth/SDK/Docker/CI-workflow edit. Public R-03 `/health` semantics remain unchanged.
+
+Local candidate `44eee8877e40d1683f44502c2a0ba3d437a03b88` is **not release-ready** until Gitea acceptance. Before closure, prove: negative ACK on Redis failure with no sensitive error leakage; ordinary successful Redis ACK preserved; both single and batch retries don't convert volatile failures to success; Redis queued event replays after crash without writing duplicate CSV rows in the Port 4000 worker and Port 3000 web buffer; CSV read/parse failure never causes premature Redis trim; validate bounded scan overhead and edge cases for rotated/gzipped partitions; all historical 401/403/429/507/503 tests unchanged.
+
+**Stop rule:** if required fixes need touching `validateSingleEventAsync`, `csvWriter.js` or separate journal/storage scheme, do not broaden the implementation scope; record the residual and request new explicit approval. Existing unrelated files including `MEMORY.md` remain unchanged due exact Scope Lock; this note is the cross-IDE handoff. P03 must wait for P02 CLOSED, not merely implementation committed.
+
+
+## P02-FINAL-ACCEPTANCE-01 Execution / P03 Gate
+
+User approved strict P02 final acceptance after `fd57a3518d14bcb8367ce9ab9c3ec306bcfc9898` published diagnosis and `76cd972bdeea9ef07b4b38e9d8b5b5ed3312ca5b` runtime candidate. Previously failed claim is negative timestamp cleaned with positive-timestamp TTL arithmetic; final patch changes only `server/socket/handlers.js` sync_data/batch_sync marker and mixed-batch handling, plus `tests/phase02-sync.test.ts` and `tests/phase03-storage-buffer.test.ts`. It does not edit production startup, public health, schema, CSV format, SDK or dependency files. Candidate CI #66 **terminal SUCCESS**: all 24/24 TypeScript suites, strict tsc, lint, Windows Node SDK and Next build PASS. Final focused CI #69 on `bf525f0d4e5e4781de7fddd2f5e7d3d602a80532` was dispatched; confirm terminal results before any P02 CLOSED claim. No repeated broad CI runs unless this run demonstrates a scoped failure.
+
+**Acceptance contract:** ACK durability applies to Redis-backed events when Redis configured. Intentionally Redis-free RAM mode retains its historical best-effort ACK. CSV replay is at-least-once with per-partition event-id duplicate suppression under tested crash windows, not a global transactional exactly-once guarantee. Existing scan uses streaming parsing (bounded memory) and scans entire matching partitions (disk I/O scales with data size; monitor before production promotion). Corrupt matching CSV fails closed. If a hard upper disk-scan budget is required for production traffic, obtain a dedicated storage/index design approval rather than silently breaking ingestion.
+
+**Next P03 (ONLY after P02 closure):** CI-06 Python runner environment and 14/14 Python SDK; CI-07 three Docker image builds/isolated BuildKit with no live prune; CI-08 read-only npm advisory IDs/direct-transitive audit, compatible dependency pins only if justified; Compose/standalone/health gate evidence and manual release decision. Exact P03 allowlist remains in this roadmap. No live deploy, migrations, tags or releases without separate approval.
+
+
+### P02 Final CI Exception / Narrow Retry
+
+The final acceptance test-only clock override in #69 interfered with Socket.IO ACK timing. The source-grounded mixed `batch_sync` all-duplicate edge also required a single conditional correction within the previously approved handler. Commit `acca8be01a31f8d3972564cbaec8fd3117a0b551` changes only `server/socket/handlers.js` and `tests/phase02-sync.test.ts` after initial final candidate; one narrow Gitea CI #72 requested because CI #69 node-regression failed one fixture. Other scope/production invariants remain unchanged. P02 closure requires terminal #72 and exact patch/security evidence.
+
+
+## P02 Final Acceptance Closure Gate / P03 approval handoff — 2026-11-22
+
+P01 CLOSED; **P02 tests/quality/build ACCEPTED via terminal [Gitea CI #72](https://dev.ivib.cc/vibtools/DataStack/actions/runs/72) SUCCESS** on `acca8be01a31f8d3972564cbaec8fd3117a0b551`; P02 phase transitions to CLOSED only when the verified code plus these documentation-only notes are merged to Gitea main and published to GitHub/GitLab with identical tracked Git trees. Terminal jobs: node-regression 24/24 PASS; quality strict TypeScript and ESLint PASS; Windows compatibility SDK PASS; production Next standalone PASS; Python and Docker intentionally skipped (P03). #69 historical test-only clock failure is resolved in #72. A production deployment and all live services remain **NOT VERIFIED** and NOT authorized.
+
+**P03 next / exact future Scope Lock (requires separate user approval):** CI-06 Linux/Python environment: `.gitea/workflows/datastack-ci.yml` and `.gitea/workflows/datastack-python-ci.yml` only; Python SDK 14/14 isolated. CI-07 Docker/BuildKit 3-image verification: `.gitea/workflows/datastack-ci.yml`, `.gitea/workflows/datastack-docker-ci.yml` only, runner evidence read-only; Dockerfiles can be edited ONLY after independently approved exact exception, no shared runner prune. CI-08 advisory triage: read-only `npm audit --json`, actual CVE/advisory and direct/transitive dependency graph; only minimal justified `package.json`/`package-lock.json` pins under this phase scope, never forced audit repair. `.gitea/workflows/datastack-eslint-ci.yml` quality harness only if source-proven CI-08 need. `notes/001–006` for evidence. Existing UI/API/auth/SDK/runtime logic, Compose, volumes, DB data, secrets, real host, and release configuration remain unchanged. One focused acceptance / one exact patch/security audit / one main commit and 3-way tree sync. Do not deploy, run live ingestion, migrate, prune shared Docker, tag or release.
+
+**P03 approval command (not authorization until user explicitly sends):**
+
+```text
+APPROVED — DataStack Production Readiness P03.
+Use notes/002 P03 CI-06/CI-07/CI-08 Exact Scope Lock and the verified published P02 main baseline.
+CI-06: fix Python runner/toolchain only in approved .gitea workflows; verify Python SDK 14/14.
+CI-07: isolate Docker runner/BuildKit and build all 3 images without deploying or pruning shared caches; Dockerfiles READ-ONLY unless a separately approved exact exception.
+CI-08: read-only npm audit advisory inventory, minimal compatible package pins only for proven security need; no npm audit fix --force.
+Preserve UI/UX, app/API/auth/SDK/runtime, Compose, production data, secrets and existing features unchanged.
+Use one focused Gitea CI, strict patch/security diff, notes/001–006 update, Git commit and Gitea/GitHub/GitLab tree parity.
+No live deployment, migrations, tags or releases.
+Close P03 only on verified acceptance; provide production release readiness report.
+```

@@ -1246,12 +1246,29 @@ test("P02 R-01 diagnostic: Redis RPUSH failure yields positive WS ACK for volati
     );
     const committedRows = await failingRedis.lrange("datastack:buffer:events", 0, -1);
     const volatileRows = serverMod.bufferQueue.filter((e) => e.eventId === "p02-ack-before-crash-001");
-    assert.equal(ack.success, true, "Existing handler currently sends a positive ACK after Redis failure");
+    assert.equal(ack.success, false, "P02 remediation must reject non-durable ACK");
+    assert.equal(ack.code, "BUFFER_PERSIST_FAILED");
+    const sameIdRetry = await emitWithAck<{ success: boolean; code?: string }>(
+      socket, "sync_data",
+      { eventId: "p02-ack-before-crash-001", data: { value: 42 } },
+    );
+    assert.equal(sameIdRetry.success, false,
+      "Pending idempotency claims must not return false positive duplicate ACK");
+    assert.equal(sameIdRetry.code, "BUFFER_PERSIST_FAILED");
     assert.equal(committedRows.length, 0, "Fake Redis has no durable event");
     assert.equal(volatileRows.length, 1, "Acknowledged event is RAM-only");
     // Crash model: restart loses RAM but fake Redis survives. No actual process is killed.
     serverMod.bufferQueue.length = 0;
     assert.equal((await failingRedis.lrange("datastack:buffer:events", 0, -1)).length, 0);
+    // A new event may ACK only after Redis actually resumes persistence.
+    const healthyRedis = createSharedMockRedis();
+    serverMod.setRedisClientForTests(healthyRedis);
+    const recovered = await emitWithAck<{ success: boolean; eventId?: string }>(
+      socket, "sync_data",
+      { eventId: "p02-ack-recovered-002", data: { value: 43 } },
+    );
+    assert.equal(recovered.success, true);
+    assert.equal((await healthyRedis.lrange("datastack:buffer:events", 0, -1)).length, 1);
   } finally {
     socket?.disconnect();
     serverMod.setRedisClientForTests(undefined);
@@ -1279,5 +1296,202 @@ test("P02 R-03 diagnostic: Redis query failure leaves public ingestion health 20
     assert.equal(recoveredBody.redisConnected, true);
   } finally {
     serverMod.setRedisClientForTests(undefined);
+  }
+});
+
+test("P02 R-01: batch_sync rejects non-durable Redis writes and pending duplicate claims", async () => {
+  const previousThreshold = serverMod.runtimeConfig.batchFlushThreshold;
+  const previousQueue = serverMod.bufferQueue.slice();
+  const failingRedis = createSharedMockRedis();
+  failingRedis.rpush = async () => { throw new Error("P02 injected batch Redis outage"); };
+  serverMod.setRedisClientForTests(failingRedis);
+  serverMod.runtimeConfig.batchFlushThreshold = 100_000;
+  serverMod.bufferQueue.length = 0;
+  let socket: Socket | undefined;
+  const payload = [
+    { eventId: "p02-batch-volatile-1", data: { value: 1 } },
+    { eventId: "p02-batch-volatile-2", data: { value: 2 } },
+  ];
+  try {
+    const client = await SDKManager.registerClientAsync({
+      clientId: "p02_redis_batch_failure",
+      name: "P02 Redis Batch Failure",
+      rateLimit: 100,
+    });
+    socket = await connectSocket(client.token);
+    const ack = await emitWithAck<{ success: boolean; code?: string; processed?: number }>(
+      socket, "batch_sync", payload,
+    );
+    assert.equal(ack.success, false);
+    assert.equal(ack.code, "BUFFER_PERSIST_FAILED");
+    assert.equal(ack.processed, 0);
+    assert.equal((await failingRedis.lrange("datastack:buffer:events", 0, -1)).length, 0);
+    const retry = await emitWithAck<{ success: boolean; code?: string }>(
+      socket, "batch_sync", payload,
+    );
+    assert.equal(retry.success, false);
+    assert.equal(retry.code, "BUFFER_PERSIST_FAILED");
+  } finally {
+    socket?.disconnect();
+    serverMod.setRedisClientForTests(undefined);
+    serverMod.runtimeConfig.batchFlushThreshold = previousThreshold;
+    serverMod.bufferQueue.splice(0, serverMod.bufferQueue.length, ...previousQueue);
+  }
+});
+
+test("P02 FINAL R-01: stale Redis claim never becomes positive ACK after cleanup window", async () => {
+  // Source proof at candidate 76cd972: a failure marker is -Date.now();
+  // cleanupMaps compares now - negativeTimestamp > TTL, which expires immediately
+  // on the first scheduled cleanup even though a Redis idempotency claim remains.
+  const previousThreshold = serverMod.runtimeConfig.batchFlushThreshold;
+  const previousQueue = serverMod.bufferQueue.slice();
+  const redis = createSharedMockRedis(); // intentionally no DEL: simulate stuck Redis claim
+  redis.rpush = async () => { throw new Error("Injected Redis queue outage"); };
+  serverMod.setRedisClientForTests(redis);
+  serverMod.runtimeConfig.batchFlushThreshold = 100_000;
+  serverMod.bufferQueue.length = 0;
+
+  let socket: Socket | undefined;
+  try {
+    const client = await SDKManager.registerClientAsync({
+      clientId: "p02_stale_claim_cleanup", name: "P02 Stale Claim", rateLimit: 100,
+    });
+    socket = await connectSocket(client.token);
+    const payload = { eventId: "p02-stale-claim-1", data: { value: 1 } };
+    const first = await emitWithAck<{ success: boolean; code?: string }>(socket, "sync_data", payload);
+    assert.equal(first.success, false);
+    assert.equal(first.code, "BUFFER_PERSIST_FAILED");
+
+    // Verify TTL arithmetic without overriding the global clock (Socket.IO timeouts).
+    // Also keep two real socket retries to prove pending claims stay negative.
+    // Do not mutate process timestamps or wait for wall-clock TTL.
+    const stamped = Date.now();
+    const cleanupClock = stamped + 61_000;
+    assert.equal(cleanupClock - (-stamped) > 300_000, true, "Old negative marker expired prematurely");
+    assert.equal(cleanupClock - stamped < 300_000, true, "Five-minute TTL should still be active");
+    const handlerSource = readFileSync(require.resolve("../server/socket/handlers.js"), "utf8");
+    assert.ok(handlerSource.includes('idempotencyMap.set(`\\u0000failed-persist:${claimKey}`, Date.now());'));
+    assert.equal(handlerSource.includes("idempotencyMap.set(claimKey, -Date.now());"), false);
+    const retry1 = await emitWithAck<{ success: boolean; code?: string }>(socket, "sync_data", payload);
+    const retry2 = await emitWithAck<{ success: boolean; code?: string }>(socket, "sync_data", payload);
+    assert.equal(retry1.success, false);
+    assert.equal(retry1.code, "BUFFER_PERSIST_FAILED");
+    assert.equal(retry2.success, false, "Cleanup must not convert a volatile claim into DUPLICATE_DROPPED success");
+    assert.equal(retry2.code, "BUFFER_PERSIST_FAILED");
+    assert.equal((await redis.lrange("datastack:buffer:events", 0, -1)).length, 0);
+  } finally {
+
+    socket?.disconnect();
+    serverMod.setRedisClientForTests(undefined);
+    serverMod.runtimeConfig.batchFlushThreshold = previousThreshold;
+    serverMod.bufferQueue.splice(0, serverMod.bufferQueue.length, ...previousQueue);
+  }
+});
+
+test("P02 FINAL R-01: mixed batch with stale volatile claim never ACKs success", async () => {
+  const previousThreshold = serverMod.runtimeConfig.batchFlushThreshold;
+  const previousQueue = serverMod.bufferQueue.slice();
+  const redis = createSharedMockRedis();
+  const originalRpush = redis.rpush.bind(redis);
+  redis.rpush = async () => { throw new Error("Injected Redis outage before batch recovery"); };
+  serverMod.setRedisClientForTests(redis);
+  serverMod.runtimeConfig.batchFlushThreshold = 100_000;
+  serverMod.bufferQueue.length = 0;
+  let socket: Socket | undefined;
+  try {
+    const client = await SDKManager.registerClientAsync({
+      clientId: "p02_mixed_batch_claim", name: "P02 Mixed Batch Claim", rateLimit: 100,
+    });
+    socket = await connectSocket(client.token);
+    const pending = { eventId: "p02-mixed-pending-01", data: { v: 1 } };
+    const first = await emitWithAck<{ success: boolean; code?: string }>(
+      socket, "sync_data", pending,
+    );
+    assert.equal(first.success, false);
+    // Simulated process RAM loss: Redis idempotency key survives; queue does not.
+    serverMod.bufferQueue.length = 0;
+    redis.rpush = originalRpush;
+    const mixed = await emitWithAck<{ success: boolean; code?: string; processed?: number }>(
+      socket, "batch_sync", [pending, { eventId: "p02-mixed-durable-02", data: { v: 2 } }],
+    );
+    assert.equal(mixed.success, false, "Mixed batch cannot falsely ACK the volatile duplicate");
+    assert.equal(mixed.code, "BUFFER_PERSIST_FAILED");
+    assert.equal(mixed.processed, 1, "A distinct new event can commit without masking the failed claim");
+    const rows = await redis.lrange("datastack:buffer:events", 0, -1);
+    assert.equal(rows.length, 1);
+    assert.equal((JSON.parse(rows[0]) as { eventId: string }).eventId, "p02-mixed-durable-02");
+  } finally {
+    socket?.disconnect();
+    serverMod.setRedisClientForTests(undefined);
+    serverMod.runtimeConfig.batchFlushThreshold = previousThreshold;
+    serverMod.bufferQueue.splice(0, serverMod.bufferQueue.length, ...previousQueue);
+  }
+});
+
+test("P02 FINAL R-01 compatibility: deliberately Redis-free RAM mode remains unchanged", async () => {
+  const threshold = serverMod.runtimeConfig.batchFlushThreshold;
+  const queue = serverMod.bufferQueue.slice();
+  serverMod.setRedisClientForTests(null);
+  serverMod.runtimeConfig.batchFlushThreshold = 100_000;
+  serverMod.bufferQueue.length = 0;
+  let socket: Socket | undefined;
+  try {
+    const client = await SDKManager.registerClientAsync({
+      clientId: "p02_redis_free_compat", name: "P02 Redis-free Compatibility", rateLimit: 100,
+    });
+    socket = await connectSocket(client.token);
+    const ack = await emitWithAck<{ success: boolean; eventId?: string }>(
+      socket, "sync_data", { eventId: "p02-ram-compat-001", data: { value: 1 } },
+    );
+    assert.equal(ack.success, true, "Preserve historical RAM-mode acceptance contract");
+    assert.equal(serverMod.bufferQueue.some((e) => e.eventId === "p02-ram-compat-001"), true);
+  } finally {
+    socket?.disconnect();
+    serverMod.setRedisClientForTests(undefined);
+    serverMod.runtimeConfig.batchFlushThreshold = threshold;
+    serverMod.bufferQueue.splice(0, serverMod.bufferQueue.length, ...queue);
+  }
+});
+
+test("P02 FINAL R-01: pending claim plus durable duplicate must reject whole batch", async () => {
+  const previousThreshold = serverMod.runtimeConfig.batchFlushThreshold;
+  const previousQueue = serverMod.bufferQueue.slice();
+  const redis = createSharedMockRedis();
+  const healthyRpush = redis.rpush.bind(redis);
+  serverMod.setRedisClientForTests(redis);
+  serverMod.runtimeConfig.batchFlushThreshold = 100_000;
+  serverMod.bufferQueue.length = 0;
+  let socket: Socket | undefined;
+  try {
+    const client = await SDKManager.registerClientAsync({
+      clientId: "p02_mixed_only_duplicates", name: "P02 Failed and Durable Duplicate", rateLimit: 100,
+    });
+    socket = await connectSocket(client.token);
+    const durable = { eventId: "p02-durable-duplicate", data: { v: 10 } };
+    const pending = { eventId: "p02-failed-duplicate", data: { v: 20 } };
+    const first = await emitWithAck<{ success: boolean }>(socket, "sync_data", durable);
+    assert.equal(first.success, true);
+    redis.rpush = async () => { throw new Error("Injected Redis failure for second event"); };
+    const rejected = await emitWithAck<{ success: boolean; code?: string }>(
+      socket, "sync_data", pending,
+    );
+    assert.equal(rejected.success, false);
+    assert.equal(rejected.code, "BUFFER_PERSIST_FAILED");
+    serverMod.bufferQueue.length = 0; // simulate volatile queue lost across restart
+    redis.rpush = healthyRpush;
+    const mixed = await emitWithAck<{
+      success: boolean; code?: string; processed?: number; duplicates?: number;
+    }>(socket, "batch_sync", [pending, durable]);
+    assert.equal(mixed.processed, 0);
+    assert.equal(mixed.duplicates, 1);
+    assert.equal(mixed.success, false,
+      "Existing durable duplicate cannot mask a non-durable pending claim");
+    assert.equal(mixed.code, "BUFFER_PERSIST_FAILED");
+    assert.equal((await redis.lrange("datastack:buffer:events", 0, -1)).length, 1);
+  } finally {
+    socket?.disconnect();
+    serverMod.setRedisClientForTests(undefined);
+    serverMod.runtimeConfig.batchFlushThreshold = previousThreshold;
+    serverMod.bufferQueue.splice(0, serverMod.bufferQueue.length, ...previousQueue);
   }
 });

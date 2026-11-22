@@ -237,3 +237,53 @@ return bufferQueue.length;
 - `P02 R-03 diagnostic: Redis query failure leaves public ingestion health 200/online` — **ok 16**, same suite exit 0, Redis flag false while liveness stays online.
 - `P02 R-02 diagnostic: post-CSV Redis trim failure replays identical event on retry` — **ok 18**, `phase03-storage-buffer` suite exit 0; duplicate append after retry reproduced on representative web buffer path. **Direct ingestion Port 4000 CSV worker crash coverage remains outstanding** and should be requested in remediation approval before guarantee changes.
 - These three diagnostic tests **prove findings, do not close production-readiness**. See Gitea https://dev.ivib.cc/vibtools/DataStack/actions/runs/63; never call run successful until terminal conclusion is confirmed. No server-side source fix applied.
+
+
+## F. P02 Remediation Candidate Patch Proof — 2026-11-22
+
+Base: Gitea/GitHub published P02 diagnostic tree `fd57a3518d14bcb8367ce9ab9c3ec306bcfc9898`; GitLab distinct commit, same previous tree. Local candidate commit `44eee8877e40d1683f44502c2a0ba3d437a03b88` on isolated worktree. Initial exact delta: 5 approved source/test paths, 310 insertions and 22 deletions, no application UI, Python SDK, auth, public health route, CI or deployment edit. `git diff --check` and `node --check` on JS files PASS.
+
+- `server/index.js:pushEventsToRedisOrFallback`: catch RPUSH failure, keep previous RAM buffering, throw sanitized `BUFFER_PERSIST_FAILED`; no positive ACK for that branch.
+- `server/socket/handlers.js:sync_data/batch_sync`: negative ACK and best-effort claimed idempotency-key rollback with negative retry guard, no change to legitimate duplicate success path or existing auth/limits/error codes.
+- `server/index.js:flushBuffer` and `core/data/buffer.ts:flush`: scoped streaming CSV/CSV.gz read-before-reappend (parsing quoted/multiline rows), exact client/date/event ID match; failures abort before Redis LTRIM. No changes to `server/workers/csvWriter.js`.
+- `tests/phase02-sync.test.ts`: R-01 single/batch outage and duplicate claim ACK negative, successful recovery ACK, and unchanged R-03 liveness.
+- `tests/phase03-storage-buffer.test.ts`: web-side replay verifies exactly one physically stored row; new direct Port 4000 writer Redis-trim failure/recovery proof. All tests on fake Redis and disposable temp CSV paths.
+
+**Unverified:** Gitea P02 implementation acceptance was unavailable due inaccessible host/connector. Local `npm ci` not confirmed successful. Do not invent a CI run ID or claim full PASS. Full cross-process transactional exactly-once and all Redis claim crash windows are out of proof scope and may require exact additional approval. The streaming dedupe scan changes I/O cost per flush; performance validation before production is required.
+
+
+### Blocked acceptance evidence — actual tool outcomes
+
+- JS syntax: local `node --check server/index.js` and `node --check server/socket/handlers.js` PASS.
+- Source scope: local `git diff --check` PASS; only the five allowed P02 runtime/test paths changed before notes updates.
+- Gitea: connection returned `UNAVAILABLE: McpServerError: Connection failed`; Git remote `dev.ivib.cc` unresponsive. No Gitea CI run ID exists for candidate `44eee8877e40d1683f44502c2a0ba3d437a03b88`.
+- Local Windows npm: `npm ci` failed `ETARGET yaml@2.9.1` and cleanup `EPERM` in the isolated worktree, **not** a TypeScript/test result. Dependency changes are out of P02 scope.
+- Therefore neither TS typecheck nor regression-suite remediation acceptance is established; keep P02 BLOCKED and do not advance P03 or alter any protected runtime/source beyond this approval.
+
+
+## F. P02 Final Acceptance Patch Index (current source/CI proof)
+
+- Published diagnosis Gitea/GitHub main: `fd57a3518d14bcb8367ce9ab9c3ec306bcfc9898`; previous GitLab main same tracked tree.
+- Runtime candidate: `76cd972bdeea9ef07b4b38e9d8b5b5ed3312ca5b`; Gitea [CI #66](https://dev.ivib.cc/vibtools/DataStack/actions/runs/66) **terminal SUCCESS** across node 24/24, strict TS, lint, Next standalone and Windows Node SDK.
+- Exact supplemental commit: `bf525f0d4e5e4781de7fddd2f5e7d3d602a80532` (3 changed files: `server/socket/handlers.js`, `tests/phase02-sync.test.ts`, `tests/phase03-storage-buffer.test.ts`). Compared with published diagnosis, final candidate also includes runtime `server/index.js`, `core/data/buffer.ts`, and previously modified tests, all authorized, plus `notes/001–006`.
+- **R-01 arithmetic reproduction** before patch: `const marker=-t; const now=t+61000; now-marker > 300000` is true, while `now-t > 300000` is false. `server/socket/handlers.js:142-158` `cleanupMaps` expires old negative marker; `validateSingleEventAsync:293-317` sees retained Redis idempotency claim; `sync_data` returned duplicate success. Final marker is `\u0000failed-persist:<clientId>:<eventId>` with positive timestamp, corrected age check, cleanup after true TTL, clear marker after durable ACK. Mixed batches reject overall positive ACK while a failed claim remains.
+- **R-02:** `server/index.js:843-897,1043-1058`, `core/data/buffer.ts:652-711,855-872`: stream-parsed same-day client CSV/CSV.gz replay suppression, then Redis trim. Focused tests inject direct Port4000 LTRIM crash and compressed part2 quoted/multiline replay; malformed matching partition causes safe no-trim, fixture repair recovers. Memory streamed, partition disk-I/O remains proportional; not globally exactly-once.
+- **Compat:** Redis-free RAM ACK and old public /health unchanged; other HTTP/Socket auth, SDK and quota routes unaffected.
+- Final [Gitea CI #69](https://dev.ivib.cc/vibtools/DataStack/actions/runs/69) dispatched against exact supplemental commit; until terminal result, phase stays pending and no remote publish.
+
+
+### Final P02 CI #69 failure and exact retry patch
+
+- CI #69: `phase02-sync.test.ts` subtest `stale Redis claim never becomes positive ACK after cleanup window` `ERR_TEST_FAILURE: operation has timed out` after replacing the **global** `Date.now` during Socket.IO ACK. This cannot support a server-failure claim; it was a test harness flaw. Other new replay/compatibility assertions PASS and quality/Windows jobs separately passed.
+- Discovered source branch in `server/socket/handlers.js`: `if (volatileDuplicate && processed > 0)` allowed an overall `success:true` response with pending non-durable claim and already-durable duplicate when `processed=0,duplicates>0`. Revised `if (volatileDuplicate)` blocks every mixed response with an uncommitted claim; new test reproduces the exact combination.
+- Test no longer overrides Date.now; independent simulated arithmetic proves the original negative-marker expiry mistake; live ACK checks run on real clock. Supplemental commit `acca8be01a31f8d3972564cbaec8fd3117a0b551`; [CI #72](https://dev.ivib.cc/vibtools/DataStack/actions/runs/72) must pass before P02 closure. No modification of package/dependency files, test CI workflow, public API, UI or production.
+
+
+## G. P02 Final Acceptance — authoritative terminal CI / Scope Lock proof
+
+- Source baseline published diagnosis `fd57a3518d14bcb8367ce9ab9c3ec306bcfc9898`. Fixed runtime candidate `76cd972bdeea9ef07b4b38e9d8b5b5ed3312ca5b`, previous #66 SUCCESS. Final corrected **source/test** SHA `acca8be01a31f8d3972564cbaec8fd3117a0b551` fully verified in [Gitea #72](https://dev.ivib.cc/vibtools/DataStack/actions/runs/72), **terminal COMPLETED SUCCESS**, Node `CI_SUITE_SUMMARY total=24 failed=0`. CI job conclusions: node-regression SUCCESS, quality SUCCESS, windows-compatibility SUCCESS, production-build SUCCESS; python-regression and docker-image-build SKIPPED by narrow dispatch.
+- Exact reproducible Redis idempotency bug: old `-Date.now()` failed timestamp ages incorrectly at +61000ms, while 300000ms Redis claim TTL has not elapsed. New `\u0000failed-persist:${claimKey}` positive timestamp marker and corrected TTL comparison isolate the failed claim. Live Socket.IO retries remain negative ACK; no process-wide clock monkeypatch. Mixed all-duplicate batch also rejects pending claim instead of sending global positive ACK.
+- CSV fault evidence: `tests/phase03-storage-buffer.test.ts` after CSV append but before Redis LTRIM, direct Port4000 writer, rotated `.csv.gz`, JSON multiline-quoted payload, corrupt matching partition no-trim/recovery all PASS. Test assertions cannot prove a global exactly-once protocol or live throughput cap. Full-partition scan is streaming bounded-memory, but data-size-linear disk I/O.
+- Historical #69 failed one test-only global Date.now-induced Socket.IO timeout, **not** a demonstrated runtime regression; corrected #72 PASS. No secret or credential introduction, no production data access.
+- Final audit `git diff --check` PASS and source JS syntax checks PASS; exact tracked source diff from diagnosis = 11 allowlisted files (3 runtime + 2 test + 6 notes); no unrelated UI/auth/SDK/public health, DB schema, package metadata, Docker, CI workflow or live deployment.
+- Git release gate: final docs-only commits after tested source SHA add **no source/test differences**. Gitea PR #3 squashed into one `[skip ci]` main commit; GitHub/GitLab tracked Git trees must match Gitea before final CLOSED. If GitLab commit SHA differs because of parent history, compare tree SHA not commit SHA. Store exact remote SHAs/trees in phase close operator report; do not invent them before push.

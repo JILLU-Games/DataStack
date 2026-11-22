@@ -1584,10 +1584,134 @@ test("P02 R-02 diagnostic: post-CSV Redis trim failure replays identical event o
     assert.equal(await redis.llen(REDIS_BUFFER_KEY), 1, "Redis still queues previously appended CSV event");
     await DataBufferEngine.flush();
     assert.equal(await redis.llen(REDIS_BUFFER_KEY), 0);
-    assert.equal(writtenIds.filter((id) => id === event.eventId).length, 2,
-      "A second flush appends the same eventId again after failed trim: at-least-once, not exactly-once");
+    assert.equal(writtenIds.filter((id) => id === event.eventId).length, 1,
+      "Replay must detect the persisted CSV eventId before attempting another append");
+    const csvPath = path.join(tmpStorageDir, event.clientId, "2026-11-22.csv");
+    const csvContents = fs.readFileSync(csvPath, "utf8");
+    assert.equal(csvContents.split(event.eventId).length - 1, 1,
+      "Exactly one physical CSV row must exist after a failed LTRIM and retry");
   } finally {
     CSVStorageManager.appendBatch = originalAppend;
     DataBufferEngine.setRedisClientForTests(undefined);
+  }
+});
+
+test("P02 R-02: Port 4000 CSV worker suppresses a crash-window replay after Redis LTRIM error", async () => {
+  const mockRedis = new FakeRedisClient();
+  const originalTrim = mockRedis.ltrim.bind(mockRedis);
+  let failedOnce = false;
+  mockRedis.ltrim = async (key: string, start: number, stop: number): Promise<"OK"> => {
+    if (key === REDIS_BUFFER_KEY && !failedOnce) {
+      failedOnce = true;
+      throw new Error("P02 Port4000 injected post-CSV trim failure");
+    }
+    return originalTrim(key, start, stop);
+  };
+  const ingestion = require("../server/index.js") as IngestionServerModule;
+  const previousDir = ingestion.writer.baseDir;
+  const previousQueue = ingestion.bufferQueue.slice();
+  ingestion.writer.baseDir = tmpStorageDir;
+  ingestion.bufferQueue.length = 0;
+  ingestion.setRedisClientForTests(mockRedis);
+  const evt: DataEvent = {
+    clientId: "p02_ingestion_replay",
+    eventId: "p02-port4000-001",
+    timestamp: "2026-11-22T13:00:00.000Z",
+    payload: JSON.stringify({ stage: "before-ltrim" }),
+  };
+  try {
+    await mockRedis.rpush(REDIS_BUFFER_KEY, JSON.stringify(evt));
+    await assert.rejects(
+      () => ingestion.flushBuffer(),
+      /P02 Port4000 injected post-CSV trim failure/,
+    );
+    assert.equal(failedOnce, true);
+    assert.equal(await mockRedis.llen(REDIS_BUFFER_KEY), 1);
+    const csvPath = path.join(tmpStorageDir, evt.clientId, "2026-11-22.csv");
+    assert.equal(fs.readFileSync(csvPath, "utf8").split(evt.eventId).length - 1, 1);
+    const recovered = await ingestion.flushBuffer();
+    assert.equal(recovered.written, 0, "Recovered replay should not append the event again");
+    assert.equal(await mockRedis.llen(REDIS_BUFFER_KEY), 0);
+    assert.equal(fs.readFileSync(csvPath, "utf8").split(evt.eventId).length - 1, 1);
+  } finally {
+    ingestion.writer.baseDir = previousDir;
+    ingestion.bufferQueue.splice(0, ingestion.bufferQueue.length, ...previousQueue);
+    ingestion.setRedisClientForTests(undefined);
+  }
+});
+
+test("P02 FINAL R-02: Port 4000 scans rotated compressed CSV with quoted multiline payload", async () => {
+  const zlib = await import("node:zlib");
+  const redis = new FakeRedisClient();
+  const ingestion = require("../server/index.js") as IngestionServerModule;
+  const oldDir = ingestion.writer.baseDir;
+  const oldQueue = ingestion.bufferQueue.slice();
+  ingestion.writer.baseDir = tmpStorageDir;
+  ingestion.bufferQueue.length = 0;
+  ingestion.setRedisClientForTests(redis);
+  const event: DataEvent = {
+    clientId: "p02_rotated_gzip",
+    eventId: "p02-gzip-quoted-001",
+    timestamp: "2026-11-22T12:45:00.000Z",
+    payload: JSON.stringify({ body: "Line one, \"quoted\"\nLine two" }),
+  };
+  try {
+    const diskWriter = new CsvWriterWorker(tmpStorageDir);
+    await diskWriter.writeBatch([event]);
+    const dir = path.join(tmpStorageDir, event.clientId);
+    const csvPath = path.join(dir, "2026-11-22.csv");
+    const rotatedPath = path.join(dir, "2026-11-22-part2.csv");
+    const gzPath = rotatedPath + ".gz";
+    fs.renameSync(csvPath, rotatedPath);
+    fs.writeFileSync(gzPath, zlib.gzipSync(fs.readFileSync(rotatedPath)));
+    fs.unlinkSync(rotatedPath);
+    // A different date partition must not be parsed as part of this replay.
+    fs.writeFileSync(path.join(dir, "2026-11-21.csv"), 'invalid,"unterminated');
+    await redis.rpush(REDIS_BUFFER_KEY, JSON.stringify(event));
+    const replay = await ingestion.flushBuffer();
+    assert.equal(replay.written, 0, "Already written rotated/gzipped event must not append again");
+    assert.equal(await redis.llen(REDIS_BUFFER_KEY), 0, "Successful dedupe permits Redis trim");
+    assert.equal(fs.existsSync(csvPath), false, "Do not recreate a duplicate plain CSV");
+    assert.equal(zlib.gunzipSync(fs.readFileSync(gzPath)).toString("utf8").split(event.eventId).length - 1, 1);
+  } finally {
+    ingestion.writer.baseDir = oldDir;
+    ingestion.bufferQueue.splice(0, ingestion.bufferQueue.length, ...oldQueue);
+    ingestion.setRedisClientForTests(undefined);
+  }
+});
+
+test("P02 FINAL R-02: partial corrupted CSV blocks Redis trim and recovers after fixture repair", async () => {
+  const redis = new FakeRedisClient();
+  const ingestion = require("../server/index.js") as IngestionServerModule;
+  const oldDir = ingestion.writer.baseDir;
+  const oldQueue = ingestion.bufferQueue.slice();
+  ingestion.writer.baseDir = tmpStorageDir;
+  ingestion.bufferQueue.length = 0;
+  ingestion.setRedisClientForTests(redis);
+  const event: DataEvent = {
+    clientId: "p02_partial_corrupt",
+    eventId: "p02-corrupt-recovery-001",
+    timestamp: "2026-11-22T13:15:00.000Z",
+    payload: JSON.stringify({ value: "safe" }),
+  };
+  try {
+    const dir = path.join(tmpStorageDir, event.clientId);
+    fs.mkdirSync(dir, { recursive: true });
+    const badPath = path.join(dir, "2026-11-22.csv");
+    fs.writeFileSync(badPath, 'clientId,eventId,timestamp,payload\n"unterminated');
+    await redis.rpush(REDIS_BUFFER_KEY, JSON.stringify(event));
+    await assert.rejects(() => ingestion.flushBuffer(),
+      /quote|CSV_|invalid|record|unterminated/i, "Malformed existing CSV must fail closed");
+    assert.equal(await redis.llen(REDIS_BUFFER_KEY), 1, "Never trim after failed CSV replay check");
+    // Disposable fixture repair only; does not alter user or production files.
+    fs.unlinkSync(badPath);
+    const recovered = await ingestion.flushBuffer();
+    assert.equal(recovered.written, 1);
+    assert.equal(await redis.llen(REDIS_BUFFER_KEY), 0);
+    assert.equal(fs.readFileSync(badPath, "utf8").split(event.eventId).length - 1, 1);
+  } finally {
+    ingestion.writer.baseDir = oldDir;
+    ingestion.bufferQueue.splice(0, ingestion.bufferQueue.length, ...oldQueue);
+    ingestion.setRedisClientForTests(undefined);
   }
 });
