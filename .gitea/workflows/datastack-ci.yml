@@ -217,6 +217,16 @@ jobs:
                 fixAvailable: item.fixAvailable
               }));
             }
+            if (scope === "runtime") {
+              const counts = audit.metadata.vulnerabilities;
+              if (!Number.isInteger(counts.high) || !Number.isInteger(counts.critical)) {
+                throw Error("Incomplete runtime npm advisory severity counts");
+              }
+              if (counts.high > 0 || counts.critical > 0) {
+                throw Error("DATASTACK_RUNTIME_SECURITY_GATE_FAILED high=" + counts.high + " critical=" + counts.critical);
+              }
+              console.log("DATASTACK_RUNTIME_SECURITY_HIGH_CRITICAL_ZERO");
+            }
           }
           NODE
           git diff --exit-code -- package.json package-lock.json
