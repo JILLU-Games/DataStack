@@ -53,3 +53,14 @@ Any new error code, status, SDK public exception or alert flow is **feature/API 
 ## P01 Closure Verification (2026-11-22)
 
 The previous #58 package-lock error was resolved by adding the exact nested optional `@tybys/wasm-util@0.10.5` lock entry without changing the 1293 original locked packages. Gitea #59 clean installs and all **24/24** TypeScript regression suites passed; #59 had a single test-only TS2339 mock-type declaration error, corrected in scope and verified by **#60 strict TypeScript + ESLint PASS**. P01 made **zero changes** to runtime error-handler implementation, response codes, auth, SDK error classification, telemetry behavior or UI. Existing handler inventory remains valid as source observations. P02 R-01…R-03 fault-injection and P03 infrastructure/security remain unverified; do not claim production fault tolerance from P01.
+
+
+## P02 R-01–R-03 Diagnostic Addendum — 2026-11-22
+
+| Gate | Injected failure / expected observation | Scope / remediation gate |
+|---|---|---|
+| R-01 Redis durability | Mock `rpush` rejects; in-process websocket `sync_data` ACK may still return `success:true` while the event exists only in RAM. A simulated RAM reset (not killing live services) shows unrecoverable ACKed event if Redis remained empty. | `server/index.js:165-193,1897-1923`, `server/socket/handlers.js:583-602` **READ ONLY**. A correction to ACK/persist/spooling semantics requires explicit approval. |
+| R-02 CSV replay | Mock Redis LTRIM fails **after** CSV append. Retrying buffered event may write same `eventId` twice, exposing duplicate amplification under persistent failures. | Test the web-side `DataBufferEngine.flush` CSV-before-trim pattern; direct ingestion writer proof remains separate. Deduplication scheme or exactly-once guarantees require explicit approval. |
+| R-03 availability | Redis `llen` rejection leaves Express `/health` online with `redisConnected:false`. Recovery flips the flag while HTTP 200 remains unchanged. | Public 200 is liveness by existing contract; a protected dependency readiness probe/503 is **not implemented** and needs explicit approval. |
+
+Security invariants: do not expose secrets in ACK/errors, keep JWT/auth and 401/403/429/503/507 contracts unchanged, and never run failure-injection against actual Redis, Postgres, production API, live events, or user CSV. Disposable fake Redis and temporary files only. CI #63: https://dev.ivib.cc/vibtools/DataStack/actions/runs/63; results tracked in notes/003.

@@ -1220,3 +1220,64 @@ test("R2 PHASE-02 BUG-10: GET, PATCH (regenerate_token), and DELETE /api/clients
     SDKManager.deleteClientWithStatsAsync = origDeleteWithStats;
   }
 });
+
+test("P02 R-01 diagnostic: Redis RPUSH failure yields positive WS ACK for volatile RAM-only event", async () => {
+  // Disposable test-only fixture: no production Redis, service, or storage state.
+  const previousThreshold = serverMod.runtimeConfig.batchFlushThreshold;
+  const previousRam = serverMod.bufferQueue.slice();
+  const failingRedis = createSharedMockRedis();
+  failingRedis.rpush = async () => {
+    throw new Error("P02 injected Redis RPUSH outage");
+  };
+  serverMod.setRedisClientForTests(failingRedis);
+  serverMod.runtimeConfig.batchFlushThreshold = 100_000;
+  serverMod.bufferQueue.length = 0;
+  let socket: Socket | undefined;
+  try {
+    const client = await SDKManager.registerClientAsync({
+      clientId: "p02_redis_rpush_failure",
+      name: "P02 Redis RPUSH Failure",
+      rateLimit: 100,
+    });
+    socket = await connectSocket(client.token);
+    const ack = await emitWithAck<{ success: boolean; eventId?: string; code?: string }>(
+      socket, "sync_data",
+      { eventId: "p02-ack-before-crash-001", data: { value: 42 } },
+    );
+    const committedRows = await failingRedis.lrange("datastack:buffer:events", 0, -1);
+    const volatileRows = serverMod.bufferQueue.filter((e) => e.eventId === "p02-ack-before-crash-001");
+    assert.equal(ack.success, true, "Existing handler currently sends a positive ACK after Redis failure");
+    assert.equal(committedRows.length, 0, "Fake Redis has no durable event");
+    assert.equal(volatileRows.length, 1, "Acknowledged event is RAM-only");
+    // Crash model: restart loses RAM but fake Redis survives. No actual process is killed.
+    serverMod.bufferQueue.length = 0;
+    assert.equal((await failingRedis.lrange("datastack:buffer:events", 0, -1)).length, 0);
+  } finally {
+    socket?.disconnect();
+    serverMod.setRedisClientForTests(undefined);
+    serverMod.runtimeConfig.batchFlushThreshold = previousThreshold;
+    serverMod.bufferQueue.splice(0, serverMod.bufferQueue.length, ...previousRam);
+  }
+});
+
+test("P02 R-03 diagnostic: Redis query failure leaves public ingestion health 200/online", async () => {
+  const redis = createSharedMockRedis();
+  redis.llen = async () => { throw new Error("P02 simulated Redis health outage"); };
+  serverMod.setRedisClientForTests(redis);
+  try {
+    const res = await fetch(`${ingestionUrl}/health`);
+    assert.equal(res.status, 200, "Legacy liveness status remains backwards-compatible");
+    const body = await res.json() as { status: string; redisConnected: boolean; redisBufferSize: number };
+    assert.equal(body.status, "online");
+    assert.equal(body.redisConnected, false, "Redis failure is represented only in the payload");
+    assert.equal(body.redisBufferSize, 0);
+    const healthyRedis = createSharedMockRedis();
+    serverMod.setRedisClientForTests(healthyRedis);
+    const recovered = await fetch(`${ingestionUrl}/health`);
+    const recoveredBody = await recovered.json() as { redisConnected: boolean };
+    assert.equal(recovered.status, 200);
+    assert.equal(recoveredBody.redisConnected, true);
+  } finally {
+    serverMod.setRedisClientForTests(undefined);
+  }
+});

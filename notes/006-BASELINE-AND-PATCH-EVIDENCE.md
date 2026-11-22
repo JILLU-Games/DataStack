@@ -200,3 +200,40 @@ Remaining CI-05 corrections were confined to 9 test file type contracts; CI-04 r
 - [Run #48](https://dev.ivib.cc/vibtools/DataStack/actions/runs/48): previous Python SDK 14/14 PASS, no Python source edits or P01 rerun.
 
 Targeted path/diff audit from prior documentation HEAD: 16 scoped code/test/CI paths plus notes `001–006`; `git diff --check` PASS. P02 remaining R-01…R-03 are conditional reliability risks, not confirmed application bugs. P03 Docker/Python-runner/advisory issues still open. No live app, deployment, database, security defaults or user features changed.
+
+
+## E. P02 Concrete Code/CI Evidence — 2026-11-22
+
+**Frozen previous phase:** P01 Gitea/GitHub commit `667a140c4e9e75382bfdcdbe1d3e9eb96f6e808a`. P02 test-only commit `bbe73d91666641743cbec6cf7203f1694094caef` adds 103 lines across exactly two approved test paths. Gitea CI #63: https://dev.ivib.cc/vibtools/DataStack/actions/runs/63. No application source modification.
+
+### R-01 ACK after Redis RPUSH failure
+
+`server/index.js:171-192`:
+
+```js
+try { bufferLen = await redis.rpush(REDIS_BUFFER_KEY, ...serialized); }
+catch { redisConnected = false; }
+// ... Redis failure path
+bufferQueue.push(...events);
+return bufferQueue.length;
+```
+
+`server/socket/handlers.js:583-602` invokes `await onBufferPush()` and then calls `callback({success:true,eventId})` unless an exception escapes. Test: `tests/phase02-sync.test.ts`, `P02 R-01 diagnostic`, overriding fake Redis `rpush` to reject; check ACK, absent Redis persistence, volatile RAM, and simulated reset. No real process exit.
+
+### R-02 replay after append-before-trim
+
+`core/data/buffer.ts:795-809` and Port-4000 `server/index.js:981-993` order `appendBatch()/writeBatch()` before `redis.ltrim()`. Test: `tests/phase03-storage-buffer.test.ts`, `P02 R-02 diagnostic`; inject the *first* LTRIM failure only after successful append, verify still queued, retry flush and count duplicate `eventId` in appended rows. Web-side representative fault-injection; not a complete ingestion-crash certificate.
+
+### R-03 public status versus dependency readiness
+
+`server/index.js:1926-1957` catches Redis LLEN error, sets `redisConnected=false`, and returns HTTP 200 `status:online`. Test `P02 R-03 diagnostic` mocks LLEN failure and recovery. This preserves existing public shape rather than implementing a readiness endpoint. PG startup fail-closed coverage remains source-only/NOT VERIFIED.
+
+**Patch scope:** modified only `tests/phase02-sync.test.ts` and `tests/phase03-storage-buffer.test.ts` (plus notes/001–006). Original local user-staged P01 work preserved. Runtime files examined read-only. No production host, Redis, DB, CSV, API, service, CI workflow, release, or security setting changed.
+
+
+### CI #63 observed P02 results
+
+- `P02 R-01 diagnostic: Redis RPUSH failure yields positive WS ACK for volatile RAM-only event` — **ok 15**, test suite `phase02-sync` exit 0. Diagnostic indicates acknowledged event loss on simulated RAM reset when Redis has no record.
+- `P02 R-03 diagnostic: Redis query failure leaves public ingestion health 200/online` — **ok 16**, same suite exit 0, Redis flag false while liveness stays online.
+- `P02 R-02 diagnostic: post-CSV Redis trim failure replays identical event on retry` — **ok 18**, `phase03-storage-buffer` suite exit 0; duplicate append after retry reproduced on representative web buffer path. **Direct ingestion Port 4000 CSV worker crash coverage remains outstanding** and should be requested in remediation approval before guarantee changes.
+- These three diagnostic tests **prove findings, do not close production-readiness**. See Gitea https://dev.ivib.cc/vibtools/DataStack/actions/runs/63; never call run successful until terminal conclusion is confirmed. No server-side source fix applied.

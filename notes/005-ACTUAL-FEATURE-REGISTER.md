@@ -42,5 +42,13 @@ Do not mark "actual working" simply because a patch compiled. Distinguish source
 ## Change log
 - P00: No feature added/modified. `notes/**` documentation only. 0/3 implementation phases completed.
 - P01: **CLOSED — 1/3 implementation phases**. CI-01…05 corrected exclusively in package-lock, obsolete bun.lock removal, scoped regression/type tests and Gitea CI harness. **No actual application, UI, backend, API, SDK or production functionality was added, removed or altered.** Gitea #59: committed-lock Linux/Windows clean install PASS; Node SDK builds PASS; all 24 TS suites exit0 with zero timeouts; Next standalone 22/22 pages PASS. One historical #59 test-only declaration TS error fixed; #60 strict TS zero errors and full ESLint PASS. Previous canonical Python SDK 14/14 (#48) preserved but not rerun. No live endpoint mutation or deployment; live data/Redis/S3/MCP actual operational status is not established.
-- P02: pending.
+- P02: **BLOCKED pending separate approved runtime remediation**. Three disposable fault-injection tests demonstrated existing behavior: positive ACK on Redis write failure with RAM-only data (R-01), duplicate appended event ID after Redis trim failure and retry in web-side buffer (R-02), and public health 200/online when Redis is down (R-03). These are **diagnostic tests, not production fixes**. Zero app/API/UI/SDK/runtime changes, no live deploy. CI #63. P01 remains closed (1/3 phases complete).
 - P03: pending.
+
+## P02 Diagnostic Feature Record — 2026-11-22
+
+- **New production features: NONE.** This phase adds only three disposable failure-injection scenarios across two existing test suites; tests are not production handlers. Existing source/UI/auth/backend/SDK/MCP, Redis/PG/CSV services, Next/Express health interfaces and deployment remain unmodified.
+- R-01: existing volatile RAM fallback and WS ACK behavior audited, *not corrected*. Do not mark ACK durability as working merely because a diagnostic test proves current behavior.
+- R-02: existing CSV-before-Redis-trim order audited, *not corrected*. Exactly-once replay safety is **NOT VERIFIED**.
+- R-03: current public Express health 200 plus `redisConnected:false` is liveness, not dependency readiness. Separate readiness remains **NOT IMPLEMENTED**.
+- Gitea disposable CI #63: https://dev.ivib.cc/vibtools/DataStack/actions/runs/63. The previous P01 working results remain valid; no live read/write test or production deploy is included in P02.

@@ -65,8 +65,19 @@ Prerequisite for any phase: compare current HEAD and changed paths with this bas
 
 ## Sequence and approval gate
 
-P01 **CLOSED** -> P02 **awaiting approval** -> P03 **awaiting P02 closure**. P01 acceptance evidence: Gitea CI #59 (Windows + Linux clean install, 24/24 tests, Node SDK, Next standalone) and #60 (strict TypeScript + ESLint), with historical #59 single test-type error corrected before #60. No actual app/runtime/UI/SDK change or live deployment.
+P01 **CLOSED** -> P02 **approved diagnostic completed / BLOCKED on R-01 and R-02 remediation** -> P03 **must await P02 closure**. P01 acceptance evidence: Gitea CI #59 (Windows + Linux clean install, 24/24 tests, Node SDK, Next standalone) and #60 (strict TypeScript + ESLint), with historical #59 single test-type error corrected before #60. No actual app/runtime/UI/SDK change or live deployment.
 
 Approval command for next turn:
 
 `APPROVED — DataStack Production Readiness P02. Follow notes/002 P02 Exact Scope Lock. Verify R-01 Redis ACK durability, R-02 CSV crash/replay duplication, and R-03 liveness/readiness with disposable fault-injection tests. App/runtime source READ-ONLY unless a reproducible bug and separate exact patch approval. Preserve all existing UI, API, auth, SDK, data, and production. One focused CI, forensic diff, notes update, commit, three-remote sync. No deploy, releases, migrations or scope expansion.`
+
+## P02 Execution Scope Addendum — 2026-11-22
+
+P02 approved as **diagnostic-only**. Published P01 baseline: `667a140c4e9e75382bfdcdbe1d3e9eb96f6e808a`. Isolated local worktree: `p02-readiness-test-20261122`, preserving previously staged local P01 source. The **only code edits** are `tests/phase02-sync.test.ts` and `tests/phase03-storage-buffer.test.ts`; six `notes/001–006` documents may be amended. CI #63 uses the existing `.gitea/workflows/datastack-ci.yml`; changing workflow files is **outside P02 Scope Lock**. No runtime/source/API/UI/SDK change is approved. If loss or unbounded replay is reproduced, classify as **BLOCKED pending an independently authorized narrow runtime patch**, not as fixed; do not advance P03 as if P02's production-readiness gate passed. Approval after evidence must name precise methods, event ACK contract, deduplication/CSV recovery strategy and allowed tests before editing runtime.
+
+
+### P02 Conditional Remediation Approval (NOT CURRENTLY APPROVED)
+
+`APPROVED — DataStack P02-RUNTIME-REMEDIATION. Baseline: use the verified P02 diagnostic commit/remote tree. Fix reproduced R-01 and R-02 only, following exact notes/001–006 proof and scoped server/index.js pushEventsToRedisOrFallback/onBufferPush and flushBuffer, server/socket/handlers.js sync_data/batch_sync ACK, and their three existing P02 test files. First document safe ACK/retry semantics, exactly-once versus at-least-once CSV contract and crash recovery. Add disposable fault tests proving no positive ACK for non-durable data and no unbounded duplicate replay. Runtime sources core/data/buffer.ts and server/workers/csvWriter.js remain READ-ONLY unless a separately justified exact file/line amendment is approved. Preserve all UI/auth/SDK/public health behavior and existing error codes, production data, security, other features and Docker. One focused CI, diff/security audit, notes update, commit and 3-remote parity. No deployment, migrations, tags/releases or scope expansion. If a safe fix cannot be achieved within these exact methods, stop and report the required additional Scope Lock rather than broadening automatically.`
+
+After separate approved remediation and verified P02 closure, **P03 plan** remains CI-06 Linux Python runner provisioning, CI-07 isolated Docker/BuildKit failure remediation and 3-image build, CI-08 supply-chain advisory triage, and non-mutating readiness evidence. P03 should not modify unrelated UI/runtime/API code by default.

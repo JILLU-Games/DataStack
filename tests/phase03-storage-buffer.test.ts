@@ -1549,3 +1549,45 @@ test("R2 PHASE-03 BUG-15: GET /api/export rejects inverted date range with 400 a
   assert.match(serverIndexSrc, /const filterClientId =\s*rawClientId && rawClientId !== 'all' \? normalizeClientId\(rawClientId\) : ''/);
 });
 
+
+test("P02 R-02 diagnostic: post-CSV Redis trim failure replays identical event on retry", async () => {
+  const redis = new FakeRedisClient();
+  const realTrim = redis.ltrim.bind(redis);
+  let injected = false;
+  redis.ltrim = async (key: string, start: number, stop: number): Promise<"OK"> => {
+    if (key === REDIS_BUFFER_KEY && !injected) {
+      injected = true;
+      throw new Error("P02 simulated crash boundary after CSV append, before Redis trim");
+    }
+    return realTrim(key, start, stop);
+  };
+  const event: DataEvent = {
+    clientId: "p02_csv_replay",
+    eventId: "p02-replay-001",
+    timestamp: "2026-11-22T01:00:00.000Z",
+    payload: JSON.stringify({ marker: "p02" }),
+  };
+  DataBufferEngine.setRedisClientForTests(redis);
+  const originalAppend = CSVStorageManager.appendBatch;
+  const writtenIds: string[] = [];
+  CSVStorageManager.appendBatch = async (events) => {
+    const result = await originalAppend.call(CSVStorageManager, events);
+    writtenIds.push(...events.map((row) => row.eventId));
+    return result;
+  };
+  try {
+    await DataBufferEngine.pushBatchAsync([event]);
+    assert.equal(await redis.llen(REDIS_BUFFER_KEY), 1);
+    await assert.rejects(() => DataBufferEngine.flush(), /P02 simulated crash boundary/);
+    assert.equal(injected, true);
+    assert.equal(writtenIds.filter((id) => id === event.eventId).length, 1);
+    assert.equal(await redis.llen(REDIS_BUFFER_KEY), 1, "Redis still queues previously appended CSV event");
+    await DataBufferEngine.flush();
+    assert.equal(await redis.llen(REDIS_BUFFER_KEY), 0);
+    assert.equal(writtenIds.filter((id) => id === event.eventId).length, 2,
+      "A second flush appends the same eventId again after failed trim: at-least-once, not exactly-once");
+  } finally {
+    CSVStorageManager.appendBatch = originalAppend;
+    DataBufferEngine.setRedisClientForTests(undefined);
+  }
+});

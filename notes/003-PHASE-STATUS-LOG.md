@@ -8,7 +8,7 @@ Scope: documentation-only kickoff. Any future phase must update this log **after
 |---|---|---|---|---|---|
 | P00 Notes / freeze | COMPLETED (documentation only) | `001–006` docs, source baseline and exact scope | `notes/**` only | 6 Markdown files; balanced fences; staged diff `--check` PASS | Documentation commit containing this file; remote SHA verification recorded in session handoff |
 | P01 Tests & lockfile | **CLOSED — VERIFIED** | CI-01…CI-05, no runtime feature changes | 16 exact P01 code/test/CI paths, plus `notes/001–006` records | #59 Linux/Windows clean npm/SDK, 24/24 TS suites, Next standalone PASS; #60 strict TypeScript and ESLint PASS; historical #59 quality mismatch corrected | One permanent P01 main commit containing these notes; confirm remote SHA/tree parity in phase handoff |
-| P02 Ingestion reliability | NOT STARTED | Conditional R-01,02,03 | None | Not run | — |
+| P02 Ingestion reliability | **BLOCKED — three diagnostic cases reproduced; runtime fix requires separate approval** | R-01 ACK/RAM loss; R-02 CSV duplicate replay; R-03 health liveness vs readiness | Only `tests/phase02-sync.test.ts` and `tests/phase03-storage-buffer.test.ts`, plus notes/001–006 | Gitea #63: all three P02 subtests PASS to reproduce existing behavior; full matrix status recorded in appendix | Diagnostic branch `p02-readiness-test-20261122`, no production runtime changes |
 | P03 CI/Docker/security | NOT STARTED | CI-06,07,08; release gates | None | Not run | — |
 
 ## Existing diagnostic CI snapshot (NOT implementation phase completions)
@@ -72,3 +72,22 @@ Historical baseline code stayed frozen through these CI workflow changes. Curren
 - **Working tree caveat:** original local Windows VARUA device reached its monthly quota during P01; its current local branch/working tree could not be rechecked and should be reconciled against published `main` before new local work. A separate authorized temporary Windows clone was used for diff and Git push verification. Never claim original PC is already updated.
 - **Next:** P02 read-only initial source audit plus targeted disposable fault-injection tests for R-01 (Redis ACK), R-02 (CSV replay), R-03 (health readiness). Runtime-source change requires reproduced issue and a separate exact method/file approval. P03 only after P02 closure.
 - **P02 implementation approval command:** `APPROVED — DataStack P02. Implement only notes/002 P02 diagnostic/test write scope for R-01, R-02 and R-03. Keep app/UI/API/auth/SDK/runtime/data unchanged. Runtime files read-only unless a proven failure and separately approved narrow code patch. One focused disposable Gitea CI, exact diff, notes/001–006 update, commit and remote verification. No production deployment or scope expansion.`
+
+
+## P02 Execution Log — 2026-11-22 (supersedes P02: pending until acceptance)
+
+- **Status: IN PROGRESS / diagnostic CI pending.** Not CLOSED and not a production-readiness certificate.
+- P01 published baseline `667a140c4e9e75382bfdcdbe1d3e9eb96f6e808a`. Original PC local `main` still at prior docs HEAD with **16 user-visible staged P01 paths**, preserved untouched. New isolated `p02-readiness-test-20261122` worktree based on published baseline; no reset/stash/force update.
+- P02 disposable test commit: `bbe73d91666641743cbec6cf7203f1694094caef`; **only two files**: `tests/phase02-sync.test.ts` (Redis negative-path ACK and health fallback), `tests/phase03-storage-buffer.test.ts` (failure between CSV append and Redis LTRIM, replay). Source contracts and auth flows unchanged.
+- Focused evidence: https://dev.ivib.cc/vibtools/DataStack/actions/runs/63. Record terminal suite/typecheck/build results after completion. Test assertions expose existing behavior; they do not implement durability or readiness fixes.
+- Scope audited: `server/index.js`, `server/socket/handlers.js`, `server/workers/csvWriter.js`, `core/data/buffer.ts`, `app/api/health/route.ts` all READ-ONLY; `app/**`, `components/**`, `lib/**`, `sdk/**`, Docker, settings, production data and deployments unchanged.
+- P01 remains CLOSED (1/3). If R-01 or R-02 are confirmed unsafe, P02 must remain BLOCKED for runtime remediation approval. No P03 implementation on this approval.
+
+
+### P02 Verified Diagnostic Gate (R-01/R-02/R-03)
+
+- Gitea #63 (test-only commit `bbe73d91666641743cbec6cf7203f1694094caef`): `P02 R-01 diagnostic` PASS, `P02 R-03 diagnostic` PASS, `P02 R-02 diagnostic` PASS. Each PASS validates reproduction of existing behavior, **not a successful reliability remediation**.
+- `tests/phase02-sync.test.ts` suite exit 0; `tests/phase03-storage-buffer.test.ts` suite exit 0. Other CI jobs may have independent status; do not infer full job or complete workflow PASS from three cases.
+- **BLOCKING RELEASE FINDINGS:** R-01 success ACK issued for non-durable RAM fallback when Redis RPUSH fails; R-02 identical eventId can append twice on post-CSV Redis-trim failure (web-side representative test). R-03 health remains online on Redis loss; liveness-only behavior is backward-compatible, protected dependency-readiness verification remains missing.
+- **P02 PHASE = BLOCKED**, diagnostic implementation done, release reliability acceptance NOT satisfied. Runtime remediation requires separate exact approval. 1/3 phases still CLOSED (P01 only); P02 and P03 remain unclosed. No P03 start authorization from this diagnostic completion.
+- Next approval must explicitly authorize exact narrow server/core patch for ACK durability and CSV replay deduplication, plus concrete no-loss/no-duplicate tests. Any readiness endpoint change needs separate explicit approval. User's initial P02 approval is insufficient for runtime mutation.
