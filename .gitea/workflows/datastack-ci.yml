@@ -16,10 +16,15 @@ on:
         required: false
         type: boolean
         default: false
+      python_only:
+        description: Narrow CI-06 Python job rerun after a proven runner setup failure
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   node-regression:
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.quality_only != 'true' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.quality_only != 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.python_only != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -52,25 +57,36 @@ jobs:
   python-regression:
     if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.p01_only != 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    container: node:22-bookworm-slim
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-        with:
-          github-server-url: https://dev.ivib.cc
-      - name: Install Python toolchain
+      - name: Install Bookworm Python and checkout prerequisites
         run: |
           set -eu
           apt-get update -qq
-          apt-get install -y python3 python3-venv python3-pip
-          python3 -m venv /tmp/datastack-ci-venv
-          /tmp/datastack-ci-venv/bin/python -m pip install -e ./sdk/python/datastack -e ./sdk-python
-      - name: Run all Python SDK tests
+          apt-get install -y --no-install-recommends git ca-certificates python3 python3-venv python3-pip
+      - uses: actions/checkout@v4
+        with:
+          github-server-url: https://dev.ivib.cc
+      - name: CI-06 Python 3.11 isolated virtual environment
         run: |
           set -eu
-          /tmp/datastack-ci-venv/bin/python -m compileall -q ./sdk/python/datastack ./sdk-python
-          /tmp/datastack-ci-venv/bin/python -m unittest discover -s tests -p '*_test.py' -v
+          python3 --version
+          python3 -m venv /tmp/datastack-ci-venv
+          /tmp/datastack-ci-venv/bin/python -m pip install --disable-pip-version-check -e ./sdk/python/datastack -e ./sdk-python
+      - name: CI-06 compile and assert 14 Python SDK regressions
+        run: |
+          set -eu
+          py=/tmp/datastack-ci-venv/bin/python
+          "$py" -m compileall -q ./sdk/python/datastack ./sdk-python
+          "$py" -m unittest discover -s tests -p '*_test.py' -v > /tmp/datastack-python-tests.log 2>&1 || { cat /tmp/datastack-python-tests.log; exit 1; }
+          cat /tmp/datastack-python-tests.log
+          grep -Eq '^Ran 14 tests in ' /tmp/datastack-python-tests.log
+          grep -Eq '^OK$' /tmp/datastack-python-tests.log
+          echo DATASTACK_PYTHON_14_OF_14_PASS
 
   quality:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.python_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -85,7 +101,7 @@ jobs:
         run: npm run lint
 
   production-build:
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.quality_only != 'true' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.quality_only != 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.python_only != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -101,30 +117,45 @@ jobs:
           test -f .next/standalone/server.js
 
   docker-image-build:
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.p01_only != 'true' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.p01_only != 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.python_only != 'true') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    container: node:22-alpine
+    timeout-minutes: 45
     steps:
+      - name: CI-07 provision Docker Buildx CLI
+        run: |
+          set -eu
+          apk add --no-cache git docker-cli docker-cli-buildx docker-cli-compose
+          docker --version
+          docker buildx version
+          docker compose version
       - uses: actions/checkout@v4
         with:
           github-server-url: https://dev.ivib.cc
-      - name: Docker and Compose availability
+      - name: CI-07 inspect daemon and validate Compose without starting services
         run: |
           set -eu
-          docker --version
-          docker compose version
-          docker info
-      - name: Validate Compose structure
-        run: docker compose -f docker/docker-compose.yml config --no-interpolate --quiet
-      - name: Build Docker images without running services
+          docker info --format 'Driver={{.Driver}} Root={{.DockerRootDir}}'
+          df -h .
+          docker compose -f docker/docker-compose.yml config --no-interpolate --quiet
+          echo DATASTACK_COMPOSE_CONFIG_PASS
+      - name: CI-07 isolated BuildKit all three images (no deployment)
         run: |
           set -eu
-          docker build -f docker/Dockerfile.server -t datastack-ci-ingestion .
-          docker build -f docker/Dockerfile.web -t datastack-ci-web .
-          docker build -f docker/Dockerfile.proxy -t datastack-ci-proxy .
+          builder="datastack-p03-${GITHUB_RUN_ID:-0}-${GITHUB_RUN_ATTEMPT:-1}"
+          tag="datastack-p03-${GITHUB_SHA:-local}"
+          cleanup() { docker buildx rm --force "$builder" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker buildx create --name "$builder" --driver docker-container --use
+          docker buildx inspect "$builder" --bootstrap
+          docker buildx build --builder "$builder" --progress=plain --no-cache --load -f docker/Dockerfile.server -t "$tag-ingestion" .
+          docker buildx build --builder "$builder" --progress=plain --no-cache --load -f docker/Dockerfile.web -t "$tag-web" .
+          docker buildx build --builder "$builder" --progress=plain --no-cache --load -f docker/Dockerfile.proxy -t "$tag-proxy" .
+          docker image inspect "$tag-ingestion" "$tag-web" "$tag-proxy" >/dev/null
+          echo DATASTACK_THREE_IMAGES_BUILD_PASS
 
   windows-compatibility:
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.quality_only != 'true' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.quality_only != 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.python_only != 'true') }}
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
@@ -150,3 +181,43 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'SDK install failed' }
           npm --prefix sdk/node/datastack run build
           if ($LASTEXITCODE -ne 0) { throw 'SDK compilation failed' }
+
+  security-audit:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.p01_only != 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.python_only != 'true') }}
+    runs-on: ubuntu-latest
+    container: node:22-alpine
+    timeout-minutes: 15
+    steps:
+      - name: Install checkout prerequisite
+        run: apk add --no-cache git
+      - uses: actions/checkout@v4
+        with:
+          github-server-url: https://dev.ivib.cc
+      - name: CI-08 read-only full and runtime npm advisory inventory
+        run: |
+          set -eu
+          if npm audit --json > /tmp/datastack-audit-full.json; then :; else test "$?" -eq 1; fi
+          if npm audit --omit=dev --json > /tmp/datastack-audit-runtime.json; then :; else test "$?" -eq 1; fi
+          node <<'NODE'
+          const fs = require("node:fs");
+          for (const scope of ["full", "runtime"]) {
+            const audit = JSON.parse(fs.readFileSync("/tmp/datastack-audit-" + scope + ".json", "utf8"));
+            if (!audit.metadata || !audit.metadata.vulnerabilities || !audit.vulnerabilities) {
+              throw Error("Incomplete npm audit response for " + scope);
+            }
+            console.log("AUDIT_COUNTS " + scope + " " + JSON.stringify(audit.metadata.vulnerabilities));
+            for (const [name, item] of Object.entries(audit.vulnerabilities)) {
+              const advisories = (item.via || []).filter(v => typeof v === "object").map(v => ({
+                id: v.source, url: v.url, range: v.range, severity: v.severity
+              }));
+              console.log("AUDIT_PACKAGE " + scope + " " + JSON.stringify({
+                package: name, severity: item.severity, direct: item.isDirect,
+                range: item.range, via: advisories,
+                viaPackages: (item.via || []).filter(v => typeof v === "string"),
+                fixAvailable: item.fixAvailable
+              }));
+            }
+          }
+          NODE
+          git diff --exit-code -- package.json package-lock.json
+          echo DATASTACK_SECURITY_TRIAGE_INVENTORY_PASS

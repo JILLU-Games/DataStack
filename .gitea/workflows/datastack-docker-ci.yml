@@ -1,39 +1,41 @@
 name: DataStack Docker Build CI
 on:
-  push:
-    branches: [main]
-    paths:
-      - '.gitea/workflows/datastack-docker-ci.yml'
   workflow_dispatch:
 
 jobs:
   docker-build:
     runs-on: ubuntu-latest
     container: node:22-alpine
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
-      - name: Provision isolated Docker CLI and Git tools
+      - name: CI-07 provision Docker Buildx CLI
         run: |
           set -eu
-          apk add --no-cache git docker-cli docker-cli-compose
+          apk add --no-cache git docker-cli docker-cli-buildx docker-cli-compose
           docker --version
+          docker buildx version
           docker compose version
       - uses: actions/checkout@v4
         with:
           github-server-url: https://dev.ivib.cc
-      - name: Validate actual Compose configuration
+      - name: CI-07 inspect daemon and validate Compose without starting services
         run: |
           set -eu
+          docker info --format 'Driver={{.Driver}} Root={{.DockerRootDir}}'
+          df -h .
           docker compose -f docker/docker-compose.yml config --no-interpolate --quiet
           echo DATASTACK_COMPOSE_CONFIG_PASS
-      - name: Check CI-only Docker daemon
+      - name: CI-07 isolated BuildKit all three images (no deployment)
         run: |
           set -eu
-          docker info >/dev/null || { echo DOCKER_DAEMON_UNAVAILABLE; exit 3; }
-      - name: Build all DataStack container images without deployment
-        run: |
-          set -eu
-          docker build -f docker/Dockerfile.server -t datastack-ci-ingestion .
-          docker build -f docker/Dockerfile.web -t datastack-ci-web .
-          docker build -f docker/Dockerfile.proxy -t datastack-ci-proxy .
-          echo DATASTACK_DOCKER_IMAGES_PASS
+          builder="datastack-p03-${GITHUB_RUN_ID:-0}-${GITHUB_RUN_ATTEMPT:-1}"
+          tag="datastack-p03-${GITHUB_SHA:-local}"
+          cleanup() { docker buildx rm --force "$builder" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker buildx create --name "$builder" --driver docker-container --use
+          docker buildx inspect "$builder" --bootstrap
+          docker buildx build --builder "$builder" --progress=plain --no-cache --load -f docker/Dockerfile.server -t "$tag-ingestion" .
+          docker buildx build --builder "$builder" --progress=plain --no-cache --load -f docker/Dockerfile.web -t "$tag-web" .
+          docker buildx build --builder "$builder" --progress=plain --no-cache --load -f docker/Dockerfile.proxy -t "$tag-proxy" .
+          docker image inspect "$tag-ingestion" "$tag-web" "$tag-proxy" >/dev/null
+          echo DATASTACK_THREE_IMAGES_BUILD_PASS

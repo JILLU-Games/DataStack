@@ -135,3 +135,20 @@ The authorized Windows PC attempted a **local disposable** `npm.cmd ci --ignore-
 - **Historical testing:** #66 PASS candidate; #69 suite failure (Socket.IO ACK timeout caused by test-only global `Date.now` override) and cancellation; #72 PASS corrected source/test. No false claim that #69 succeeded.
 - Final code/diff safety audit: 11/11 approved paths only: `server/index.js`, `server/socket/handlers.js`, `core/data/buffer.ts`, `tests/phase02-sync.test.ts`, `tests/phase03-storage-buffer.test.ts`, plus `notes/001–006`; `git diff --check` and JS syntax PASS. Original PC root old staged P01 (16 paths) and separate dirty earlier temporary worktree preserved.
 - **Publication gate:** Gitea PR #3 final verified source + documentation notes; squash-merge with `[skip ci]`, publish to GitHub and GitLab, verify identical tracked Git trees despite potentially different GitLab commit SHA. P02 marked CLOSED only after three-remote content parity; evidence SHA/tree in operator's final publication report. P03 NOT STARTED and requires separate approval.
+
+## P03 final CI acceptance ledger — 2026-11-22
+
+| Gate | Terminal outcome |
+| --- | --- |
+| #77 Node | SUCCESS, 24/24 |
+| #77 TypeScript / ESLint | SUCCESS |
+| #77 Next standalone build | SUCCESS |
+| #77 Windows Node SDK | SUCCESS |
+| #77 isolated three-image BuildKit | SUCCESS |
+| #77 read-only npm audit inventory | SUCCESS with 1 high runtime finding |
+| #77 Python | FAILED before tests: checkout requires Node |
+| #78 corrected Python-only | SUCCESS, 14/14; other jobs SKIPPED |
+
+**CI-08 security disposition:** `npm audit --json` full=26 affected packages (25 moderate, 1 high); runtime=24 (23 moderate, 1 high), **not counts of distinct advisories**. High-severity advisories [GHSA-6g55-p6wh-862q](https://github.com/advisories/GHSA-6g55-p6wh-862q), [GHSA-r28c-9q8g-f849](https://github.com/advisories/GHSA-r28c-9q8g-f849) affect Next 15.5.29's nested `postcss@8.4.31` despite patched root `postcss@8.5.33`; npm recommends major `next@16.4.6`. Direct `cloudcmd@19.24.0` carries moderate transitive issues (`dompurify`, `file-type`, `glob`, `minimatch`, `got`); npm recommends `cloudcmd@17.0.2` downgrade, not a verified safe pin. No speculative package pin, major upgrade or force fix; a separately tested compatible remediation is needed before release.
+
+**Scope / release decision:** only `.gitea/workflows/datastack-ci.yml`, `.gitea/workflows/datastack-docker-ci.yml`, and `notes/001–006` changed. No `package.json`/lock, Dockerfile, application UI/UX, runtime, auth, SDK, database, Compose, production data, secret, shared Docker prune, deployment, migration, tag or release. P03 technical CI and advisory-triage acceptance verified by #77 non-Python jobs plus #78 Python; do **not** mislabel #77 overall as successful. Final phase publication requires one main commit and Gitea/GitHub/GitLab exact tracked tree parity. **Production release NO-GO** while runtime high advisory is unresolved; live production health, throughput and deployment remain unverified.
