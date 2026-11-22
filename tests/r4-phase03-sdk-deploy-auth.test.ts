@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, it } from 'node:test';
+import { after, afterEach, beforeEach, describe, it } from 'node:test';
 import { NextRequest } from 'next/server';
 import { POST as setupPost } from '../app/api/auth/setup/route';
 import { GET as filesStatusGet } from '../app/api/files/status/route';
@@ -13,8 +13,13 @@ import {
   getAdminSessionSecret,
 } from '../core/auth/adminSession';
 import { resetAdminStateForTests } from '../core/auth/adminUsers';
+import { DataBufferEngine } from '../core/data/buffer';
 import { middleware } from '../middleware';
 import { DataStack, DiskSpooler } from '../sdk/node/datastack';
+
+after(async () => {
+  await DataBufferEngine.shutdown();
+});
 
 const require = createRequire(import.meta.url);
 const ORIGINAL_ENV = { ...process.env };

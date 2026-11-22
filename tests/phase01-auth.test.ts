@@ -85,7 +85,7 @@ describe("Phase-01 Auth, Secrets, Revocation & Proxy Hardening", () => {
   });
 
   it("BUG-01 & BUG-02: fails closed in production when secrets or DB/setup are missing", async () => {
-    process.env.NODE_ENV = "production";
+    (process.env as Record<string, string | undefined>).NODE_ENV = "production";
     delete process.env.DATABASE_URL;
     delete process.env.DATASTACK_ADMIN_SESSION_SECRET;
     delete process.env.DATASTACK_ADMIN_SETUP_KEY;
@@ -557,7 +557,7 @@ describe("Phase-01 Auth, Secrets, Revocation & Proxy Hardening", () => {
   });
 
   it("FORENSIC BUG-01: blocks volatile RAM admin setup in production without DATABASE_URL and returns 409 SETUP_REQUIRED on pre-setup login", async () => {
-    process.env.NODE_ENV = "production";
+    (process.env as Record<string, string | undefined>).NODE_ENV = "production";
     delete process.env.DATABASE_URL;
     delete process.env.DATASTACK_ADMIN_PASSWORD;
     process.env.DATASTACK_ADMIN_SESSION_SECRET =
@@ -770,7 +770,7 @@ describe("Phase-01 Auth, Secrets, Revocation & Proxy Hardening", () => {
 
     try {
       // 1. Production with empty jwtSecret must not persist empty jwt_secret row into PG
-      process.env.NODE_ENV = "production";
+      (process.env as Record<string, string | undefined>).NODE_ENV = "production";
       delete process.env.DATASTACK_JWT_SECRET;
       settingsGlobals.__dataStackAdminSettings = undefined;
       settingsGlobals.__dataStackSettingsHydrated = false;
@@ -791,7 +791,7 @@ describe("Phase-01 Auth, Secrets, Revocation & Proxy Hardening", () => {
       );
 
       // 2. Failing PG write must reject (not silently return 200) and must not mutate RAM
-      process.env.NODE_ENV = "test";
+      (process.env as Record<string, string | undefined>).NODE_ENV = "test";
       process.env.DATASTACK_JWT_SECRET =
         "valid-jwt-secret-at-least-32-characters-long";
       AuthService.setSecret(process.env.DATASTACK_JWT_SECRET);

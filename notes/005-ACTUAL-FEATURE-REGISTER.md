@@ -41,6 +41,6 @@ After EACH P01/P02/P03 close, amend only affected table rows:
 Do not mark "actual working" simply because a patch compiled. Distinguish source, CI, and actual deployment.
 ## Change log
 - P00: No feature added/modified. `notes/**` documentation only. 0/3 implementation phases completed.
-- P01: pending.
+- P01: **CLOSED — 1/3 implementation phases**. CI-01…05 corrected exclusively in package-lock, obsolete bun.lock removal, scoped regression/type tests and Gitea CI harness. **No actual application, UI, backend, API, SDK or production functionality was added, removed or altered.** Gitea #59: committed-lock Linux/Windows clean install PASS; Node SDK builds PASS; all 24 TS suites exit0 with zero timeouts; Next standalone 22/22 pages PASS. One historical #59 test-only declaration TS error fixed; #60 strict TS zero errors and full ESLint PASS. Previous canonical Python SDK 14/14 (#48) preserved but not rerun. No live endpoint mutation or deployment; live data/Redis/S3/MCP actual operational status is not established.
 - P02: pending.
 - P03: pending.

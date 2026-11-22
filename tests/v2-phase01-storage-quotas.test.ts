@@ -43,6 +43,8 @@ import {
   uploadFileToS3,
 } from "../core/Storage/s3Archive";
 import {
+  classifyUiClientStatus,
+  summarizeUiClientCounts,
   DEFAULT_EDITABLE_SETTINGS,
   settingsToNumericDrafts,
   validateEditableSettingsDraft,
@@ -759,7 +761,7 @@ test("V2-Audit-Phase-03 [BUG-V2-AUDIT-01, BUG-V2-AUDIT-07, BUG-V2-AUDIT-10]: Dis
       bsize: 4096,
     }));
 
-    const snapshot = await CSVStorageManager.getDiskUsageAsync(true);
+    const snapshot = await CSVStorageManager.getDiskUsageAsync();
     assert.equal(snapshot.available, true);
     assert.equal(snapshot.usedPct, 25);
     assert.equal(snapshot.totalBytes, 2000 * 4096);
@@ -780,29 +782,30 @@ test("V2-Audit-Phase-03 [BUG-V2-AUDIT-01, BUG-V2-AUDIT-07, BUG-V2-AUDIT-10]: Dis
     CSVStorageManager.setStatfsOverrideForTests(async () => {
       throw new Error("Simulated statfs failure");
     });
-    const fallbackSnapshot = await CSVStorageManager.getDiskUsageAsync(true);
+    const fallbackSnapshot = await CSVStorageManager.getDiskUsageAsync();
     assert.equal(fallbackSnapshot.available, false);
     assert.equal(fallbackSnapshot.freeBytes, 0);
     assert.equal(fallbackSnapshot.availableBytes, 0);
 
-    // 2. BUG-V2-AUDIT-07: app/vcon/clients/page.tsx defines isClientExpired and excludes expired tokens from onlineCount, pendingCount, and online/pending filter tabs
+    // 2. BUG-V2-AUDIT-07: shared status classifier excludes expired clients from active counters.
     const clientsPageSrc = await fs.readFile(
       path.join(process.cwd(), "app/vcon/clients/page.tsx"),
       "utf8",
     );
-    assert.match(clientsPageSrc, /function isClientExpired\(/);
-    assert.match(
-      clientsPageSrc,
-      /const expired = !revoked && isClientExpired\(client\.expiresAt,\s*now\)/,
-    );
-    assert.match(
-      clientsPageSrc,
-      /!isClientExpired\(client\.expiresAt,\s*now\)/,
-    );
-    assert.match(
-      clientsPageSrc,
-      /const pending =\s*client\.status === 'active' && !expired && !client\.lastActive/,
-    );
+    assert.match(clientsPageSrc, /summarizeUiClientCounts\(clients, now\)/);
+    assert.match(clientsPageSrc, /classifyUiClientStatus\(client, now\)/);
+    const now = Date.parse("2026-11-21T10:00:00.000Z");
+    const expiredClient = { status: "active" as const, expiresAt: "2020-01-01T00:00:00.000Z", lastActive: "2026-11-21T09:59:50.000Z" };
+    const pendingClient = { status: "active" as const, expiresAt: null, lastActive: undefined };
+    const onlineClient = { status: "active" as const, expiresAt: null, lastActive: "2026-11-21T09:59:50.000Z" };
+    assert.equal(classifyUiClientStatus(expiredClient, now), "expired");
+    assert.equal(classifyUiClientStatus(pendingClient, now), "pending");
+    assert.equal(classifyUiClientStatus(onlineClient, now), "online");
+    const summary = summarizeUiClientCounts([expiredClient, pendingClient, onlineClient], now);
+    assert.equal(summary.expired, 1);
+    assert.equal(summary.online, 1);
+    assert.equal(summary.pending, 1);
+    assert.equal(summary.active, 2);
 
     // 3. BUG-V2-AUDIT-10: ExportWorkspace.tsx and app/vcon/storage/page.tsx render CSV.GZ badge for compressed .csv.gz partitions
     const exportWorkspaceSrc = await fs.readFile(

@@ -151,3 +151,52 @@ return NextResponse.json({ status: 'online', service: 'DataStack Web API', /* ..
 ## C. Documentation baseline update record
 
 This file **freezes the source baseline**, not the future documentation-commit SHA. After adding `notes/**`, record commit SHA and three remote SHAs in `notes/003` and the user-facing result. Subsequent P01 implementation should inspect `git diff d725841ebc828d58cbe90f517da9e600f23c4630..HEAD` and permit only these notes as intervening changes; any unexpected source edits require a new review.
+
+## D. P01 Actual Patch & CI Closure Proof — 2026-11-22
+
+Frozen source baseline remains `d725841ebc828d58cbe90f517da9e600f23c4630`, docs baseline `d8ac96e39dad4ea3b241c1d2f16f959c5215701e`. CI-verified implementation snapshot `7d8eebd3dc867e82113343403b63ce1d4ed20584` (Gitea disposable P01 branch). Permanent main closure is single squash commit containing this note; verify post-push three remote refs/content trees.
+
+### Lock and package integrity evidence (CI-01 / CI-02)
+
+```json
+{
+  "node_modules/@napi-rs/wasm-runtime/node_modules/@tybys/wasm-util": {
+    "version": "0.10.5",
+    "resolved": "https://registry.npmjs.org/@tybys/wasm-util/-/wasm-util-0.10.5.tgz",
+    "integrity": "sha512-dOGOPxlaNV+G046mZzN+9C0dAcQZeSKcXiVaM0TYy/LM4ttTmgSBDxYfovcYI8Em3+eAbiAYpvWLOv8+ZVRJKA==",
+    "optional": true,
+    "dependencies": {"tslib": "^2.4.0"}
+  }
+}
+```
+
+The root `@tybys/wasm-util@0.9.0` remains unchanged; 68 optional entries added, 1293 old entries unchanged, none removed/repinned, all added entries with registry tarball and integrity, `package.json` unchanged. `bun.lock` removed after checking no active consumers. Windows and Linux `npm ci --no-audit --no-fund` PASS using committed lock without temporary regeneration.
+
+### Test-only teardown correction (CI-03 / CI-05)
+
+`tests/r5-phase01-mcp-foundation-logs.test.ts` local CommonJS require declaration now explicitly includes `stopTimers`, matching the existing runtime export; `test.after` releases ingestion timers and `DataBufferEngine.shutdown()` without any changes to runtime source:
+
+```ts
+const ingestionServer = require("../server/index.js") as {
+  setDbPoolForTests: (pool: unknown) => void;
+  syncSettingsFromDatabase: () => Promise<boolean>;
+  stopTimers: () => void;
+};
+
+test.after(async () => {
+  ingestionServer.stopTimers();
+  SDKManager.stopActivityFlushTimerForTests();
+  await DataBufferEngine.shutdown();
+});
+```
+
+Remaining CI-05 corrections were confined to 9 test file type contracts; CI-04 replaced old `isClientExpired` page regex expectations with `classifyUiClientStatus` + `summarizeUiClientCounts` behavioral assertions. No TS strictness flags disabled, no global `any` blanket suppression, no SDK/API runtime signature changed.
+
+### Exact gate results
+
+- [Run #58](https://dev.ivib.cc/vibtools/DataStack/actions/runs/58): failed at lockfile nested dependency before tests; historical and superseded.
+- [Run #59](https://dev.ivib.cc/vibtools/DataStack/actions/runs/59): overall failed because exactly one test mock TypeScript declaration lacked `stopTimers`, but separate job results independently verified **24/24 TypeScript suites exit0**, no timeouts, Linux/Windows committed-lock clean npm installs, Node SDK compilation and Next.js standalone build + 22/22 pages all PASS.
+- [Run #60](https://dev.ivib.cc/vibtools/DataStack/actions/runs/60): focused quality-only retry after exact test-type correction, **strict `npx tsc --noEmit` PASS 0 errors** and **`npm run lint` PASS**.
+- [Run #48](https://dev.ivib.cc/vibtools/DataStack/actions/runs/48): previous Python SDK 14/14 PASS, no Python source edits or P01 rerun.
+
+Targeted path/diff audit from prior documentation HEAD: 16 scoped code/test/CI paths plus notes `001–006`; `git diff --check` PASS. P02 remaining R-01…R-03 are conditional reliability risks, not confirmed application bugs. P03 Docker/Python-runner/advisory issues still open. No live app, deployment, database, security defaults or user features changed.

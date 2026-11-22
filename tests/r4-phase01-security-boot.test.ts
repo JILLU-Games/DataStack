@@ -96,7 +96,7 @@ function restoreEnv(): void {
 async function createOwnerCookie(email = "r4p1-owner@datastack.dev"): Promise<string> {
   resetAdminStateForTests();
   await createInitialAdmin(email, "OwnerPassword123!");
-  const secret = getAdminSessionSecret();
+  const secret = getAdminSessionSecret()!;
   const token = await createAdminSessionToken(
     email,
     secret,
@@ -531,7 +531,7 @@ test("R4-Phase-01 [AUDIT-09 / ERR-R4-04 & ERR-R4-05]: Fail-loud audit DB degrade
     assert.equal(unauthSync.status, 401);
 
     // Owner session v1 works before logout/revocation
-    const secret = getAdminSessionSecret();
+    const secret = getAdminSessionSecret()!;
     const ownerTokenV1 = await createAdminSessionToken(
       "r4-audit-owner@datastack.dev",
       secret,

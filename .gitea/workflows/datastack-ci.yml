@@ -5,9 +5,21 @@ on:
     paths:
       - '.gitea/workflows/datastack-ci.yml'
   workflow_dispatch:
+    inputs:
+      p01_only:
+        description: Run P01 tests, typecheck, build and Windows clean-install only
+        required: false
+        type: boolean
+        default: false
+      quality_only:
+        description: Run only TypeScript and ESLint after a focused P01 test type fix
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   node-regression:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.quality_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -38,6 +50,7 @@ jobs:
           test "$failed" -eq 0
 
   python-regression:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.p01_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -72,6 +85,7 @@ jobs:
         run: npm run lint
 
   production-build:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.quality_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -87,6 +101,7 @@ jobs:
           test -f .next/standalone/server.js
 
   docker-image-build:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.p01_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -109,6 +124,7 @@ jobs:
           docker build -f docker/Dockerfile.proxy -t datastack-ci-proxy .
 
   windows-compatibility:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.quality_only != 'true' }}
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
@@ -127,12 +143,9 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          # Diagnostic only: regenerate the lock in the disposable runner checkout.
-          # The tracked repository lock remains unchanged for the later bug-fix phase.
-          npm install --package-lock-only --no-audit --no-fund
-          if ($LASTEXITCODE -ne 0) { throw 'Temporary lock regeneration failed' }
+          # Verify the committed cross-platform lock without disposable regeneration.
           npm ci --no-audit --no-fund
-          if ($LASTEXITCODE -ne 0) { throw 'Diagnostic npm install failed' }
+          if ($LASTEXITCODE -ne 0) { throw 'Committed-lock npm ci failed' }
           npm --prefix sdk/node/datastack install --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { throw 'SDK install failed' }
           npm --prefix sdk/node/datastack run build

@@ -1085,10 +1085,10 @@ test("FORENSIC BUG-19: Deleting a client purges RAM, Redis, and Port 4000 buffer
 
 test("FORENSIC BUG-20: Socket.IO sync_data and batch_sync ACKs wait until async Redis RPUSH completes", async () => {
   const fakeRedis = new FakeRedisClient();
-  let rpushGateResolve: (() => void) | null = null;
+  const rpushGateControl: { resolve?: () => void } = {};
   let rpushEnteredResolve: (() => void) | null = null;
   let rpushGate = new Promise<void>((resolve) => {
-    rpushGateResolve = resolve;
+    rpushGateControl.resolve = resolve;
   });
   let rpushEntered = new Promise<void>((resolve) => {
     rpushEnteredResolve = resolve;
@@ -1155,14 +1155,14 @@ test("FORENSIC BUG-20: Socket.IO sync_data and batch_sync ACKs wait until async 
       "sync_data ACK must NOT fire before Redis RPUSH finishes",
     );
 
-    rpushGateResolve?.();
+    rpushGateControl.resolve?.();
     const syncAck = await syncAckPromise;
     assert.equal(syncAck.success, true);
     assert.equal(await fakeRedis.llen(REDIS_BUFFER_KEY), 1);
 
     // 2. batch_sync must also wait for Redis RPUSH before ACK
     rpushGate = new Promise<void>((resolve) => {
-      rpushGateResolve = resolve;
+      rpushGateControl.resolve = resolve;
     });
     rpushEntered = new Promise<void>((resolve) => {
       rpushEnteredResolve = resolve;
@@ -1199,7 +1199,7 @@ test("FORENSIC BUG-20: Socket.IO sync_data and batch_sync ACKs wait until async 
       "batch_sync ACK must NOT fire before Redis RPUSH finishes",
     );
 
-    rpushGateResolve?.();
+    rpushGateControl.resolve?.();
     const batchAck = await batchAckPromise;
     assert.equal(batchAck.success, true);
     assert.equal(batchAck.processed, 2);

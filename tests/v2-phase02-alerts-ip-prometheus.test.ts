@@ -331,7 +331,7 @@ test("V2-Phase-02 [HTTP & Socket Ingestion Security]: Per-client IP allowlist (4
       token: string,
       bypassCache?: boolean,
       clientIp?: string,
-    ) => Promise<{ ok: boolean; reason?: string }>;
+    ) => Promise<{ allowed: boolean; code?: string; reason?: string }>;
     setDbPoolForTests: (pool: unknown) => void;
     stopTimers: () => void;
   };

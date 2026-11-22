@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { MCP_PERMISSION_DEFINITIONS } from "../core/mcp/mcpSettings";
+import { DataBufferEngine } from "../core/data/buffer";
 import {
   applyCategoryPermissionToggle,
   applyMcpPermissionPreset,
@@ -22,6 +23,10 @@ import {
 } from "../lib/mcpUiHelpers";
 
 const DEFINITIONS = MCP_PERMISSION_DEFINITIONS as readonly McpPermissionDefinitionView[];
+
+test.after(async () => {
+  await DataBufferEngine.shutdown();
+});
 
 test("R5-Phase-03 [lib/mcpUiHelpers.ts]: URL builder, AI client JSON snippets, permission grouping/presets, bridge status, and diff payload", () => {
   // 1. Endpoint URL builder

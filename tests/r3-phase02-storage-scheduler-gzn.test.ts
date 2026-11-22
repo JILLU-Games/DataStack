@@ -40,7 +40,7 @@ function writeGzipCsv(filePath: string, content: string): void {
 
 async function createOwnerCookie(): Promise<string> {
   delete process.env.DATABASE_URL;
-  const sessionSecret = getAdminSessionSecret();
+  const sessionSecret = getAdminSessionSecret()!;
   resetAdminStateForTests();
   const ownerEmail = "owner-r3p2@datastack.local";
   await createInitialAdmin(ownerEmail, "StrongPassword123!");

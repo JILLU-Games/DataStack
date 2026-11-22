@@ -507,7 +507,7 @@ test("R5-Phase-02 [MCP-AUDIT-01/06/07 & ERR-R5-03/04/05/06]: Port 4000 MCP serve
     });
     assert.equal(deniedClientCreate.isError, true);
     const deniedPayload = JSON.parse(
-      (deniedClientCreate.content[0] as { text: string }).text,
+      ((deniedClientCreate.content as Array<{ text: string }>)[0]).text,
     ) as { code: string; permission: string };
     assert.equal(deniedPayload.code, "MCP_PERMISSION_DENIED");
     assert.equal(deniedPayload.permission, "clients_create");
@@ -521,7 +521,7 @@ test("R5-Phase-02 [MCP-AUDIT-01/06/07 & ERR-R5-03/04/05/06]: Port 4000 MCP serve
     });
     assert.notEqual(createdToolRes.isError, true);
     const createdPayload = JSON.parse(
-      (createdToolRes.content[0] as { text: string }).text,
+      ((createdToolRes.content as Array<{ text: string }>)[0]).text,
     ) as { success: boolean; client: { clientId: string; rateLimit: number; token?: string } };
     assert.equal(createdPayload.success, true);
     assert.equal(createdPayload.client.clientId, testClientId);
@@ -535,7 +535,7 @@ test("R5-Phase-02 [MCP-AUDIT-01/06/07 & ERR-R5-03/04/05/06]: Port 4000 MCP serve
     });
     assert.equal(traversalRes.isError, true);
     assert.equal(
-      (JSON.parse((traversalRes.content[0] as { text: string }).text) as { code: string }).code,
+      (JSON.parse(((traversalRes.content as Array<{ text: string }>)[0]).text) as { code: string }).code,
       "PATH_OUTSIDE_ROOT",
     );
 
@@ -546,7 +546,7 @@ test("R5-Phase-02 [MCP-AUDIT-01/06/07 & ERR-R5-03/04/05/06]: Port 4000 MCP serve
       });
       assert.equal(symlinkRes.isError, true);
       assert.equal(
-        (JSON.parse((symlinkRes.content[0] as { text: string }).text) as { code: string }).code,
+        (JSON.parse(((symlinkRes.content as Array<{ text: string }>)[0]).text) as { code: string }).code,
         "SYMLINK_FORBIDDEN",
       );
     }
@@ -557,7 +557,7 @@ test("R5-Phase-02 [MCP-AUDIT-01/06/07 & ERR-R5-03/04/05/06]: Port 4000 MCP serve
     });
     assert.equal(lockReadRes.isError, true);
     assert.equal(
-      (JSON.parse((lockReadRes.content[0] as { text: string }).text) as { code: string }).code,
+      (JSON.parse(((lockReadRes.content as Array<{ text: string }>)[0]).text) as { code: string }).code,
       "LOCKFILE_PROTECTED",
     );
 
@@ -567,7 +567,7 @@ test("R5-Phase-02 [MCP-AUDIT-01/06/07 & ERR-R5-03/04/05/06]: Port 4000 MCP serve
     });
     assert.equal(lockedFileUploadRes.isError, true);
     assert.equal(
-      (JSON.parse((lockedFileUploadRes.content[0] as { text: string }).text) as { code: string })
+      (JSON.parse(((lockedFileUploadRes.content as Array<{ text: string }>)[0]).text) as { code: string })
         .code,
       "LOCKFILE_PROTECTED",
     );
@@ -578,7 +578,7 @@ test("R5-Phase-02 [MCP-AUDIT-01/06/07 & ERR-R5-03/04/05/06]: Port 4000 MCP serve
     });
     assert.equal(logWriteRes.isError, true);
     assert.equal(
-      (JSON.parse((logWriteRes.content[0] as { text: string }).text) as { code: string }).code,
+      (JSON.parse(((logWriteRes.content as Array<{ text: string }>)[0]).text) as { code: string }).code,
       "PROTECTED_LOG_DIR",
     );
 
@@ -601,7 +601,7 @@ test("R5-Phase-02 [MCP-AUDIT-01/06/07 & ERR-R5-03/04/05/06]: Port 4000 MCP serve
     });
     assert.notEqual(dlRes.isError, true);
     assert.equal(
-      (JSON.parse((dlRes.content[0] as { text: string }).text) as { content: string }).content,
+      (JSON.parse(((dlRes.content as Array<{ text: string }>)[0]).text) as { content: string }).content,
       "alpha gamma",
     );
 
@@ -610,7 +610,7 @@ test("R5-Phase-02 [MCP-AUDIT-01/06/07 & ERR-R5-03/04/05/06]: Port 4000 MCP serve
       arguments: { path: "data" },
     });
     assert.notEqual(listRes.isError, true);
-    const listParsed = JSON.parse((listRes.content[0] as { text: string }).text) as {
+    const listParsed = JSON.parse(((listRes.content as Array<{ text: string }>)[0]).text) as {
       entries: Array<{ name: string }>;
     };
     assert.ok(listParsed.entries.some((e) => e.name === "active.csv"));
@@ -632,7 +632,7 @@ test("R5-Phase-02 [MCP-AUDIT-01/06/07 & ERR-R5-03/04/05/06]: Port 4000 MCP serve
     });
     assert.notEqual(metricsRes.isError, true);
     assert.equal(
-      (JSON.parse((metricsRes.content[0] as { text: string }).text) as { success: boolean }).success,
+      (JSON.parse(((metricsRes.content as Array<{ text: string }>)[0]).text) as { success: boolean }).success,
       true,
     );
 
@@ -641,7 +641,7 @@ test("R5-Phase-02 [MCP-AUDIT-01/06/07 & ERR-R5-03/04/05/06]: Port 4000 MCP serve
       arguments: { action: "flush" },
     });
     assert.notEqual(flushRes.isError, true);
-    const flushPayload = JSON.parse((flushRes.content[0] as { text: string }).text) as {
+    const flushPayload = JSON.parse(((flushRes.content as Array<{ text: string }>)[0]).text) as {
       success: boolean;
       ingestionFlushed: number;
     };
@@ -654,7 +654,7 @@ test("R5-Phase-02 [MCP-AUDIT-01/06/07 & ERR-R5-03/04/05/06]: Port 4000 MCP serve
     });
     assert.equal(coolifySsrfRes.isError, true);
     assert.equal(
-      (JSON.parse((coolifySsrfRes.content[0] as { text: string }).text) as { code: string }).code,
+      (JSON.parse(((coolifySsrfRes.content as Array<{ text: string }>)[0]).text) as { code: string }).code,
       "SSRF_BLOCKED_HOST",
     );
 

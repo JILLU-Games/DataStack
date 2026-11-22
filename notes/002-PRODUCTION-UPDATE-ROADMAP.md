@@ -1,7 +1,7 @@
 # DataStack — Production Update Roadmap / Exact Scope Lock
 
 Planning baseline: `d725841ebc828d58cbe90f517da9e600f23c4630` (frozen; documentation commits will advance Git HEAD but NOT this source baseline).
-Current state: **3 implementation phases P01–P03 planned; 0 implemented; approvals not yet granted**.
+Current state: **P01 CLOSED and CI-verified (1 of 3 phases complete); P02 and P03 NOT STARTED; P02 requires new explicit approval**.
 Prerequisite for any phase: compare current HEAD and changed paths with this baseline and previously committed notes. For new commits since source baseline, inspect exact diff; no implicit rebase or silent discard.
 
 ## Global non-negotiable Scope Lock (applies to ALL phases)
@@ -65,8 +65,8 @@ Prerequisite for any phase: compare current HEAD and changed paths with this bas
 
 ## Sequence and approval gate
 
-P01 -> P02 -> P03, strictly in this order. **No P01 implementation has begun** in this documentation-only update.
+P01 **CLOSED** -> P02 **awaiting approval** -> P03 **awaiting P02 closure**. P01 acceptance evidence: Gitea CI #59 (Windows + Linux clean install, 24/24 tests, Node SDK, Next standalone) and #60 (strict TypeScript + ESLint), with historical #59 single test-type error corrected before #60. No actual app/runtime/UI/SDK change or live deployment.
 
 Approval command for next turn:
 
-`APPROVED — DataStack Production Readiness P01. Baseline: d725841ebc828d58cbe90f517da9e600f23c4630. Implement ONLY notes/002 P01 exact Scope Lock; preserve all app, UI, SDK, backend, live data, deployment and unrelated files. One focused disposable Gitea CI, exact diff/security audit, notes/003–005 update, one commit, push GitHub/GitLab/Gitea and verify all HEADs. No live deployment, tags, releases or scope expansion.`
+`APPROVED — DataStack Production Readiness P02. Follow notes/002 P02 Exact Scope Lock. Verify R-01 Redis ACK durability, R-02 CSV crash/replay duplication, and R-03 liveness/readiness with disposable fault-injection tests. App/runtime source READ-ONLY unless a reproducible bug and separate exact patch approval. Preserve all existing UI, API, auth, SDK, data, and production. One focused CI, forensic diff, notes update, commit, three-remote sync. No deploy, releases, migrations or scope expansion.`

@@ -35,6 +35,7 @@ import { SDKManager } from "../core/sdk/sdkManager";
 import { getInternalIngestionHeaders } from "../core/Security/security";
 import { SSRFBlockedError } from "../core/Security/ssrfGuard";
 import { CSVStorageManager } from "../core/Storage/csvStorage";
+import { DataBufferEngine } from "../core/data/buffer";
 import { middleware } from "../middleware";
 
 const require = createRequire(import.meta.url);
@@ -78,7 +79,14 @@ const cjsRuntimeLogCapture = require("../server/runtimeLogCapture.js") as {
 const ingestionServer = require("../server/index.js") as {
   setDbPoolForTests: (pool: unknown) => void;
   syncSettingsFromDatabase: () => Promise<boolean>;
+  stopTimers: () => void;
 };
+
+test.after(async () => {
+  ingestionServer.stopTimers();
+  SDKManager.stopActivityFlushTimerForTests();
+  await DataBufferEngine.shutdown();
+});
 
 test("R5-Phase-01 [MCP-AUDIT-02 / ERR-R5-02]: Runtime log capture scrubs secrets, rotates at 2MB, filters/tails safely, and handles missing dirs gracefully", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "datastack-r5-logs-"));

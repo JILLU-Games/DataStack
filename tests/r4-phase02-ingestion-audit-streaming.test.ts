@@ -5,6 +5,7 @@ import fsp from "node:fs/promises";
 import http from "node:http";
 import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
+import type { Request, Response } from "express";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -81,7 +82,7 @@ async function createOwnerCookie(
 ): Promise<string> {
   resetAdminStateForTests();
   await createInitialAdmin(email, "OwnerPassword123!");
-  const secret = getAdminSessionSecret();
+  const secret = getAdminSessionSecret()!;
   const token = await createAdminSessionToken(
     email,
     secret,
@@ -329,13 +330,13 @@ test("R4-Phase-02 AUDIT-06: Governance audit logging for /api/export, Files Mana
         getDbPool: () => null,
       }),
     );
-    ramApp.put("/vcon/files-engine/api/v1/fs/sample.csv", (_req: express.Request, res: express.Response) => {
+    ramApp.put("/vcon/files-engine/api/v1/fs/sample.csv", (_req: Request, res: Response) => {
       res.status(200).json({ ok: true });
     });
-    ramApp.put("/vcon/files-engine/api/v1/rename", (_req: express.Request, res: express.Response) => {
+    ramApp.put("/vcon/files-engine/api/v1/rename", (_req: Request, res: Response) => {
       res.status(200).json({ ok: true });
     });
-    ramApp.delete("/vcon/files-engine/api/v1/fs/sample.csv", (_req: express.Request, res: express.Response) => {
+    ramApp.delete("/vcon/files-engine/api/v1/fs/sample.csv", (_req: Request, res: Response) => {
       res.status(403).json({ ok: false }); // non-2xx should NOT emit mutation audit
     });
 
@@ -404,7 +405,7 @@ test("R4-Phase-02 AUDIT-06: Governance audit logging for /api/export, Files Mana
         getDbPool: () => mockDbPool,
       }),
     );
-    pgApp.delete("/vcon/files-engine/api/v1/fs/obsolete.csv", (_req: express.Request, res: express.Response) => {
+    pgApp.delete("/vcon/files-engine/api/v1/fs/obsolete.csv", (_req: Request, res: Response) => {
       res.status(200).json({ ok: true });
     });
 

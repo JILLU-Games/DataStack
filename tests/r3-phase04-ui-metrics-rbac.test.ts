@@ -5,6 +5,7 @@ import test from "node:test";
 import { NextRequest } from "next/server";
 import { GET as prometheusGet } from "../app/api/prometheus/route";
 import { SettingsManager } from "../core/adminSettings/settingsManager";
+import { DataBufferEngine } from "../core/data/buffer";
 import { ApiEngine } from "../core/apiEngine/apiService";
 import {
   createAdminSessionToken,
@@ -23,6 +24,11 @@ import {
   shouldRedirectSimulatorUnauthorized,
   summarizeUiClientCounts,
 } from "../lib/vconUiHelpers";
+
+test.after(async () => {
+  SDKManager.stopActivityFlushTimerForTests();
+  await DataBufferEngine.shutdown();
+});
 
 async function makeOwnerCookie(): Promise<string> {
   resetAdminStateForTests();

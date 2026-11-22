@@ -1,6 +1,6 @@
 # DataStack — Production-Readiness Forensic Audit (Documentation Baseline)
 
-Status: **DOCUMENTED / NO BUG FIX APPLIED**. Date: 2026-11-22 (Asia/Dhaka).
+Status: **BASELINE FORENSIC SNAPSHOT; P01 VERIFIED AND CLOSED (see closure appendix)**. Date: 2026-11-22 (Asia/Dhaka).
 Frozen source HEAD: `d725841ebc828d58cbe90f517da9e600f23c4630`. Local, Gitea `vibtools/DataStack`, GitLab `ivibtools/datastack`, and GitHub `JILLU-Games/DataStack` confirmed at this exact HEAD before writing these notes.
 Scope of this document: **evidence-backed CI and source review**, not proof that every production feature works. No Coolify live write, rollback, restart or deployment was conducted. Public GET `https://data.ivib.cc/api/health` returned `status: online`; full DB/Redis/MCP/S3 transaction health is not established.
 
@@ -64,3 +64,17 @@ Optional configuration review (not counted among eight): `server/index.js:1086-1
 ## Release acceptance rule
 
 NOT production-update-ready until P01, conditional P02 gates, and P03 finish, 24/24 TypeScript suites exit 0, 14/14 Python tests pass, full strict `tsc --noEmit` and ESLint pass, Linux/Windows clean install is reproducible, standalone Next build passes, all 3 Docker images build, security advisories are triaged, and approved **non-mutating** live readiness checks pass. Production deploy is a separate operator-approved action; never automatic from this documentation phase.
+
+## P01 Closure Appendix — 2026-11-22
+
+**Implementation outcome: CI-01…CI-05 resolved within P01 source allowlist; no production app/runtime/UI/SDK changes.** Evidence: Gitea [#59](https://dev.ivib.cc/vibtools/DataStack/actions/runs/59) and focused quality retry [#60](https://dev.ivib.cc/vibtools/DataStack/actions/runs/60). Run #59 overall FAILED because a single test-only `stopTimers` type declaration remained; it was corrected in `tests/r5-phase01-mcp-foundation-logs.test.ts` and strict `tsc --noEmit` plus ESLint then PASSED in #60. The two run results are complementary; neither should be misreported as a single all-green run.
+
+| Finding | Resolution and proof |
+|---|---|
+| CI-01 | `package-lock.json` gained 68 registry-integrity-verified **optional** entries including nested `@napi-rs/wasm-runtime/node_modules/@tybys/wasm-util@0.10.5`; 1293 original package entries unchanged, no removals or version bumps. Committed-lock `npm ci` PASS on Linux (job 90) and Windows (job 95). |
+| CI-02 | Removed obsolete `bun.lock`; `tests/phase07-deployment.test.ts` exit 0. |
+| CI-03 | Added suite-specific teardown hooks in four previously hanging suites, without changing core timer/runtime implementation; each exits 0. |
+| CI-04 | Replaced stale client-expiry inline-function regex with shared classifier/count behavioral assertions; `tests/v2-phase01-storage-quotas.test.ts` exit 0. |
+| CI-05 | 43 historical test-only TypeScript diagnostics corrected; one additional teardown declaration fixed after #59 typecheck failure. Final #60 strict TypeScript PASS (zero errors) and ESLint PASS. |
+
+**Acceptance evidence:** #59 Node SDK build PASS, 24/24 isolated TypeScript suites exit 0 (no timeouts), Windows SDK build PASS, Next.js 15.5.29 standalone production build PASS with 22/22 pages. #60 targeted `tsc --noEmit` and `npm run lint` both PASS. Prior canonical Windows Python SDK 14/14 PASS from [#48](https://dev.ivib.cc/vibtools/DataStack/actions/runs/48); Python source unchanged and not rerun in P01. Docker images and live production behavior NOT verified in P01; P02 runtime reliability risks and P03 infrastructure/security gates remain open.

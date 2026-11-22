@@ -42,6 +42,14 @@ Source baseline: `d725841ebc828d58cbe90f517da9e600f23c4630`. This is an **implem
 - MCP: disabled by default, read vs write permissions, bearer hashing, IP allowlist, sandbox traversal and symlink reject, no secret emission.
 - Do not run these failure injections against `https://data.ivib.cc/`. Use disposable CI fixtures/data directories/Redis containers only.
 
+## P01 dependency-install blocker note (2026-11-22)
+
+Gitea run #58 failed before application error-handling tests because clean npm install found an unresolved transitive lock entry: `@tybys/wasm-util@0.10.5`. No runtime error-handling paths were changed or re-verified in this run. Existing source-level handler inventory remains unchanged; P02 fault-injection gates are **NOT STARTED**.
+
 ## Change control
 
 Any new error code, status, SDK public exception or alert flow is **feature/API behavior change**: STOP and request explicit new scope approval. This register is documentation for deciding whether a new handler is warranted, not blanket authorization to add handlers.
+
+## P01 Closure Verification (2026-11-22)
+
+The previous #58 package-lock error was resolved by adding the exact nested optional `@tybys/wasm-util@0.10.5` lock entry without changing the 1293 original locked packages. Gitea #59 clean installs and all **24/24** TypeScript regression suites passed; #59 had a single test-only TS2339 mock-type declaration error, corrected in scope and verified by **#60 strict TypeScript + ESLint PASS**. P01 made **zero changes** to runtime error-handler implementation, response codes, auth, SDK error classification, telemetry behavior or UI. Existing handler inventory remains valid as source observations. P02 R-01…R-03 fault-injection and P03 infrastructure/security remain unverified; do not claim production fault tolerance from P01.

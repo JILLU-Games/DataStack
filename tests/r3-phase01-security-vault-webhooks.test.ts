@@ -172,7 +172,7 @@ test("R3-Phase-01 [BUG-03]: Client SDK JWTs omit hardcoded 30d exp so Never-Expi
 test("R3-Phase-01 [BUG-04 & BUG-15]: Viewer blocked (403) on POST /api/events and Operator blocked (403) on POST /api/storage/s3-test", async () => {
   resetAdminStateForTests();
   await createInitialAdmin("r3-owner@datastack.dev", "OwnerPassword123!");
-  const sessionSecret = getAdminSessionSecret();
+  const sessionSecret = getAdminSessionSecret()!;
   const suffix = Date.now();
   const viewerEmail = `r3viewer_${suffix}@datastack.dev`;
   const operatorEmail = `r3operator_${suffix}@datastack.dev`;
@@ -182,13 +182,11 @@ test("R3-Phase-01 [BUG-04 & BUG-15]: Viewer blocked (403) on POST /api/events an
     email: viewerEmail,
     password: "ViewerPassword123!",
     role: "viewer",
-    displayName: "R3 Viewer",
   });
   const operator = await createAdminTeamMemberAsync({
     email: operatorEmail,
     password: "OperatorPassword123!",
     role: "operator",
-    displayName: "R3 Operator",
   });
   await SDKManager.registerClientAsync({
     clientId,
@@ -292,7 +290,7 @@ test("R3-Phase-01 [BUG-06]: Locked webhook secret does not break unrelated setti
 
     const ownerToken = await createAdminSessionToken(
       owner.email,
-      getAdminSessionSecret(),
+      getAdminSessionSecret()!,
       Date.now() + 3600_000,
       owner.tokenVersion,
       owner.role,
@@ -427,7 +425,7 @@ test("R3-Phase-01 [BUG-10]: Brute-force 429 admin login lockout dispatches ADMIN
     assert.equal(dispatchedBodies[0].instance, "DataStack");
   } finally {
     global.fetch = origFetch;
-    await clearAdminLoginAttempts(email, getAdminSessionSecret(), testIp);
+    await clearAdminLoginAttempts(email, getAdminSessionSecret()!, testIp);
     await SettingsManager.updateSettingsAsync({
       enableWebhookAlerts: false,
       webhookUrl: "",
