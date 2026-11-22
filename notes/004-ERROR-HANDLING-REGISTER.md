@@ -76,3 +76,17 @@ Security invariants: do not expose secrets in ACK/errors, keep JWT/auth and 401/
 | Legacy public health | **UNCHANGED** HTTP 200 liveness contract and Redis-connected diagnostic field; R-03 readiness is not introduced in this approval | Does not prove full DB/Redis transactional readiness |
 
 Security/API invariants: leave token/JWT/auth/rate limits/quotas/webhooks/MCP/sandbox/UI/SDK unchanged. No production Redis/Postgres/API/CSV mutation. No lockfile/dependency versions or CI workflow changes. CI acceptance remains pending; these are code-level observations, not release certification.
+
+## P02-RUNTIME-REMEDIATION-02 — Updated safety contract evidence
+
+| Scenario | In-scope behavior | Residual |
+|---|---|---|
+| Port 4000 Redis `RPUSH` failure | `BUFFER_PERSIST_FAILED`, `success:false`; no Redis transport diagnostics disclosed in client ACK | SDK can retry via HTTP; Port 3000 volatile RAM success path remains unpatched |
+| Port 4000 without Redis | Await actual CSV flush before positive ACK; disk error yields negative ACK and queue retained | Disk API does not provide fsync-level power-loss guarantees |
+| Stale idempotency after restart | Never treat a claim alone as persisted; only accept a duplicate after in-memory acknowledged proof, Redis queued ID or read-only CSV partition proof | Bounded scans may cause temporary negative ACK for otherwise durable old events, rather than unsafe success |
+| Mixed `batch_sync` with uncertain claim | Overall negative `BUFFER_PERSIST_FAILED`; newer items may already be persisted, repeat dedupe resolves them | Preserve existing response fields and rate/quota/auth validations |
+| Redis `LTRIM` fails after CSV write | On retry, scan CSV/CSV.gz by client/date/event ID and skip already written event; trim Redis only after safe check | Cross-process exact-once not proven; I/O cost needs throughput validation |
+| Port 3000 HTTP `pushAsync` / `pushBatchAsync` | **UNCHANGED** (excluded from current approval); Redis error can return HTTP success with data only in volatile RAM | **OPEN R-01 blocker**, requires separate approval; `core/Security/security.ts` precommit idempotency claims may also need scoped rollback |
+| Public `/health` | Unchanged 200 liveness, `redisConnected` diagnostic | No dependency readiness probe under P02-R01/R02 authorization |
+
+Do not silently remap 401/403/429/507 errors; no SDK edits or live fault injection. Tests use mock Redis and temp CSV only. Relevant CI #66/#68/#70 in notes/003.

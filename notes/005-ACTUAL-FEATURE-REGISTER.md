@@ -60,3 +60,11 @@ Do not mark "actual working" simply because a patch compiled. Distinguish source
 - **Intended change:** Redis replay flush on both ingestion/Next paths inspects existing client CSV partitions and filters already-stored event IDs before reappend; safe failure leaves Redis queue untrimmed. This prevents the tested post-append/LTRIM replay duplication but does **not** prove transactionally exactly-once delivery or zero performance impact.
 - **No changes:** application UI/UX, auth, SDK, database schema, Docker, environment, public R-03 health, other features and production runtime. No deployment or live verification.
 - **Status:** P02 code candidate locally committed, acceptance CI blocked by Gitea unavailability; **NOT CLOSED**, not production-ready. P01 remains only completed phase.
+
+## P02 Remediation Hardening Register — 2026-11-22
+
+- **Changed in source, not deployed:** Port 4000 Socket.IO error ACK behavior on Redis write failure; no-Redis mode now waits for CSV flush before success; duplicate ACK checks actual Redis/CSV durability; mixed batch uncertainty gives negative ACK. EventId retry handling is made fail-closed with in-scope handler logic.
+- **Changed in source, not deployed:** Port 4000 and web-buffer CSV replay after Redis LTRIM failure now checks persisted CSV/CSV.gz event IDs. Existing file rotation/compression and disk errors need focused tests; scanner I/O impacts high-volume performance and does not certify global exactly-once semantics.
+- **Unchanged:** UI/UX/pages, public R-03 health shape/status, auth/JWT/SDK implementation, database/Prisma, Docker/Compose, environment, unrelated features, production data, live server and deployment.
+- **Still NOT working as end-to-end guarantee:** HTTP `POST /api/events` currently may send success after Redis RPUSH fails while only RAM contains the event. This is an additional source-observed release blocker, not something fixed by WS error ACK. **P02 NOT CLOSED; P03 NOT STARTED.**
+- **Evidence:** Gitea #66 initial remediation PASS; #68 exposed same-ID retry bug fixed in current branch; #70 final focused run awaiting terminal confirmation. The original PC main workspace's 16 staged P01 paths remain untouched.
