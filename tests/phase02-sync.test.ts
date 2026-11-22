@@ -1413,3 +1413,40 @@ test("P02 R-01: Redis-free Socket.IO ACK waits for CSV durability and denies dis
     fs.rmSync(baseDir, { recursive: true, force: true });
   }
 });
+
+test("P02 R-01 diagnostic: HTTP fallback still ACKs RAM-only data after Redis outage (scope blocker)", async () => {
+  // P02 remediation only authorizes Socket.IO ACK and buffer *flush* changes.
+  // Record the separate Port 3000 write/ACK risk; do NOT alter HTTP runtime here.
+  const redis = createSharedMockRedis();
+  redis.rpush = async () => { throw new Error("P02 injected HTTP Redis RPUSH outage"); };
+  const client = await SDKManager.registerClientAsync({
+    clientId: "p02_http_redis_outage", name: "P02 HTTP Redis Outage", rateLimit: 100,
+  });
+  const eventId = "p02-http-ram-only-001";
+  DataBufferEngine.getLocalBufferSnapshot(1);
+  const state = (globalThis as unknown as {
+    __dataStackBufferState?: { buffer: Array<{ eventId: string }>; batchFlushThreshold: number };
+  }).__dataStackBufferState;
+  const previousThreshold = state?.batchFlushThreshold;
+  if (state) state.batchFlushThreshold = 100_000;
+  DataBufferEngine.setRedisClientForTests(redis);
+  try {
+    const response = await postEventsRoute(new NextRequest("http://localhost:3000/api/events", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${client.token}` },
+      body: JSON.stringify({ eventId, data: { source: "p02-http-diagnostic" } }),
+    }));
+    const body = await response.json() as { success?: boolean; code?: string };
+    assert.equal(response.status, 200, "Existing HTTP endpoint reports accepted despite failed Redis write");
+    assert.equal(body.success, true);
+    const queued = DataBufferEngine.getLocalBufferSnapshot(1000).filter((evt) => evt.eventId === eventId);
+    assert.equal(queued.length, 1, "Accepted HTTP event is volatile RAM-only");
+    assert.equal((await redis.lrange("datastack:buffer:events", 0, -1)).length, 0);
+    // Simulated process-loss proof: dropping RAM removes the accepted event.
+    if (state) state.buffer = state.buffer.filter((evt) => evt.eventId !== eventId);
+    assert.equal(DataBufferEngine.getLocalBufferSnapshot(1000).some((evt) => evt.eventId === eventId), false);
+  } finally {
+    if (state && previousThreshold !== undefined) state.batchFlushThreshold = previousThreshold;
+    DataBufferEngine.setRedisClientForTests(undefined);
+  }
+});

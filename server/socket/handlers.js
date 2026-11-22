@@ -640,8 +640,11 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
             if (await hasDurableEvent(clientId, eventId, timestamp)) {
               idempotencyMap.delete(`\u0000failed-persist:${clientId}:${eventId}`);
               if (callback) callback({ success: true, eventId, note: "DUPLICATE_DROPPED" });
-            } else if (callback) {
-              callback({
+            } else {
+              // A stale local claim must not block a valid same-ID SDK retry
+              // after Redis recovers; the Redis claim still guards other workers.
+              idempotencyMap.delete(`${clientId}:${eventId}`);
+              if (callback) callback({
                 success: false, eventId, code: "BUFFER_PERSIST_FAILED",
                 error: "BUFFER_PERSIST_FAILED: Idempotency claim has no durable event",
               });
@@ -819,6 +822,7 @@ function setupSocketHandlers(io, bufferQueue, worker, options = {}) {
                 idempotencyMap.delete(`\u0000failed-persist:${clientId}:${eventId}`);
                 duplicates += 1;
               } else {
+                idempotencyMap.delete(`${clientId}:${eventId}`);
                 rejected += 1;
                 volatileDuplicate = true;
                 if (errors.length < 5) errors.push(
