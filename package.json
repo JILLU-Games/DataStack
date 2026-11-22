@@ -65,6 +65,9 @@
   "overrides": {
     "next": {
       "postcss": "8.5.33"
+    },
+    "cloudcmd": {
+      "dompurify": "3.4.18"
     }
   }
 }
