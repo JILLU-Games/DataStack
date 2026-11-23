@@ -1011,6 +1011,16 @@ async function mountFilesManager({
   let initErrorMessage = '';
 
   try {
+    // restafary treats drive-qualified Windows storage roots as cwd-relative.
+    // Only Cloudcmd needs a portable root; keep the guard and exported root absolute.
+    if (process.platform === 'win32') {
+      const relativeRoot = path.relative(process.cwd(), resolvedRoot);
+      if (path.isAbsolute(relativeRoot)) {
+        throw new Error('Windows Cloudcmd storage root must be on the server drive.');
+      }
+      configOptions.root = relativeRoot ? `./${relativeRoot.replaceAll('\\', '/')}` : '.';
+    }
+
     const cloudcmdPkg = await import('cloudcmd');
     const cloudcmdFn = cloudcmdPkg.cloudcmd || cloudcmdPkg.default;
     const createConfigManager =

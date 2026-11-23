@@ -204,6 +204,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'SDK install failed' }
           npm --prefix sdk/node/datastack run build
           if ($LASTEXITCODE -ne 0) { throw 'SDK compilation failed' }
+      - name: FF01 native Windows File Manager CRUD and ZIP acceptance
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npx.cmd --yes tsx@4.20.6 --test tests/files-manager.test.ts
+          if ($LASTEXITCODE -ne 0) { throw 'FF01 Windows Files Manager regression failed' }
 
   security-audit:
     if: ${{ (github.event_name != 'pull_request_target' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.p01_only != 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.python_only != 'true')) }}

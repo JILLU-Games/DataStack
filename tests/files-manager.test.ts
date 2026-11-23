@@ -86,6 +86,8 @@ test('FM-REQ-01..06: live CloudCmd mount enforces auth, DB revocation, RBAC, CSR
   try {
     assert.equal(handle.engineReady, true, `CloudCmd failed to init: ${handle.initErrorMessage}`);
     assert.equal(handle.socketPath, '/vcon/files-engine/socket.io');
+    // Cloudcmd's Windows-specific representation must still resolve to the jailed root.
+    assert.equal(path.resolve(handle.configOptions.root), tmpRoot);
 
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
     const address = server.address() as { port: number };
@@ -151,7 +153,9 @@ test('FM-REQ-01..06: live CloudCmd mount enforces auth, DB revocation, RBAC, CSR
       headers: ownerHeaders,
       body: 'k,v\n1,ok\n',
     });
-    assert.equal(createRes.status, 200);
+    if (createRes.status !== 200) {
+      assert.fail(`Cloudcmd PUT failed with ${createRes.status}: ${(await createRes.text()).slice(0, 240)}`);
+    }
     assert.equal(fs.readFileSync(path.join(tmpRoot, 'client-alpha', 'note.csv'), 'utf8'), 'k,v\n1,ok\n');
 
     const renameRes = await fetch(`${baseUrl}/vcon/files-engine/api/v1/rename`, {
