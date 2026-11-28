@@ -41,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          github-server-url: https://dev.ivib.cc
+          github-server-url: https://dev.vib.tools
           persist-credentials: false
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
       - name: Install dependencies
@@ -80,7 +80,7 @@ jobs:
           apt-get install -y --no-install-recommends git ca-certificates python3 python3-venv python3-pip
       - uses: actions/checkout@v4
         with:
-          github-server-url: https://dev.ivib.cc
+          github-server-url: https://dev.vib.tools
           persist-credentials: false
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
       - name: CI-06 Python 3.11 isolated virtual environment
@@ -107,7 +107,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          github-server-url: https://dev.ivib.cc
+          github-server-url: https://dev.vib.tools
           persist-credentials: false
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
       - name: Install dependencies
@@ -124,7 +124,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          github-server-url: https://dev.ivib.cc
+          github-server-url: https://dev.vib.tools
           persist-credentials: false
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
       - name: Install dependencies
@@ -150,12 +150,18 @@ jobs:
           docker compose version
       - uses: actions/checkout@v4
         with:
-          github-server-url: https://dev.ivib.cc
+          github-server-url: https://dev.vib.tools
           persist-credentials: false
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
       - name: CI-07 inspect daemon and validate Compose without starting services
         run: |
           set -eu
+          # Datastack runner safety: never build against an occupied/shared Docker daemon.
+          docker_existing="$(docker ps -aq)" || { echo DATASTACK_DOCKER_DAEMON_UNAVAILABLE; exit 1; }
+          if [ -n "$docker_existing" ]; then
+            echo DATASTACK_DOCKER_HOST_NOT_ISOLATED
+            exit 1
+          fi
           docker info --format 'Driver={{.Driver}} Root={{.DockerRootDir}}'
           df -h .
           docker compose -f docker/docker-compose.yml config --no-interpolate --quiet
@@ -177,12 +183,12 @@ jobs:
 
   windows-compatibility:
     if: ${{ (github.event_name != 'pull_request_target' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.quality_only != 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.python_only != 'true')) }}
-    runs-on: windows-latest
+    runs-on: windows-local
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
-          github-server-url: https://dev.ivib.cc
+          github-server-url: https://dev.vib.tools
           persist-credentials: false
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
       - name: Verify native Windows toolchain
@@ -221,7 +227,7 @@ jobs:
         run: apk add --no-cache git
       - uses: actions/checkout@v4
         with:
-          github-server-url: https://dev.ivib.cc
+          github-server-url: https://dev.vib.tools
           persist-credentials: false
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
       - name: CI-08 read-only full and runtime npm advisory inventory

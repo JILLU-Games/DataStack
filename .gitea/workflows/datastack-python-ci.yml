@@ -8,12 +8,12 @@ on:
 
 jobs:
   python-sdk-windows:
-    runs-on: windows-latest
+    runs-on: windows-local
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
-          github-server-url: https://dev.ivib.cc
+          github-server-url: https://dev.vib.tools
       - name: Isolated Python 3.12 environment
         shell: powershell
         run: |
