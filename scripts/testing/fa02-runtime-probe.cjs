@@ -28,6 +28,26 @@ async function request(route, { method='GET', body, raw, token, authenticated=fa
   if (internal) headers['x-datastack-internal-secret']=process.env.DATASTACK_INTERNAL_SECRET || process.env.FA02_INTERNAL;
   if (body!==undefined) headers['Content-Type']='application/json';
   const res=await fetch((internal?'http://ingestion:4000':base)+route,{method,headers,body:body!==undefined?JSON.stringify(body):raw,redirect:'manual',signal:AbortSignal.timeout(15000)});
+  if(res.status!==status && route.startsWith('/api/export?')) {
+    const data=await res.json().catch(()=>({}));
+    const sanitize=value=>{
+      let message=String(value??'');
+      for(const secret of [state?.token,cookie,process.env.FA02_ADMIN_PASSWORD,process.env.FA02_SETUP_KEY,process.env.FA02_INTERNAL,process.env.DATASTACK_INTERNAL_SECRET]) {
+        if(secret) message=message.split(secret).join('[REDACTED]');
+      }
+      return message.replace(/(?:postgres(?:ql)?|redis|https?):\/\/[^\s]+/gi,'[REDACTED_URL]').replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g,'[REDACTED_JWT]').replace(/\b[a-f0-9]{48,}\b/gi,'[REDACTED_HEX]').slice(0,800);
+    };
+    console.log('FA02_EXPORT_FAILURE '+JSON.stringify({stage,status:res.status,error:sanitize(data.error),code:sanitize(data.code)}));
+    try {
+      const entries=fs.readdirSync(fixtureRoot,{withFileTypes:true}).filter(e=>e.isFile());
+      const metadata=entries.map(e=>{const st=fs.statSync(path.join(fixtureRoot,e.name));return {name:e.name,bytes:st.size,mode:(st.mode&0o777).toString(8),uid:st.uid,gid:st.gid};});
+      console.log('FA02_EXPORT_STORAGE_METADATA '+JSON.stringify({uid:process.getuid(),files:metadata}));
+    } catch(error) {console.log('FA02_EXPORT_STORAGE_DIAGNOSTIC '+sanitize(error.code));}
+    try {
+      if(redis.status==='wait') await redis.connect();
+      console.log('FA02_EXPORT_REDIS_METADATA '+JSON.stringify({queued:await redis.llen(queue),lockTtlMs:await redis.pttl('datastack:flush:lock')}));
+    } catch(error) {console.log('FA02_EXPORT_REDIS_DIAGNOSTIC '+sanitize(error.code));}
+  }
   check(res.status===status, method+' '+route.split('?')[0]+' expected '+status+' got '+res.status);
   return res;
 }

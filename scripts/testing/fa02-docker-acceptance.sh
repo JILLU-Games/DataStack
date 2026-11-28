@@ -114,7 +114,8 @@ build_images(){
 }
 probe(){
   local stage="$1"
-  FA02_STAGE="$stage" dc exec -T -u node -e FA02_STAGE -e FA02_FIXTURE -e FA02_ADMIN_EMAIL -e FA02_ADMIN_PASSWORD -e FA02_SETUP_KEY -e FA02_INTERNAL ingestion node - < "$root/scripts/testing/fa02-runtime-probe.cjs" | tee -a "$evidence"
+  mark "FA02_PROBE_STAGE $stage"
+  FA02_STAGE="$stage" dc exec -T -u node -e FA02_STAGE -e FA02_FIXTURE -e FA02_ADMIN_EMAIL -e FA02_ADMIN_PASSWORD -e FA02_SETUP_KEY -e FA02_INTERNAL ingestion node - < "$root/scripts/testing/fa02-runtime-probe.cjs" 2>&1 | tee -a "$evidence"
 }
 volumes(){
   docker volume ls --filter "label=com.docker.compose.project=$project" --format '{{.Name}}' | sort
