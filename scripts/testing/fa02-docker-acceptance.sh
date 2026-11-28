@@ -86,7 +86,7 @@ services:
     restart: "no"
 EOF
   dc config --format json > "$temp/compose.json"
-  node - "$temp/compose.json" "$project" <<'NODE'
+  node - "$temp/compose.json" "$project" "$tag" "$candidate_tag" <<'NODE'
 const assert=require('node:assert/strict');
 const c=JSON.parse(require('node:fs').readFileSync(process.argv[2],'utf8'));
 assert.deepEqual(Object.keys(c.services).sort(),['ingestion','postgres','proxy','redis','web']);
@@ -95,6 +95,13 @@ for(const s of Object.values(c.services)){
   for(const v of s.volumes||[]) assert.equal(v.type,'volume');
 }
 assert.deepEqual(Object.keys(c.volumes).sort(),['datastack-data','pgdata','redisdata']);
+for(const name of ['web','ingestion']){
+  const mounts=c.services[name].volumes;
+  assert.equal(mounts.length,1);
+  assert.equal(mounts[0].source,'datastack-data');
+  assert.equal(mounts[0].target,'/app/storage');
+  if(process.argv[4]===process.argv[5]) assert.equal(mounts[0].volume?.nocopy,true,'Candidate shared volume must not copy image directories');
+}
 for(const v of Object.values(c.volumes)) assert.ok(!v.external && v.name.startsWith(process.argv[3]+'_'));
 for(const v of Object.values(c.networks)) assert.ok(!v.external && v.name.startsWith(process.argv[3]+'_'));
 NODE

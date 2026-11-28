@@ -7,7 +7,12 @@ services:
     expose:
       - "3000"
     volumes:
-      - datastack-data:/app/storage
+      # Both app entrypoints initialize empty storage; prevent concurrent Docker copy-up.
+      - type: volume
+        source: datastack-data
+        target: /app/storage
+        volume:
+          nocopy: true
     environment:
       NODE_ENV: production
       PORT: "3000"
@@ -52,7 +57,12 @@ services:
     expose:
       - "4000"
     volumes:
-      - datastack-data:/app/storage
+      # Both app entrypoints initialize empty storage; prevent concurrent Docker copy-up.
+      - type: volume
+        source: datastack-data
+        target: /app/storage
+        volume:
+          nocopy: true
     environment:
       NODE_ENV: production
       PORT_SOCKET: "4000"
