@@ -15,7 +15,8 @@
     "start:web": "next start",
     "start:server": "node server/index.js",
     "lint": "eslint .",
-    "clean": "next clean"
+    "clean": "next clean",
+    "postinstall": "node -e \"const {spawnSync}=require('node:child_process');const fs=require('node:fs');for(const pkg of ['got','glob','minimatch','file-type']){const patch='patches/cloudcmd-'+pkg+'-security.patch';if(!fs.existsSync(patch))throw new Error('Missing security patch: '+patch);const run=(args)=>spawnSync('git',['-c','core.autocrlf=false','apply',...args,patch],{encoding:'utf8'});const already=run(['--reverse','--check']);if(already.status===0){console.log('SECURITY_BACKPORT_ALREADY_APPLIED '+pkg);continue;}const check=run(['--check']);if(check.status!==0)throw new Error('SECURITY_BACKPORT_MISMATCH '+pkg+': '+(check.stderr||check.stdout));const apply=run([]);if(apply.status!==0)throw new Error('SECURITY_BACKPORT_APPLY_FAILED '+pkg+': '+(apply.stderr||apply.stdout));if(run(['--reverse','--check']).status!==0)throw new Error('SECURITY_BACKPORT_VERIFY_FAILED '+pkg);console.log('SECURITY_BACKPORT_APPLIED '+pkg);}\""
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.1",
