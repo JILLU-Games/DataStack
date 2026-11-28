@@ -103,7 +103,7 @@ class Phase05PythonSdkTests(unittest.TestCase):
                 f'    "CLIENT_TOKEN": "{tok_alpha}",\n'
                 f'    "CLIENT_ID": "alpha_svc",\n'
                 f'    "AUTO_CONNECT": False,\n'
-                f'    "OFFLINE_SPOOL_DIR": "{Path(tmpdir) / "spool"}",\n'
+                f'    "OFFLINE_SPOOL_DIR": {str(Path(tmpdir) / "spool")!r},\n'
                 f'}}\n',
                 encoding="utf-8",
             )
