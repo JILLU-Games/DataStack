@@ -1,0 +1,155 @@
+diff --git a/node_modules/glob/node_modules/minimatch/dist/commonjs/index.js b/node_modules/glob/node_modules/minimatch/dist/commonjs/index.js
+--- a/node_modules/glob/node_modules/minimatch/dist/commonjs/index.js
++++ b/node_modules/glob/node_modules/minimatch/dist/commonjs/index.js
+@@ -445,8 +445,9 @@
+     //
+     // **/*/<rest> -> */**/<rest> <== not valid because ** doesn't follow
+     // this WOULD be allowed if ** did follow symlinks, or * didn't
+-    firstPhasePreProcess(globParts) {
+-        let didSomething = false;
++    firstPhasePreProcess(globParts) {
++        const { braceExpandMax = 100_000 } = this.options;
++        let didSomething = false;
+         do {
+             didSomething = false;
+             // <pre>/**/../<p>/<p>/<rest> -> {<pre>/../<p>/<p>/<rest>,<pre>/**/<p>/<p>/<rest>}
+@@ -473,7 +474,8 @@
+                         p === '..' ||
+                         !p2 ||
+                         p2 === '.' ||
+-                        p2 === '..') {
++                        p2 === '..' ||
++                        globParts.length >= braceExpandMax) {
+                         continue;
+                     }
+                     didSomething = true;
+@@ -529,8 +531,10 @@
+     //
+     // {<pre>/**/<rest>,<pre>/**/<p>/<rest>} -> <pre>/**/<rest>
+     // ^-- not valid because ** doens't follow symlinks
+-    secondPhasePreProcess(globParts) {
+-        for (let i = 0; i < globParts.length - 1; i++) {
++    secondPhasePreProcess(globParts) {
++        if (globParts.length > 1000)
++            return globParts;
++        for (let i = 0; i < globParts.length - 1; i++) {
+             for (let j = i + 1; j < globParts.length; j++) {
+                 const matched = this.partsMatch(globParts[i], globParts[j], !this.preserveMultipleSlashes);
+                 if (matched) {
+
+diff --git a/node_modules/glob/node_modules/minimatch/dist/esm/index.js b/node_modules/glob/node_modules/minimatch/dist/esm/index.js
+--- a/node_modules/glob/node_modules/minimatch/dist/esm/index.js
++++ b/node_modules/glob/node_modules/minimatch/dist/esm/index.js
+@@ -433,8 +433,9 @@
+     //
+     // **/*/<rest> -> */**/<rest> <== not valid because ** doesn't follow
+     // this WOULD be allowed if ** did follow symlinks, or * didn't
+-    firstPhasePreProcess(globParts) {
+-        let didSomething = false;
++    firstPhasePreProcess(globParts) {
++        const { braceExpandMax = 100_000 } = this.options;
++        let didSomething = false;
+         do {
+             didSomething = false;
+             // <pre>/**/../<p>/<p>/<rest> -> {<pre>/../<p>/<p>/<rest>,<pre>/**/<p>/<p>/<rest>}
+@@ -461,7 +462,8 @@
+                         p === '..' ||
+                         !p2 ||
+                         p2 === '.' ||
+-                        p2 === '..') {
++                        p2 === '..' ||
++                        globParts.length >= braceExpandMax) {
+                         continue;
+                     }
+                     didSomething = true;
+@@ -517,8 +519,10 @@
+     //
+     // {<pre>/**/<rest>,<pre>/**/<p>/<rest>} -> <pre>/**/<rest>
+     // ^-- not valid because ** doens't follow symlinks
+-    secondPhasePreProcess(globParts) {
+-        for (let i = 0; i < globParts.length - 1; i++) {
++    secondPhasePreProcess(globParts) {
++        if (globParts.length > 1000)
++            return globParts;
++        for (let i = 0; i < globParts.length - 1; i++) {
+             for (let j = i + 1; j < globParts.length; j++) {
+                 const matched = this.partsMatch(globParts[i], globParts[j], !this.preserveMultipleSlashes);
+                 if (matched) {
+
+diff --git a/node_modules/onezip/node_modules/glob/node_modules/minimatch/dist/commonjs/index.js b/node_modules/onezip/node_modules/glob/node_modules/minimatch/dist/commonjs/index.js
+--- a/node_modules/onezip/node_modules/glob/node_modules/minimatch/dist/commonjs/index.js
++++ b/node_modules/onezip/node_modules/glob/node_modules/minimatch/dist/commonjs/index.js
+@@ -452,8 +452,9 @@
+     //
+     // **/*/<rest> -> */**/<rest> <== not valid because ** doesn't follow
+     // this WOULD be allowed if ** did follow symlinks, or * didn't
+-    firstPhasePreProcess(globParts) {
+-        let didSomething = false;
++    firstPhasePreProcess(globParts) {
++        const { braceExpandMax = 100_000 } = this.options;
++        let didSomething = false;
+         do {
+             didSomething = false;
+             // <pre>/**/../<p>/<p>/<rest> -> {<pre>/../<p>/<p>/<rest>,<pre>/**/<p>/<p>/<rest>}
+@@ -480,7 +481,8 @@
+                         p === '..' ||
+                         !p2 ||
+                         p2 === '.' ||
+-                        p2 === '..') {
++                        p2 === '..' ||
++                        globParts.length >= braceExpandMax) {
+                         continue;
+                     }
+                     didSomething = true;
+@@ -536,8 +538,10 @@
+     //
+     // {<pre>/**/<rest>,<pre>/**/<p>/<rest>} -> <pre>/**/<rest>
+     // ^-- not valid because ** doens't follow symlinks
+-    secondPhasePreProcess(globParts) {
+-        for (let i = 0; i < globParts.length - 1; i++) {
++    secondPhasePreProcess(globParts) {
++        if (globParts.length > 1000)
++            return globParts;
++        for (let i = 0; i < globParts.length - 1; i++) {
+             for (let j = i + 1; j < globParts.length; j++) {
+                 const matched = this.partsMatch(globParts[i], globParts[j], !this.preserveMultipleSlashes);
+                 if (matched) {
+
+diff --git a/node_modules/onezip/node_modules/glob/node_modules/minimatch/dist/esm/index.js b/node_modules/onezip/node_modules/glob/node_modules/minimatch/dist/esm/index.js
+--- a/node_modules/onezip/node_modules/glob/node_modules/minimatch/dist/esm/index.js
++++ b/node_modules/onezip/node_modules/glob/node_modules/minimatch/dist/esm/index.js
+@@ -443,8 +443,9 @@
+     //
+     // **/*/<rest> -> */**/<rest> <== not valid because ** doesn't follow
+     // this WOULD be allowed if ** did follow symlinks, or * didn't
+-    firstPhasePreProcess(globParts) {
+-        let didSomething = false;
++    firstPhasePreProcess(globParts) {
++        const { braceExpandMax = 100_000 } = this.options;
++        let didSomething = false;
+         do {
+             didSomething = false;
+             // <pre>/**/../<p>/<p>/<rest> -> {<pre>/../<p>/<p>/<rest>,<pre>/**/<p>/<p>/<rest>}
+@@ -471,7 +472,8 @@
+                         p === '..' ||
+                         !p2 ||
+                         p2 === '.' ||
+-                        p2 === '..') {
++                        p2 === '..' ||
++                        globParts.length >= braceExpandMax) {
+                         continue;
+                     }
+                     didSomething = true;
+@@ -527,8 +529,10 @@
+     //
+     // {<pre>/**/<rest>,<pre>/**/<p>/<rest>} -> <pre>/**/<rest>
+     // ^-- not valid because ** doens't follow symlinks
+-    secondPhasePreProcess(globParts) {
+-        for (let i = 0; i < globParts.length - 1; i++) {
++    secondPhasePreProcess(globParts) {
++        if (globParts.length > 1000)
++            return globParts;
++        for (let i = 0; i < globParts.length - 1; i++) {
+             for (let j = i + 1; j < globParts.length; j++) {
+                 const matched = this.partsMatch(globParts[i], globParts[j], !this.preserveMultipleSlashes);
+                 if (matched) {

@@ -1,0 +1,91 @@
+diff --git a/node_modules/glob/dist/commonjs/walker.js b/node_modules/glob/dist/commonjs/walker.js
+--- a/node_modules/glob/dist/commonjs/walker.js
++++ b/node_modules/glob/dist/commonjs/walker.js
+@@ -184,16 +184,16 @@
+     }
+     walkCB(target, patterns, cb) {
+         /* c8 ignore start */
+-        if (this.signal?.aborted)
+-            cb();
++        if (this.signal?.aborted)
++            return cb();
+         /* c8 ignore stop */
+         this.walkCB2(target, patterns, new processor_js_1.Processor(this.opts), cb);
+     }
+     walkCB2(target, patterns, processor, cb) {
+         if (this.#childrenIgnored(target))
+             return cb();
+-        if (this.signal?.aborted)
+-            cb();
++        if (this.signal?.aborted)
++            return cb();
+         if (this.paused) {
+             this.onResume(() => this.walkCB2(target, patterns, processor, cb));
+             return;
+@@ -248,16 +248,16 @@
+     }
+     walkCBSync(target, patterns, cb) {
+         /* c8 ignore start */
+-        if (this.signal?.aborted)
+-            cb();
++        if (this.signal?.aborted)
++            return cb();
+         /* c8 ignore stop */
+         this.walkCB2Sync(target, patterns, new processor_js_1.Processor(this.opts), cb);
+     }
+     walkCB2Sync(target, patterns, processor, cb) {
+         if (this.#childrenIgnored(target))
+             return cb();
+-        if (this.signal?.aborted)
+-            cb();
++        if (this.signal?.aborted)
++            return cb();
+         if (this.paused) {
+             this.onResume(() => this.walkCB2Sync(target, patterns, processor, cb));
+             return;
+
+diff --git a/node_modules/glob/dist/esm/walker.js b/node_modules/glob/dist/esm/walker.js
+--- a/node_modules/glob/dist/esm/walker.js
++++ b/node_modules/glob/dist/esm/walker.js
+@@ -181,16 +181,16 @@
+     }
+     walkCB(target, patterns, cb) {
+         /* c8 ignore start */
+-        if (this.signal?.aborted)
+-            cb();
++        if (this.signal?.aborted)
++            return cb();
+         /* c8 ignore stop */
+         this.walkCB2(target, patterns, new Processor(this.opts), cb);
+     }
+     walkCB2(target, patterns, processor, cb) {
+         if (this.#childrenIgnored(target))
+             return cb();
+-        if (this.signal?.aborted)
+-            cb();
++        if (this.signal?.aborted)
++            return cb();
+         if (this.paused) {
+             this.onResume(() => this.walkCB2(target, patterns, processor, cb));
+             return;
+@@ -245,16 +245,16 @@
+     }
+     walkCBSync(target, patterns, cb) {
+         /* c8 ignore start */
+-        if (this.signal?.aborted)
+-            cb();
++        if (this.signal?.aborted)
++            return cb();
+         /* c8 ignore stop */
+         this.walkCB2Sync(target, patterns, new Processor(this.opts), cb);
+     }
+     walkCB2Sync(target, patterns, processor, cb) {
+         if (this.#childrenIgnored(target))
+             return cb();
+-        if (this.signal?.aborted)
+-            cb();
++        if (this.signal?.aborted)
++            return cb();
+         if (this.paused) {
+             this.onResume(() => this.walkCB2Sync(target, patterns, processor, cb));
+             return;

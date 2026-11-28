@@ -1,0 +1,407 @@
+name: DataStack Final Acceptance 02
+on:
+  push:
+    branches: [final-acceptance-02-closeout]
+    paths-ignore:
+      - 'notes/**'
+      - '**/*.md'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: datastack-final-acceptance-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  NEXT_TELEMETRY_DISABLED: '1'
+jobs:
+  node-regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify immutable candidate
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse '4959b69bb25b46a16509bfc4755d13bad87347a9^{tree}')" = "37bffae18e2abb6d66a1ae7e1cc6599b48593ee1"
+          git merge-base --is-ancestor 4959b69bb25b46a16509bfc4755d13bad87347a9 HEAD
+          echo "FA02_SOURCE $(git rev-parse HEAD) $(git rev-parse 'HEAD^{tree}')"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Verify Linux security backport idempotence
+        run: |
+          set -eu
+          output="$(npm run postinstall)"
+          printf '%s\n' "$output"
+          for pkg in got glob minimatch file-type; do
+            printf '%s\n' "$output" | grep -Fx "SECURITY_BACKPORT_ALREADY_APPLIED $pkg"
+          done
+      - name: Verify all security backport source bytes against registry tarballs
+        run: |
+          set -eu
+          node <<'NODE'
+          const fs = require('node:fs');
+          const os = require('node:os');
+          const path = require('node:path');
+          const {execFileSync} = require('node:child_process');
+          const {createHash} = require('node:crypto');
+          const lock = require('./package-lock.json').packages;
+          const root = process.cwd();
+          const temp = fs.mkdtempSync(path.join(os.tmpdir(),'datastack-fa02-integrity-'));
+          const digest = (b,alg='sha256',format='hex') => createHash(alg).update(b).digest(format);
+          const registry = '--registry=https://registry.npmjs.org/';
+          const packs = new Map();
+          function archive(name,version) {
+            const spec = name+'@'+version;
+            if (packs.has(spec)) return packs.get(spec);
+            const dist = JSON.parse(execFileSync('npm',['view',spec,'dist','--json',registry],{encoding:'utf8',timeout:90000}));
+            if (!/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(dist.integrity)) throw Error('Missing registry integrity '+spec);
+            const [packed] = JSON.parse(execFileSync('npm',['pack',spec,'--ignore-scripts','--json','--pack-destination',temp,registry],{encoding:'utf8',timeout:90000}));
+            const file = path.join(temp,path.basename(packed.filename));
+            if ('sha512-'+digest(fs.readFileSync(file),'sha512','base64')!==dist.integrity || packed.integrity!==dist.integrity) throw Error('Tarball integrity mismatch '+spec);
+            packs.set(spec,file);
+            console.log('FA02_REGISTRY_INTEGRITY '+spec+' '+dist.integrity);
+            return file;
+          }
+          function original(target,name) {
+            const base = Object.keys(lock).filter(k=>k.endsWith('/'+name)&&target.startsWith(k+'/')).sort((a,b)=>b.length-a.length)[0];
+            if (!base || !lock[base].version) throw Error('Unexpected lock target '+target);
+            const version = lock[base].version;
+            const installed = JSON.parse(fs.readFileSync(path.join(root,base,'package.json'),'utf8'));
+            if (installed.name!==name || installed.version!==version) throw Error('Installed version mismatch '+base);
+            const file = archive(name,version);
+            return execFileSync('tar',['-xOf',file,'package/'+target.slice(base.length+1)],{maxBuffer:4*1024*1024});
+          }
+          try {
+            for (const name of ['got','glob','minimatch','file-type']) {
+              const patch = fs.readFileSync('patches/cloudcmd-'+name+'-security.patch','utf8').replace(/\r\n/g,'\n');
+              const targets = patch.split('\n').filter(l=>l.startsWith('+++ b/')).map(l=>l.slice(6));
+              if (!targets.length) throw Error('No targets '+name);
+              for (const target of targets) {
+                if (!target.startsWith('node_modules/') || target.split('/').includes('..')) throw Error('Invalid target '+target);
+                const dst = path.join(temp,target);
+                fs.mkdirSync(path.dirname(dst),{recursive:true});
+                fs.writeFileSync(dst,original(target,name));
+              }
+              const options = {cwd:temp,input:patch};
+              execFileSync('git',['-c','core.autocrlf=false','apply','--check','-'],options);
+              execFileSync('git',['-c','core.autocrlf=false','apply','-'],options);
+              for (const target of targets) {
+                const actual = fs.readFileSync(path.join(root,target));
+                if (!actual.equals(fs.readFileSync(path.join(temp,target)))) throw Error('Patched source integrity mismatch '+target);
+                console.log('FA02_PATCHED_SOURCE_VERIFIED '+target+' '+digest(actual));
+              }
+            }
+            for (const file of ['dist/commonjs/walker.js','dist/esm/walker.js']) {
+              const target = 'node_modules/onezip/node_modules/glob/'+file;
+              const actual = fs.readFileSync(target);
+              if (!actual.equals(original(target,'glob'))) throw Error('Nested glob integrity mismatch '+target);
+              console.log('FA02_NESTED_GLOB_SOURCE_VERIFIED '+target+' '+digest(actual));
+            }
+          } finally { fs.rmSync(temp,{recursive:true,force:true}); }
+          NODE
+      - name: Build Node SDK
+        run: |
+          npm --prefix sdk/node/datastack install --no-audit --no-fund
+          npm --prefix sdk/node/datastack run build
+      - name: Run all TypeScript regression suites with bounded isolation
+        run: |
+          set +e
+          failed=0
+          total=0
+          for file in tests/*.test.ts; do
+            total=$((total + 1))
+            echo "CI_SUITE_BEGIN $file"
+            timeout --signal=TERM --kill-after=5s 70s npx --yes tsx@4.20.6 --test "$file"
+            code=$?
+            echo "CI_SUITE_EXIT $file $code"
+            if [ "$code" -ne 0 ]; then failed=$((failed + 1)); fi
+          done
+          echo "CI_SUITE_SUMMARY total=$total failed=$failed"
+          test "$total" -eq 24 || exit 1
+          test "$failed" -eq 0
+
+  quality-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify immutable candidate
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse '4959b69bb25b46a16509bfc4755d13bad87347a9^{tree}')" = "37bffae18e2abb6d66a1ae7e1cc6599b48593ee1"
+          git merge-base --is-ancestor 4959b69bb25b46a16509bfc4755d13bad87347a9 HEAD
+          echo "FA02_SOURCE $(git rev-parse HEAD) $(git rev-parse 'HEAD^{tree}')"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Syntax and TypeScript
+        run: |
+          bash -n scripts/testing/fa02-docker-acceptance.sh
+          node --check scripts/testing/fa02-runtime-probe.cjs
+          npx tsc --noEmit
+      - name: ESLint
+        run: npm run lint
+      - name: Verify typography security upgrade preserves generated components
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          npm pack postcss-selector-parser@6.0.10 --ignore-scripts --pack-destination "$tmp" --silent
+          tar -xzf "$tmp/postcss-selector-parser-6.0.10.tgz" -C "$tmp"
+          ln -s "$PWD/node_modules" "$tmp/package/node_modules"
+          FA02_OLD_PARSER="$tmp/package" node <<'NODE'
+          const assert = require('node:assert/strict');
+          const Module = require('node:module');
+          const old = require(process.env.FA02_OLD_PARSER);
+          const modern = require('postcss-selector-parser');
+          assert.equal(require('postcss-selector-parser/package.json').version,'6.1.5');
+          const load = Module._load;
+          function snapshot(parser) {
+            for(const key of Object.keys(require.cache)) {
+              if(key.includes('/@tailwindcss/typography/')) delete require.cache[key];
+            }
+            const result = {variants:[],components:[]};
+            try {
+              Module._load = function(id,parent,...args) {
+                if(id==='postcss-selector-parser' && parent?.filename.includes('/@tailwindcss/typography/')) return parser;
+                return load.call(this,id,parent,...args);
+              };
+              const plugin = require('@tailwindcss/typography')();
+              plugin.handler({
+                theme: key=>{assert.equal(key,'typography');return plugin.config.theme.typography;},
+                prefix: value=>value,
+                addVariant: (...args)=>result.variants.push(args),
+                addComponents: (...args)=>result.components.push(args)
+              });
+              assert.ok(result.variants.length>20 && result.components.length>0);
+              return result;
+            } finally {Module._load=load;}
+          }
+          assert.deepEqual(snapshot(modern),snapshot(old),'Typography output changed');
+          console.log('FA02_TYPOGRAPHY_COMPONENT_PARITY_PASS');
+          NODE
+      - name: Next.js production build
+        run: |
+          npm run build
+          test -f .next/standalone/server.js
+          git diff --exit-code -- package.json package-lock.json
+  python-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify immutable candidate
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse '4959b69bb25b46a16509bfc4755d13bad87347a9^{tree}')" = "37bffae18e2abb6d66a1ae7e1cc6599b48593ee1"
+          git merge-base --is-ancestor 4959b69bb25b46a16509bfc4755d13bad87347a9 HEAD
+          echo "FA02_SOURCE $(git rev-parse HEAD) $(git rev-parse 'HEAD^{tree}')"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Python SDK exact 14-test regression
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/fa02-venv"
+          py="$RUNNER_TEMP/fa02-venv/bin/python"
+          "$py" -m pip install --disable-pip-version-check -e ./sdk/python/datastack -e ./sdk-python
+          "$py" -m compileall -q ./sdk/python/datastack ./sdk-python
+          "$py" -m unittest discover -s tests -p '*_test.py' -v 2>&1 | tee "$RUNNER_TEMP/fa02-python.log"
+          grep -Eq '^Ran 14 tests in ' "$RUNNER_TEMP/fa02-python.log"
+          grep -Eq '^OK$' "$RUNNER_TEMP/fa02-python.log"
+  windows-compatibility:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify immutable candidate
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse '4959b69bb25b46a16509bfc4755d13bad87347a9^{tree}')" = "37bffae18e2abb6d66a1ae7e1cc6599b48593ee1"
+          git merge-base --is-ancestor 4959b69bb25b46a16509bfc4755d13bad87347a9 HEAD
+          echo "FA02_SOURCE $(git rev-parse HEAD) $(git rev-parse 'HEAD^{tree}')"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify native Windows toolchain
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node --version
+          npm --version
+          python --version
+          git rev-parse HEAD
+      - name: Install dependencies and compile Node SDK
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Verify the committed cross-platform lock without disposable regeneration.
+          npm ci --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Committed-lock npm ci failed' }
+          $output = npm run postinstall
+          if ($LASTEXITCODE -ne 0) { throw 'Security backport idempotence failed' }
+          $output | Write-Output
+          foreach ($pkg in @('got','glob','minimatch','file-type')) {
+            if ($output -notcontains "SECURITY_BACKPORT_ALREADY_APPLIED $pkg") { throw "Missing idempotence evidence: $pkg" }
+          }
+          npm --prefix sdk/node/datastack install --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'SDK install failed' }
+          npm --prefix sdk/node/datastack run build
+          if ($LASTEXITCODE -ne 0) { throw 'SDK compilation failed' }
+      - name: FF01 native Windows File Manager CRUD and ZIP acceptance
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npx.cmd --yes tsx@4.20.6 --test tests/files-manager.test.ts
+          if ($LASTEXITCODE -ne 0) { throw 'FF01 Windows Files Manager regression failed' }
+
+      - name: Windows Python exact 14-test regression
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m venv "$env:RUNNER_TEMP/fa02-venv"
+          if ($LASTEXITCODE -ne 0) { throw 'venv failed' }
+          $py = "$env:RUNNER_TEMP/fa02-venv/Scripts/python.exe"
+          & $py -m pip install --disable-pip-version-check -e ./sdk/python/datastack -e ./sdk-python
+          if ($LASTEXITCODE -ne 0) { throw 'Python SDK install failed' }
+          & $py -m compileall -q ./sdk/python/datastack ./sdk-python
+          if ($LASTEXITCODE -ne 0) { throw 'Python compile failed' }
+          cmd /c "$py -m unittest discover -s tests -p *_test.py -v 2>&1" | Tee-Object -FilePath "$env:RUNNER_TEMP/fa02-python.log"
+          if ($LASTEXITCODE -ne 0) { throw 'Python tests failed' }
+          if (!(Select-String -Quiet -Path "$env:RUNNER_TEMP/fa02-python.log" -Pattern '^Ran 14 tests in ')) { throw 'Expected exactly 14 tests' }
+          if (!(Select-String -Quiet -Path "$env:RUNNER_TEMP/fa02-python.log" -Pattern '^OK$')) { throw 'Missing Python success' }
+  security-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify immutable candidate
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse '4959b69bb25b46a16509bfc4755d13bad87347a9^{tree}')" = "37bffae18e2abb6d66a1ae7e1cc6599b48593ee1"
+          git merge-base --is-ancestor 4959b69bb25b46a16509bfc4755d13bad87347a9 HEAD
+          echo "FA02_SOURCE $(git rev-parse HEAD) $(git rev-parse 'HEAD^{tree}')"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: CI-08 read-only full and runtime npm advisory inventory
+        run: |
+          set -eu
+          if npm audit --json > /tmp/datastack-audit-full.json; then :; else test "$?" -eq 1; fi
+          if npm audit --omit=dev --json > /tmp/datastack-audit-runtime.json; then :; else test "$?" -eq 1; fi
+          node <<'NODE'
+          const fs = require("node:fs");
+          for (const scope of ["full", "runtime"]) {
+            const audit = JSON.parse(fs.readFileSync("/tmp/datastack-audit-" + scope + ".json", "utf8"));
+            if (!audit.metadata || !audit.metadata.vulnerabilities || !audit.vulnerabilities) {
+              throw Error("Incomplete npm audit response for " + scope);
+            }
+            console.log("AUDIT_COUNTS " + scope + " " + JSON.stringify(audit.metadata.vulnerabilities));
+            for (const [name, item] of Object.entries(audit.vulnerabilities)) {
+              const advisories = (item.via || []).filter(v => typeof v === "object").map(v => ({
+                id: v.source, url: v.url, range: v.range, severity: v.severity
+              }));
+              console.log("AUDIT_PACKAGE " + scope + " " + JSON.stringify({
+                package: name, severity: item.severity, direct: item.isDirect,
+                range: item.range, via: advisories,
+                viaPackages: (item.via || []).filter(v => typeof v === "string"),
+                fixAvailable: item.fixAvailable
+              }));
+            }
+            if (scope === "runtime") {
+              const counts = audit.metadata.vulnerabilities;
+              if (!Number.isInteger(counts.high) || !Number.isInteger(counts.critical)) {
+                throw Error("Incomplete runtime npm advisory severity counts");
+              }
+              if (counts.high > 0 || counts.critical > 0) {
+                throw Error("DATASTACK_RUNTIME_SECURITY_GATE_FAILED high=" + counts.high + " critical=" + counts.critical);
+              }
+              console.log("DATASTACK_RUNTIME_SECURITY_HIGH_CRITICAL_ZERO");
+            }
+          }
+          NODE
+          git diff --exit-code -- package.json package-lock.json
+          echo DATASTACK_SECURITY_TRIAGE_INVENTORY_PASS
+      - name: Reject unmitigated selector parser advisory and new high/critical findings
+        run: |
+          node <<'NODE'
+          const fs=require('node:fs');
+          for(const scope of ['full','runtime']) {
+            const a=JSON.parse(fs.readFileSync('/tmp/datastack-audit-'+scope+'.json'));
+            const counts=a.metadata.vulnerabilities;
+            if(counts.high||counts.critical) throw Error('High/critical '+scope);
+            for(const v of Object.values(a.vulnerabilities)) {
+              if((v.via||[]).some(x=>typeof x==='object'&&String(x.url).includes('GHSA-rj75-hqrm-r3gf'))) throw Error('Selector parser advisory remains');
+            }
+          }
+          console.log('FA02_SELECTOR_ADVISORY_ABSENT');
+          NODE
+  docker-acceptance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify immutable candidate
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse '4959b69bb25b46a16509bfc4755d13bad87347a9^{tree}')" = "37bffae18e2abb6d66a1ae7e1cc6599b48593ee1"
+          git merge-base --is-ancestor 4959b69bb25b46a16509bfc4755d13bad87347a9 HEAD
+          echo "FA02_SOURCE $(git rev-parse HEAD) $(git rev-parse 'HEAD^{tree}')"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Disposable isolated Docker runtime and recovery
+        env:
+          FA02_EVIDENCE: ${{ runner.temp }}/fa02-docker-evidence.txt
+        run: bash scripts/testing/fa02-docker-acceptance.sh
+      - name: Upload sanitized acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fa02-docker-evidence
+          path: ${{ runner.temp }}/fa02-docker-evidence.txt
+          if-no-files-found: error
+          retention-days: 14
+  final-gate:
+    if: always()
+    runs-on: ubuntu-24.04
+    needs: [node-regression, quality-build, python-linux, windows-compatibility, security-audit, docker-acceptance]
+    steps:
+      - name: Require all mandatory CI jobs
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          node -e 'const n=JSON.parse(process.env.RESULTS);if(Object.keys(n).length!==6||Object.values(n).some(j=>j.result!=="success"))process.exit(1);console.log("FA02_ALL_CI_JOBS_SUCCESS; residual risk and release approval remain separate")'

@@ -375,6 +375,10 @@ test("R3-Phase-01 [BUG-10]: Brute-force 429 admin login lockout dispatches ADMIN
   const email = `lockout_probe_${Date.now()}@datastack.dev`;
   const testIp = "198.51.100.42";
   const dispatchedBodies: Array<Record<string, unknown>> = [];
+  let resolveWebhook: (() => void) | undefined;
+  const webhookDelivered = new Promise<void>((resolve) => {
+    resolveWebhook = resolve;
+  });
 
   try {
     clearWebhookCooldownCacheForTests();
@@ -393,6 +397,7 @@ test("R3-Phase-01 [BUG-10]: Brute-force 429 admin login lockout dispatches ADMIN
           unknown
         >;
         dispatchedBodies.push(parsed);
+        resolveWebhook?.();
         return new Response("ok", { status: 200 });
       }
       return new Response("ok", { status: 200 });
@@ -414,7 +419,20 @@ test("R3-Phase-01 [BUG-10]: Brute-force 429 admin login lockout dispatches ADMIN
     }
 
     assert.equal(lastStatus, 429);
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    let deliveryTimeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        webhookDelivered,
+        new Promise<never>((_, reject) => {
+          deliveryTimeout = setTimeout(
+            () => reject(new Error("Lockout webhook dispatch exceeded 5 seconds")),
+            5_000,
+          );
+        }),
+      ]);
+    } finally {
+      if (deliveryTimeout) clearTimeout(deliveryTimeout);
+    }
 
     assert.ok(
       dispatchedBodies.length >= 1,

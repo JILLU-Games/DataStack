@@ -1,0 +1,16 @@
+diff --git a/node_modules/got/dist/source/request-as-event-emitter.js b/node_modules/got/dist/source/request-as-event-emitter.js
+--- a/node_modules/got/dist/source/request-as-event-emitter.js
++++ b/node_modules/got/dist/source/request-as-event-emitter.js
+@@ -103,7 +103,11 @@
+                     }
+                     // Handles invalid URLs. See https://github.com/sindresorhus/got/issues/604
+                     const redirectBuffer = Buffer.from(typedResponse.headers.location, 'binary').toString();
+-                    const redirectUrl = new url_1.URL(redirectBuffer, options.url);
++                    const redirectUrl = new url_1.URL(redirectBuffer, options.url);
++                    if (options.url.protocol !== 'unix:' && options.url.hostname !== 'unix' &&
++                        (redirectUrl.protocol === 'unix:' || redirectUrl.hostname === 'unix')) {
++                        throw new errors_1.RequestError(new Error('Cannot redirect to UNIX socket'), options);
++                    }
+                     // Redirecting to a different site, clear cookies.
+                     if (redirectUrl.hostname !== options.url.hostname && Reflect.has(options.headers, 'cookie')) {
+                         delete options.headers.cookie;
