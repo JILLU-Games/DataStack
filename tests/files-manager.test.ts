@@ -310,3 +310,93 @@ test('FM-REQ-07..09: proxy routing, SW bypass, Sidebar nav, and /vcon/files work
   assert.ok(workspace.includes('files-manager-offline'));
   assert.ok(workspace.includes('files-manager-iframe'));
 });
+
+test('SEC-FA02-GOT: HTTP redirects must not pivot into UNIX sockets', async () => {
+  const mod = require('got');
+  const got = mod.default || mod;
+  const server = http.createServer((_req, res) => {
+    res.writeHead(302, { Location: 'unix:/var/run/docker.sock:/containers/json' });
+    res.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const addr = server.address();
+    assert.ok(addr && typeof addr !== 'string');
+    await assert.rejects(
+      () => got(`http://127.0.0.1:${addr.port}/redirect`),
+      /Cannot redirect to UNIX socket/,
+    );
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('SEC-FA02-GLOB: abort stops further async directory traversal', async () => {
+  const globModule = require('glob');
+  const glob = globModule.glob || globModule;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'datastack-fa02-glob-'));
+  for (const name of ['a', 'a/x', 'a/y', 'b', 'b/x', 'b/y']) {
+    fs.mkdirSync(path.join(root, name), { recursive: true });
+  }
+  const controller = new AbortController();
+  const reason = new Error('probe-abort');
+  let calls = 0;
+  const countedFs = {
+    ...fs,
+    readdir: (...args: unknown[]) => {
+      calls += 1;
+      if (calls === 1) controller.abort(reason);
+      return (fs.readdir as (...a: unknown[]) => unknown)(...args);
+    },
+  };
+  try {
+    await assert.rejects(
+      () => glob('**', { cwd: root, fs: countedFs, signal: controller.signal }),
+      /probe-abort/,
+    );
+    const atReject = calls;
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    assert.equal(calls, atReject, 'Aborted glob walk must stop reading directories');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('SEC-FA02-MINIMATCH: bound globparts growth and large-set deduplication', () => {
+  const bases = [
+    'glob/node_modules/minimatch',
+    'onezip/node_modules/glob/node_modules/minimatch',
+  ];
+  for (const base of bases) {
+    const { Minimatch } = require(path.join(process.cwd(), 'node_modules', base));
+    const adversarial = Array(30).fill('**/../a/b').join('/');
+    const limited = new Minimatch(adversarial, {
+      optimizationLevel: 2,
+      braceExpandMax: 64,
+    });
+    assert.ok(limited.set.length <= 64, `${base}: expansion escaped configured bound`);
+    const large = new Minimatch('{x,*}/{0..999}', { optimizationLevel: 2 });
+    assert.equal(large.match('y/999'), true);
+    assert.equal(large.match('.y/5'), false);
+  }
+});
+
+test('SEC-FA02-FILETYPE: malformed ASF zero-size subheaders terminate', async () => {
+  const buffer = Buffer.from(
+    '3026b2758e66cf11a6d9000000000000000000000000000000000000000000000000000000000000000000000000000000000000',
+    'hex',
+  );
+  for (const parent of ['restbox', 'join-io']) {
+    const mod = require(path.join(
+      process.cwd(),
+      'node_modules',
+      parent,
+      'node_modules/ponse/node_modules/file-type',
+    ));
+    const fromBuffer = mod.fromBuffer || mod.fileTypeFromBuffer;
+    assert.equal(typeof fromBuffer, 'function');
+    const parsed = await fromBuffer(buffer);
+    assert.equal(parsed?.ext, 'asf');
+    assert.equal(parsed?.mime, 'application/vnd.ms-asf');
+  }
+});
