@@ -215,6 +215,44 @@ jobs:
           npm --version
           python --version
           git rev-parse HEAD
+      - name: FA02 byte-level Windows security patch diagnosis
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.fa02_windows_focus == 'true' }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm ci --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Diagnostic locked npm extraction failed' }
+          @'
+          const fs = require('node:fs');
+          const {spawnSync} = require('node:child_process');
+          const {createHash} = require('node:crypto');
+          const hash = b => createHash('sha256').update(b).digest('hex');
+          const count = b => (b.toString('utf8').match(/\r\n/g) || []).length;
+          const git = (args,input) => spawnSync('git',args,{input});
+          const config = git(['config','--show-origin','--get','core.autocrlf']);
+          console.log('FA02_GIT_AUTOCRLF '+config.stdout.toString().trim());
+          let mismatch = false;
+          for (const pkg of ['got','glob','minimatch','file-type']) {
+            const path = 'patches/cloudcmd-'+pkg+'-security.patch';
+            const raw = fs.readFileSync(path);
+            const blob = git(['show','HEAD:'+path]);
+            if (blob.status !== 0) throw Error('FA02_GIT_BLOB_UNAVAILABLE '+pkg);
+            const normalized = Buffer.from(raw.toString('utf8').replace(/\r\n/g,'\n'));
+            const targets = normalized.toString('utf8').split('\n').filter(x=>x.startsWith('+++ b/')).map(x=>x.slice(6));
+            for (const target of targets) {
+              if (!target.startsWith('node_modules/')) throw Error('FA02_UNEXPECTED_TARGET');
+              const bytes = fs.readFileSync(target);
+              console.log('FA02_TARGET '+JSON.stringify({pkg,target,sha256:hash(bytes),crlf:count(bytes),bytes:bytes.length}));
+            }
+            const rawCheck = git(['-c','core.autocrlf=false','apply','--check',path]);
+            const lfCheck = git(['-c','core.autocrlf=false','apply','--check','-'],normalized);
+            const blobCheck = git(['-c','core.autocrlf=false','apply','--check','-'],blob.stdout);
+            console.log('FA02_PATCH_BYTES '+JSON.stringify({pkg,rawSha256:hash(raw),blobSha256:hash(blob.stdout),normalizedSha256:hash(normalized),rawCrlf:count(raw),blobCrlf:count(blob.stdout),normalizedEqualsBlob:normalized.equals(blob.stdout),rawStatus:rawCheck.status,lfStatus:lfCheck.status,blobStatus:blobCheck.status,rawError:rawCheck.stderr.toString().trim(),lfError:lfCheck.stderr.toString().trim()}));
+            if (rawCheck.status !== 0 || lfCheck.status !== 0 || blobCheck.status !== 0) mismatch=true;
+          }
+          if (mismatch) process.exitCode=1;
+          '@ | node
+          if ($LASTEXITCODE -ne 0) { throw 'FA02 byte-level mismatch reproduced; inspect diagnostics before correction' }
       - name: Install dependencies and compile Node SDK
         shell: powershell
         run: |
