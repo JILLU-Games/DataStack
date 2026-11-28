@@ -40,7 +40,7 @@ permissions:
 
 jobs:
   node-regression:
-    if: ${{ (github.event_name != 'pull_request_target' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.quality_only != 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.python_only != 'true')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.fa02_node_focus != 'true') }}
+    if: ${{ (github.event_name != 'pull_request_target' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.quality_only != 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.python_only != 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
