@@ -55,9 +55,11 @@ jobs:
         run: |
           npm --prefix sdk/node/datastack install --no-audit --no-fund
           npm --prefix sdk/node/datastack run build
-      - name: Focused lockout webhook regression
+      - name: Focused lockout webhook and Cloudcmd security regressions
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.fa02_node_focus == 'true' }}
-        run: timeout --signal=TERM --kill-after=5s 70s npx --yes tsx@4.20.6 --test tests/r3-phase01-security-vault-webhooks.test.ts
+        run: |
+          timeout --signal=TERM --kill-after=5s 70s npx --yes tsx@4.20.6 --test tests/r3-phase01-security-vault-webhooks.test.ts
+          timeout --signal=TERM --kill-after=5s 70s npx --yes tsx@4.20.6 --test tests/files-manager.test.ts
       - name: Run all TypeScript regression suites with bounded isolation
         if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.fa02_node_focus != 'true' }}
         run: |
