@@ -64,7 +64,9 @@ test('FM-REQ-04: authenticateFilesRequest fails closed on missing prod secret an
 });
 
 test('FM-REQ-01..06: live CloudCmd mount enforces auth, DB revocation, RBAC, CSRF, *.lock & traversal guards, and full file CRUD + ZIP/UNZIP', async () => {
-  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'datastack-fm-e2e-'));
+  // Cloudcmd requires a same-drive storage root on Windows. Hosted runners may put TEMP on another drive.
+  const fixtureParent = process.platform === 'win32' ? process.cwd() : os.tmpdir();
+  const tmpRoot = fs.mkdtempSync(path.join(fixtureParent, 'datastack-fm-e2e-'));
   fs.mkdirSync(path.join(tmpRoot, 'client-alpha'), { recursive: true });
   fs.writeFileSync(
     path.join(tmpRoot, 'client-alpha', '2026-11-20.csv'),
