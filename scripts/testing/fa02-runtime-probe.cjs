@@ -1,5 +1,4 @@
 /* Standalone synthetic integration probe, executed only inside the run-owned ingestion service. */
-/* eslint-disable @typescript-eslint/no-require-imports -- Native CommonJS probe inside the runtime image. */
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
