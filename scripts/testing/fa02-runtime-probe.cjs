@@ -132,7 +132,12 @@ async function queued() {
 }
 async function restarted() {
   await login();
+  await redis.connect();
+  const pending=await redis.lrange(queue,0,-1);
+  check(pending.some(x=>{try{return JSON.parse(x).eventId===ids[2];}catch{return false;}}),'Restarted export did not receive the ACKed queue fixture');
   await verifyRows(3);
+  check(await redis.llen(queue)===0,'Export did not drain the recovered Redis queue');
+  await redis.set('datastack:fa02:volume-fixture','fa02-persisted-redis-marker');
   await marker();
   console.log('FA02_REDIS_RESTART_RECOVERY_PASS');
 }
@@ -155,6 +160,11 @@ async function recovery() {
   const pending=[...records.map(r=>JSON.stringify(r)),JSON.stringify({clientId,eventId:ids[3],timestamp:state.ts,payload:JSON.stringify({text})}),'malformed-fixture-json'];
   check(await redis.llen(queue)===0,'Unexpected pre-existing fixture queue');
   await redis.rpush(queue,...pending);
+  const corruptExport=await request('/api/export?format=json&clientId='+clientId+'&flush=true',{authenticated:true,status:500});
+  const corruptError=await corruptExport.json();
+  check(/incorrect header check|unexpected end of file|invalid (?:distance|block|stored|code|gzip)/i.test(String(corruptError.error)),'Web export did not report expected GZIP failure');
+  assert.deepEqual(await redis.lrange(queue,0,-1),pending,'Web export trimmed queue on corrupt partition');
+  console.log('FA02_WEB_CORRUPTION_QUEUE_PRESERVED');
   await request('/internal/flush',{method:'POST',internal:true,body:{waitMs:5000,throwOnLockTimeout:true},status:500});
   assert.deepEqual(await redis.lrange(queue,0,-1),pending,'Corrupt partition discarded queued records');
   fs.unlinkSync(path.join(fixtureRoot,badName));
@@ -172,7 +182,7 @@ async function main() {
   else if(stage==='queued') await queued();
   else if(stage==='restarted') await restarted();
   else if(stage==='recovery') await recovery();
-  else if(stage==='verify') {await login();await request('/api/clients',{authenticated:true});await verifyRows(4,false);await marker();console.log('FA02_PERSISTED_FIXTURE_VERIFIED');}
+  else if(stage==='verify') {await login();await request('/api/clients',{authenticated:true});await verifyRows(4,false);await marker();await redis.connect();assert.equal(await redis.get('datastack:fa02:volume-fixture'),'fa02-persisted-redis-marker');console.log('FA02_PERSISTED_FIXTURE_VERIFIED');}
   else throw new Error('Invalid fixture stage');
 }
 main().catch(e=>{console.error('FA02_PROBE_FAILED '+(e?.message||'unknown'));process.exitCode=1;}).finally(()=>redis.disconnect());

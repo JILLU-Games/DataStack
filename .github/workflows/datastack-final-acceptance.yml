@@ -15,7 +15,6 @@ env:
   NEXT_TELEMETRY_DISABLED: '1'
 jobs:
   node-regression:
-    if: ${{ !contains(github.event.head_commit.message, '[fa02-rca]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -129,7 +128,6 @@ jobs:
           test "$failed" -eq 0
 
   quality-build:
-    if: ${{ !contains(github.event.head_commit.message, '[fa02-rca]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -202,7 +200,6 @@ jobs:
           test -f .next/standalone/server.js
           git diff --exit-code -- package.json package-lock.json
   python-linux:
-    if: ${{ !contains(github.event.head_commit.message, '[fa02-rca]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -231,7 +228,6 @@ jobs:
           grep -Eq '^Ran 14 tests in ' "$RUNNER_TEMP/fa02-python.log"
           grep -Eq '^OK$' "$RUNNER_TEMP/fa02-python.log"
   windows-compatibility:
-    if: ${{ !contains(github.event.head_commit.message, '[fa02-rca]') }}
     runs-on: windows-2022
     timeout-minutes: 35
     steps:
@@ -300,7 +296,6 @@ jobs:
           if (!(Select-String -Quiet -Path "$env:RUNNER_TEMP/fa02-python.log" -Pattern '^Ran 14 tests in ')) { throw 'Expected exactly 14 tests' }
           if (!(Select-String -Quiet -Path "$env:RUNNER_TEMP/fa02-python.log" -Pattern '^OK$')) { throw 'Missing Python success' }
   security-audit:
-    if: ${{ !contains(github.event.head_commit.message, '[fa02-rca]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -391,7 +386,6 @@ jobs:
       - name: Disposable isolated Docker runtime and recovery
         env:
           FA02_EVIDENCE: ${{ runner.temp }}/fa02-docker-evidence.txt
-          FA02_RCA_ONLY: ${{ contains(github.event.head_commit.message, '[fa02-rca]') && '1' || '0' }}
         run: bash scripts/testing/fa02-docker-acceptance.sh
       - name: Upload sanitized acceptance evidence
         if: always()
@@ -402,7 +396,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   final-gate:
-    if: ${{ always() && !contains(github.event.head_commit.message, '[fa02-rca]') }}
+    if: always()
     runs-on: ubuntu-24.04
     needs: [node-regression, quality-build, python-linux, windows-compatibility, security-audit, docker-acceptance]
     steps:

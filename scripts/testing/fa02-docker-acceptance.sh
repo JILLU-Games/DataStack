@@ -152,92 +152,6 @@ for i in $(seq 1 30); do if dc exec -T redis redis-cli ping | grep -qx PONG; the
 dc exec -T redis redis-cli --raw LRANGE datastack:buffer:events 0 -1 | grep -Fq '"eventId":"fa02-restart"'
 mark FA02_REDIS_AOF_RESTART_QUEUE_PASS
 health
-# Temporary diagnostic path: original runtime source, actual restarted export, loopback inspector.
-if [[ "${FA02_RCA_ONLY:-0}" == 1 ]]; then
-  mark FA02_RCA_ONLY_NOT_RELEASE_ACCEPTANCE
-  dc exec -T -u node web sh -c 'kill -USR1 1'
-  timeout 75s docker compose --project-name "$project" -f "$composefile" -f "$override" exec -T -u node web node - > "$temp/constructor-rca.log" 2>&1 <<'NODE' &
-const assert = require('node:assert/strict');
-const crypto = require('node:crypto');
-const delay = ms => new Promise(r=>setTimeout(r,ms));
-async function main(){
-  let target;
-  for(let i=0;i<50;i++){
-    try {const x=await fetch('http://127.0.0.1:9229/json/list',{signal:AbortSignal.timeout(500)});target=(await x.json())[0];if(target?.webSocketDebuggerUrl)break;}catch{}
-    await delay(200);
-  }
-  assert.ok(target?.webSocketDebuggerUrl);
-  const url=new URL(target.webSocketDebuggerUrl);
-  assert.equal(url.hostname,'127.0.0.1');
-  const ws=new WebSocket(url);
-  const pending=new Map(), scripts=new Map();
-  let counter=0, captured=false;
-  function send(method,params={}){
-    const id=++counter;
-    return new Promise((resolve,reject)=>{
-      pending.set(id,{resolve,reject});ws.send(JSON.stringify({id,method,params}));
-    });
-  }
-  let finish;
-  const finished=new Promise(resolve=>{finish=resolve;});
-  ws.addEventListener('message',async e=>{
-    const d=JSON.parse(e.data);
-    if(d.id){const p=pending.get(d.id);pending.delete(d.id);if(d.error)p?.reject(new Error(d.error.message));else p?.resolve(d.result);return;}
-    if(d.method==='Debugger.scriptParsed'){scripts.set(d.params.scriptId,d.params.url);return;}
-    if(d.method!=='Debugger.paused')return;
-    let done=false;
-    try {
-      const description=String(d.params.data?.description||'');
-      if(!captured && /is not a constructor/.test(description)){
-        captured=true;
-        const f=d.params.callFrames[0];
-        const loc=f.location;
-        const source=(await send('Debugger.getScriptSource',{scriptId:loc.scriptId})).scriptSource;
-        const line=source.split('\n')[loc.lineNumber];
-        const c=loc.columnNumber;
-        const snippet=line.slice(Math.max(0,c-1100),c+300);
-        const near=line.slice(Math.max(0,c-50),c+80);
-        const match=near.match(/\bnew ([A-Za-z_$][\w$]*)\s*\(/);
-        let constructorType='unknown';
-        if(match){
-          const v=await send('Debugger.evaluateOnCallFrame',{callFrameId:f.callFrameId,expression:'typeof '+match[1],returnByValue:true,throwOnSideEffect:true,silent:true});
-          constructorType=v.result?.value||'unknown';
-        }
-        console.log('FA02_CONSTRUCTOR_RCA '+JSON.stringify({error:description.split('\n')[0].slice(0,120),function:f.functionName,script:scripts.get(loc.scriptId)||f.url,line:loc.lineNumber+1,column:c+1,constructor:match?.[1],constructorType,sourceHash:crypto.createHash('sha256').update(source).digest('hex'),near,snippet,frames:d.params.callFrames.slice(0,4).map(x=>({function:x.functionName,script:scripts.get(x.location.scriptId)||x.url,line:x.location.lineNumber+1,column:x.location.columnNumber+1}))}));
-        done=true;
-      }
-    } catch(err){console.log('FA02_RCA_INSPECTOR_ERROR '+String(err.message).slice(0,200));}
-    finally {await send('Debugger.resume').catch(()=>{});if(done)finish();}
-  });
-  await new Promise((resolve,reject)=>{ws.addEventListener('open',resolve,{once:true});ws.addEventListener('error',reject,{once:true});});
-  await send('Debugger.enable');await send('Debugger.setPauseOnExceptions',{state:'all'});
-  console.log('FA02_RCA_INSPECTOR_READY');
-  await Promise.race([finished,delay(50000).then(()=>{throw Error('No constructor exception captured');})]);
-  await send('Debugger.setPauseOnExceptions',{state:'none'});
-  ws.close();
-  process.exitCode=0;
-  // Exit immediately once evidence and debugger resume are complete.
-  process.exit(0);
-}
-main().catch(e=>{console.error('FA02_RCA_ERROR '+e.message);process.exit(1);});
-NODE
-  inspector_pid=$!
-  for i in $(seq 1 60); do
-    if grep -q '^FA02_RCA_INSPECTOR_READY$' "$temp/constructor-rca.log"; then break; fi
-    if ! kill -0 "$inspector_pid" 2>/dev/null; then cat "$temp/constructor-rca.log"; exit 1; fi
-    sleep 0.25
-  done
-  grep -q '^FA02_RCA_INSPECTOR_READY$' "$temp/constructor-rca.log"
-  if probe restarted; then
-    mark FA02_RCA_UNEXPECTED_EXPORT_SUCCESS
-    exit 1
-  fi
-  wait "$inspector_pid"
-  cat "$temp/constructor-rca.log" | tee -a "$evidence"
-  grep -q '^FA02_CONSTRUCTOR_RCA ' "$temp/constructor-rca.log"
-  mark FA02_RCA_EXPECTED_FAILURE_CAPTURED
-  exit 0
-fi
 probe restarted
 probe recovery
 # Quiesce fixture writers, back up all PostgreSQL schema and data, restore to another disposable DB.
@@ -246,6 +160,10 @@ dc exec -T postgres pg_dump -U datastack -d "$SERVICE_HEX_32_DATABASENAME" -Fc >
 [[ -s "$temp/fixture.dump" ]]
 dc exec -T postgres createdb -U datastack fa02_restore
 dc exec -T postgres pg_restore --exit-on-error --no-owner -U datastack -d fa02_restore < "$temp/fixture.dump"
+for db in "$SERVICE_HEX_32_DATABASENAME" fa02_restore; do
+  dc exec -T postgres pg_dump -U datastack -d "$db" --schema-only --no-owner --no-privileges | sed '/^\\restrict /d; /^\\unrestrict /d' > "$temp/$db.schema"
+done
+cmp "$temp/$SERVICE_HEX_32_DATABASENAME.schema" "$temp/fa02_restore.schema"
 cat > "$temp/fingerprint.sql" <<'SQL'
 SELECT format('SELECT %L, count(*), md5(coalesce(string_agg(row_to_json(t)::text, '''' ORDER BY row_to_json(t)::text), '''')) FROM %I.%I t;', table_name,table_schema,table_name)
 FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name \gexec

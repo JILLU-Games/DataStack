@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { Writable } from 'node:stream';
 import Redis from 'ioredis';
 import { CSVStorageManager, DataEvent } from '../Storage/csvStorage';
 
@@ -659,7 +660,6 @@ export class DataBufferEngine {
         const path = await import('node:path');
         const zlib = await import('node:zlib');
         const { pipeline } = await import('node:stream/promises');
-        const { Writable } = await import('node:stream');
         const { parse } = await import('csv-parse');
         const groups = new Map<string, {
           clientId: string; date: string; ids: Set<string>;
