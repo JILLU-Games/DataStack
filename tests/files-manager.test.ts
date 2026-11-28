@@ -315,7 +315,7 @@ test('SEC-FA02-GOT: HTTP redirects must not pivot into UNIX sockets', async () =
   const mod = require('got');
   const got = mod.default || mod;
   const server = http.createServer((_req, res) => {
-    res.writeHead(302, { Location: 'unix:/var/run/docker.sock:/containers/json' });
+    res.writeHead(302, { Location: `unix:/tmp/datastack-fa02-${process.pid}-${Date.now()}.sock:/probe` });
     res.end();
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
