@@ -33,6 +33,11 @@ on:
         required: false
         type: boolean
         default: false
+      fa02_windows_focus:
+        description: Run only Windows npm patch applicability, SDK build, and native File Manager/security tests
+        required: false
+        type: boolean
+        default: false
 
 # CI needs repository read only; it never publishes artifacts or edits remotes.
 permissions:
@@ -40,7 +45,7 @@ permissions:
 
 jobs:
   node-regression:
-    if: ${{ (github.event_name != 'pull_request_target' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.quality_only != 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.python_only != 'true')) }}
+    if: ${{ (github.event_name != 'pull_request_target' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.quality_only != 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.python_only != 'true')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.fa02_windows_focus != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -79,7 +84,7 @@ jobs:
           test "$failed" -eq 0
 
   python-regression:
-    if: ${{ (github.event_name != 'pull_request_target' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.p01_only != 'true') && (github.event_name != 'workflow_dispatch' || github.event.inputs.fa02_node_focus != 'true') }}
+    if: ${{ (github.event_name != 'pull_request_target' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.p01_only != 'true') && (github.event_name != 'workflow_dispatch' || github.event.inputs.fa02_node_focus != 'true') && (github.event_name != 'workflow_dispatch' || github.event.inputs.fa02_windows_focus != 'true') }}
     runs-on: ubuntu-latest
     container: node:22-bookworm-slim
     timeout-minutes: 20
@@ -112,7 +117,7 @@ jobs:
           echo DATASTACK_PYTHON_14_OF_14_PASS
 
   quality:
-    if: ${{ (github.event_name != 'pull_request_target' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.python_only != 'true') && (github.event_name != 'workflow_dispatch' || github.event.inputs.fa02_node_focus != 'true') }}
+    if: ${{ (github.event_name != 'pull_request_target' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.python_only != 'true') && (github.event_name != 'workflow_dispatch' || github.event.inputs.fa02_node_focus != 'true') && (github.event_name != 'workflow_dispatch' || github.event.inputs.fa02_windows_focus != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -129,7 +134,7 @@ jobs:
         run: npm run lint
 
   production-build:
-    if: ${{ (github.event_name != 'pull_request_target' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.quality_only != 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.python_only != 'true')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.fa02_node_focus != 'true') }}
+    if: ${{ (github.event_name != 'pull_request_target' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.quality_only != 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.python_only != 'true')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.fa02_node_focus != 'true') && (github.event_name != 'workflow_dispatch' || github.event.inputs.fa02_windows_focus != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -147,7 +152,7 @@ jobs:
           test -f .next/standalone/server.js
 
   docker-image-build:
-    if: ${{ (github.event_name != 'pull_request_target' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.p01_only != 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.python_only != 'true')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.fa02_node_focus != 'true') }}
+    if: ${{ (github.event_name != 'pull_request_target' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.p01_only != 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.python_only != 'true')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.fa02_node_focus != 'true') && (github.event_name != 'workflow_dispatch' || github.event.inputs.fa02_windows_focus != 'true') }}
     runs-on: ubuntu-latest
     container: node:22-alpine
     timeout-minutes: 45
@@ -229,7 +234,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'FF01 Windows Files Manager regression failed' }
 
   security-audit:
-    if: ${{ (github.event_name != 'pull_request_target' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.p01_only != 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.python_only != 'true')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.fa02_node_focus != 'true') }}
+    if: ${{ (github.event_name != 'pull_request_target' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.p01_only != 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.python_only != 'true')) && (github.event_name != 'workflow_dispatch' || github.event.inputs.fa02_node_focus != 'true') && (github.event_name != 'workflow_dispatch' || github.event.inputs.fa02_windows_focus != 'true') }}
     runs-on: ubuntu-latest
     container: node:22-alpine
     timeout-minutes: 15
